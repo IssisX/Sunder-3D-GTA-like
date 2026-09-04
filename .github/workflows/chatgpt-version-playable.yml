@@ -22,8 +22,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install locked dependencies
-        run: npm ci
+      - name: Install project dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       - name: Typecheck current source
         run: npm run typecheck
