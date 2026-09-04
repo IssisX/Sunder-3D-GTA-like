@@ -15,6 +15,7 @@ import {
   sampleMechanicalState,
   type MechanicalState,
 } from "./mechanical-state";
+import { bodyTaskTargets } from "./body-task-targets";
 
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
@@ -83,6 +84,11 @@ export class ActiveBodyControl {
     if (modeGain <= 0 || !a.alive) return;
 
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
+
+    // Base anatomical targets are produced by body-model. Locomotion/actions
+    // may only alter that desired state through this pre-solve task buffer.
+    // No task producer receives authority to move solved rig nodes directly.
+    bodyTaskTargets.apply(a, rig);
     sampleMechanicalState(w, a, rig, h, this.state);
 
     const fatigueAuthority = clamp01(1 - a.fatigue * 0.62);
