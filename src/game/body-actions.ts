@@ -10,7 +10,6 @@ import {
 
 type GrabPhase =
   | "idle"
-  | "anticipate"
   | "reach"
   | "hold"
   | "release"
@@ -25,18 +24,21 @@ interface GrabMotion {
   lastGrabbedId: number;
   recoverFrom: RecoverFrom;
   contactIssued: boolean;
+  releaseQueued: boolean;
 }
 
-const ANTICIPATE_T = 0.1;
-const REACH_T = 0.16;
-const RELEASE_T = 0.15;
-const RECOVER_T = 0.18;
+// Input response begins immediately. The only delay before latch is the
+// visible physical travel of the hand itself.
+const REACH_T = 0.105;
+const CONTACT_T = 0.085;
+const RELEASE_T = 0.13;
+const RECOVER_T = 0.14;
 
-const ANTICIPATE = {
-  shoulder: [0.3, 1.3, -0.07] as Vec3,
-  elbow: [0.34, 1.08, -0.03] as Vec3,
-  hand: [0.27, 0.98, -0.12] as Vec3,
-  chestZ: -0.035,
+const START = {
+  shoulder: [0.27, 1.31, 0] as Vec3,
+  elbow: [0.36, 1.03, 0] as Vec3,
+  hand: [0.39, 0.77, 0] as Vec3,
+  chestZ: 0,
 };
 
 const CONTACT = {
@@ -82,6 +84,7 @@ function makeMotion(): GrabMotion {
     lastGrabbedId: 0,
     recoverFrom: "reach",
     contactIssued: false,
+    releaseQueued: false,
   };
 }
 
@@ -98,11 +101,9 @@ function setLocalNode(
   const scale = a.height / 1.72;
   const f = facing(a.yaw);
   const r = rightOf(a.yaw);
-  const tx =
-    a.x + r.x * lx * scale + f.x * lz * scale;
+  const tx = a.x + r.x * lx * scale + f.x * lz * scale;
   const ty = a.y + ly * scale;
-  const tz =
-    a.z + r.z * lx * scale + f.z * lz * scale;
+  const tz = a.z + r.z * lx * scale + f.z * lz * scale;
 
   rig.x[node] += (tx - rig.x[node]!) * strength;
   rig.y[node] += (ty - rig.y[node]!) * strength;
@@ -122,47 +123,29 @@ function applyPose(
   let shoulder: Vec3 = CONTACT.shoulder;
   let elbow: Vec3 = CONTACT.elbow;
   let hand: Vec3 = CONTACT.hand;
-  let chestZ: number = CONTACT.chestZ;
+  let chestZ = CONTACT.chestZ;
   let weight = 1;
   let support = 0;
 
-  if (phase === "anticipate") {
-    const q = smooth01(t / ANTICIPATE_T);
-    shoulder = [
-      mix(0.27, ANTICIPATE.shoulder[0], q),
-      mix(1.31, ANTICIPATE.shoulder[1], q),
-      mix(0, ANTICIPATE.shoulder[2], q),
-    ];
-    elbow = [
-      mix(0.36, ANTICIPATE.elbow[0], q),
-      mix(1.03, ANTICIPATE.elbow[1], q),
-      mix(0, ANTICIPATE.elbow[2], q),
-    ];
-    hand = [
-      mix(0.39, ANTICIPATE.hand[0], q),
-      mix(0.77, ANTICIPATE.hand[1], q),
-      mix(0, ANTICIPATE.hand[2], q),
-    ];
-    chestZ = ANTICIPATE.chestZ * q;
-    weight = q;
-  } else if (phase === "reach") {
+  if (phase === "reach") {
     const q = smooth01(t / REACH_T);
     shoulder = [
-      mix(ANTICIPATE.shoulder[0], CONTACT.shoulder[0], q),
-      mix(ANTICIPATE.shoulder[1], CONTACT.shoulder[1], q),
-      mix(ANTICIPATE.shoulder[2], CONTACT.shoulder[2], q),
+      mix(START.shoulder[0], CONTACT.shoulder[0], q),
+      mix(START.shoulder[1], CONTACT.shoulder[1], q),
+      mix(START.shoulder[2], CONTACT.shoulder[2], q),
     ];
     elbow = [
-      mix(ANTICIPATE.elbow[0], CONTACT.elbow[0], q),
-      mix(ANTICIPATE.elbow[1], CONTACT.elbow[1], q),
-      mix(ANTICIPATE.elbow[2], CONTACT.elbow[2], q),
+      mix(START.elbow[0], CONTACT.elbow[0], q),
+      mix(START.elbow[1], CONTACT.elbow[1], q),
+      mix(START.elbow[2], CONTACT.elbow[2], q),
     ];
     hand = [
-      mix(ANTICIPATE.hand[0], CONTACT.hand[0], q),
-      mix(ANTICIPATE.hand[1], CONTACT.hand[1], q),
-      mix(ANTICIPATE.hand[2], CONTACT.hand[2], q),
+      mix(START.hand[0], CONTACT.hand[0], q),
+      mix(START.hand[1], CONTACT.hand[1], q),
+      mix(START.hand[2], CONTACT.hand[2], q),
     ];
-    chestZ = mix(ANTICIPATE.chestZ, CONTACT.chestZ, q);
+    chestZ = mix(START.chestZ, CONTACT.chestZ, q);
+    weight = q;
     support = twoHand ? q * 0.82 : 0;
   } else if (phase === "hold") {
     const load = clamp(a.carry / 70, 0, 1);
@@ -199,12 +182,23 @@ function applyPose(
     support = twoHand ? (1 - q) * 0.55 : 0;
   } else if (phase === "recover") {
     const q = smooth01(t / RECOVER_T);
-    const from =
-      recoverFrom === "release" ? RELEASE : CONTACT;
-    shoulder = from.shoulder;
-    elbow = from.elbow;
-    hand = from.hand;
-    chestZ = from.chestZ;
+    const from = recoverFrom === "release" ? RELEASE : CONTACT;
+    shoulder = [
+      mix(from.shoulder[0], START.shoulder[0], q),
+      mix(from.shoulder[1], START.shoulder[1], q),
+      mix(from.shoulder[2], START.shoulder[2], q),
+    ];
+    elbow = [
+      mix(from.elbow[0], START.elbow[0], q),
+      mix(from.elbow[1], START.elbow[1], q),
+      mix(from.elbow[2], START.elbow[2], q),
+    ];
+    hand = [
+      mix(from.hand[0], START.hand[0], q),
+      mix(from.hand[1], START.hand[1], q),
+      mix(from.hand[2], START.hand[2], q),
+    ];
+    chestZ = mix(from.chestZ, START.chestZ, q);
     weight = 1 - q;
     support = twoHand ? weight * 0.45 : 0;
   }
@@ -236,7 +230,6 @@ function applyPose(
     hand[2],
     0.96 * weight,
   );
-
   setLocalNode(
     a,
     rig,
@@ -286,16 +279,7 @@ function advancePassive(
   if (motion.phase === "idle" || motion.phase === "hold") return;
   motion.t += dt;
 
-  if (
-    motion.phase === "anticipate" &&
-    motion.t >= ANTICIPATE_T
-  ) {
-    motion.phase = "reach";
-    motion.t = 0;
-  } else if (
-    motion.phase === "reach" &&
-    motion.t >= REACH_T
-  ) {
+  if (motion.phase === "reach" && motion.t >= REACH_T) {
     if (holding) {
       motion.phase = "hold";
       motion.t = 0;
@@ -329,8 +313,8 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
     this.playerGrabPressed ||= input.grabPressed;
     this.playerGrabReleased ||= input.grabReleased;
 
-    // The physical action layer owns the timing of these two edges.
-    // Keep hold state intact, but suppress the legacy instant latch/release.
+    // This layer owns only the contact timing. Visible motion starts on the
+    // original input edge; there is no hidden anticipation phase.
     input.grabPressed = false;
     input.grabReleased = false;
   }
@@ -350,9 +334,22 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
       motion.phase = "idle";
       motion.t = 0;
       motion.contactIssued = false;
+      motion.releaseQueued = false;
       this.playerGrabPressed = false;
       this.playerGrabReleased = false;
       return;
+    }
+
+    if (
+      this.playerGrabPressed &&
+      !p.grabbedId
+    ) {
+      this.playerGrabPressed = false;
+      motion.phase = "reach";
+      motion.t = 0;
+      motion.recoverFrom = "reach";
+      motion.contactIssued = false;
+      motion.releaseQueued = false;
     }
 
     if (this.playerGrabReleased) {
@@ -365,42 +362,34 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
         motion.t = 0;
         motion.recoverFrom = "release";
         motion.contactIssued = false;
-      } else if (
-        motion.phase === "anticipate" ||
-        motion.phase === "reach"
-      ) {
-        motion.phase = "recover";
-        motion.t = 0;
-        motion.recoverFrom = "reach";
-        motion.contactIssued = false;
+        motion.releaseQueued = false;
+      } else if (motion.phase === "reach") {
+        // Preserve a fast tap as a real grab attempt. The hand keeps moving
+        // toward contact, then releases immediately if something is caught.
+        motion.releaseQueued = true;
       }
     }
 
     if (
-      this.playerGrabPressed &&
-      !p.grabbedId &&
-      motion.phase === "idle"
+      motion.releaseQueued &&
+      motion.phase === "hold" &&
+      p.grabbedId
     ) {
-      this.playerGrabPressed = false;
-      motion.phase = "anticipate";
+      input.grabReleased = true;
+      motion.releaseQueued = false;
+      motion.phase = "release";
       motion.t = 0;
-      motion.recoverFrom = "reach";
+      motion.recoverFrom = "release";
       motion.contactIssued = false;
+      return;
     }
 
-    if (motion.phase === "anticipate") {
-      motion.t += dt;
-      if (motion.t >= ANTICIPATE_T) {
-        motion.phase = "reach";
-        motion.t = 0;
-      }
-    } else if (motion.phase === "reach") {
-      motion.t += dt;
+    if (motion.phase === "reach") {
+      motion.t = Math.min(REACH_T, motion.t + dt);
       if (
-        motion.t >= REACH_T &&
+        motion.t >= CONTACT_T &&
         !motion.contactIssued
       ) {
-        motion.t = REACH_T;
         motion.contactIssued = true;
         input.grabPressed = true;
       }
@@ -457,6 +446,7 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
         motion.phase = "idle";
         motion.t = 0;
         motion.contactIssued = false;
+        motion.releaseQueued = false;
       } else if (isPlayer) {
         if (
           motion.phase === "reach" &&
@@ -470,6 +460,7 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
             motion.phase = "recover";
             motion.t = 0;
             motion.recoverFrom = "reach";
+            motion.releaseQueued = false;
           }
         } else if (
           stoppedHolding &&
@@ -478,6 +469,7 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
           motion.phase = "release";
           motion.t = 0;
           motion.recoverFrom = "release";
+          motion.releaseQueued = false;
         }
       } else {
         if (
