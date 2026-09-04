@@ -66,15 +66,24 @@ function modeAuthority(mode: BodyMode) {
 /**
  * Active articulated controller.
  *
- * Desired body targets become bounded velocity corrections, not direct node
- * placement. Contact/constraints remain authoritative because the controller
- * only changes the Verlet velocity state (previous positions); collision and
- * joint solves run afterward and can reject the requested motion.
+ * Critical timing rule:
+ * - explicit locomotion/action tasks become bounded velocity impulses BEFORE
+ *   Verlet integration so their commanded velocity affects the current step;
+ * - base posture stabilization runs after passive integration and prepares the
+ *   next step without moving solved nodes directly.
+ *
+ * Contact and constraints remain authoritative in both cases.
  */
 export class ActiveBodyControl {
   private readonly state: MechanicalState = makeMechanicalState();
 
-  drive(
+  /**
+   * Consume explicit task-space commands before PhysicalBodies integrates.
+   * This fixes the old one-step actuation lag where an action impulse was stored
+   * in previous-position state only after the current position had already been
+   * advanced.
+   */
+  driveTasksPreIntegration(
     w: World,
     a: Actor,
     rig: BodyRig,
@@ -85,10 +94,6 @@ export class ActiveBodyControl {
     if (modeGain <= 0 || !a.alive) return;
 
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
-
-    // Base anatomical targets are produced by body-model. Locomotion/actions
-    // may only alter that desired state through this pre-solve task buffer.
-    bodyTaskTargets.apply(a, rig);
     sampleMechanicalState(w, a, rig, h, this.state);
 
     const fatigueAuthority = clamp01(1 - a.fatigue * 0.62);
@@ -96,10 +101,6 @@ export class ActiveBodyControl {
     const consciousAuthority = 0.08 + this.state.consciousness * 0.92;
     const disturbanceAuthority = 1 / (1 + this.state.disturbance * 0.72);
     const balanceAuthority = 0.42 + clamp01(a.balance) * 0.58;
-
-    // Ordinary controlled stance must not enter a positive-feedback collapse
-    // just because a foot briefly loses the support tolerance. Contact still
-    // limits what the body can actually accomplish after actuation.
     const groundedAuthority =
       this.state.supportCount > 0
         ? 0.68 + this.state.supportScore * 0.32
@@ -120,11 +121,12 @@ export class ActiveBodyControl {
       (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
 
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      const taskPriority = bodyTaskTargets.priorityFor(a, node);
+      if (taskPriority <= 0) continue;
+
+      const taskWeight = bodyTaskTargets.weightFor(a, node);
       const region = NODE_REGION[node]!;
       const integrity = regionIntegrity(a, region);
-      const taskPriority = bodyTaskTargets.priorityFor(a, node);
-      const taskWeight = bodyTaskTargets.weightFor(a, node);
-
       let authority = global * NODE_AUTHORITY[node]! * (0.22 + integrity * 0.78);
 
       if (
@@ -140,8 +142,6 @@ export class ActiveBodyControl {
         authority *= groundedAuthority;
       }
 
-      // The ground owns a planted foot. Motor authority remains finite there;
-      // high-priority task requests cannot simply drag a contact through space.
       if (
         (node === BODY.lFoot && this.state.leftSupported) ||
         (node === BODY.rFoot && this.state.rightSupported)
@@ -152,20 +152,120 @@ export class ActiveBodyControl {
       let frequencyGain = 1;
       let maxDv = baseMaxDv;
       if (taskPriority >= TASK_PRIORITY.ACTION) {
-        // A punch/kick must move with athletic bandwidth rather than the same
-        // low-gain posture servo used for idle hands. It is still bounded and
-        // remains subordinate to contact/joint constraints.
-        frequencyGain = 1.72 + taskWeight * 0.28;
-        authority *= 1.18 + taskWeight * 0.22;
-        maxDv *= 1.7;
+        frequencyGain = 1.9 + taskWeight * 0.34;
+        authority *= 1.24 + taskWeight * 0.24;
+        maxDv *= 1.95;
       } else if (taskPriority >= TASK_PRIORITY.CORRECTIVE_STEP) {
-        frequencyGain = 1.48;
-        authority *= 1.18;
-        maxDv *= 1.45;
+        frequencyGain = 1.58;
+        authority *= 1.2;
+        maxDv *= 1.55;
       } else if (taskPriority >= TASK_PRIORITY.LOCOMOTION) {
-        frequencyGain = 1.24;
-        authority *= 1.08;
-        maxDv *= 1.25;
+        frequencyGain = 1.34;
+        authority *= 1.12;
+        maxDv *= 1.38;
+      }
+
+      authority = Math.min(1.35, authority);
+      if (authority < 0.015) continue;
+
+      const ex = bodyTaskTargets.targetXFor(a, node) - rig.x[node]!;
+      const ey = bodyTaskTargets.targetYFor(a, node) - rig.y[node]!;
+      const ez = bodyTaskTargets.targetZFor(a, node) - rig.z[node]!;
+      const vx = nodeVelocityComponent(rig.x[node]!, rig.px[node]!, h);
+      const vy = nodeVelocityComponent(rig.y[node]!, rig.py[node]!, h);
+      const vz = nodeVelocityComponent(rig.z[node]!, rig.pz[node]!, h);
+
+      const omega = OMEGA[node]! * frequencyGain;
+      const kp = omega * omega;
+      const kd = 2 * 0.88 * omega;
+      let dvx = (kp * ex - kd * vx) * h * authority * taskWeight;
+      let dvy = (kp * ey - kd * vy) * h * authority * taskWeight;
+      let dvz = (kp * ez - kd * vz) * h * authority * taskWeight;
+
+      const mag = Math.hypot(dvx, dvy, dvz);
+      if (mag > maxDv) {
+        const q = maxDv / mag;
+        dvx *= q;
+        dvy *= q;
+        dvz *= q;
+      }
+
+      // Velocity-space impulse. PhysicalBodies integrates this immediately after
+      // this call; no current node position is assigned or teleported here.
+      rig.px[node] -= dvx * h;
+      rig.py[node] -= dvy * h;
+      rig.pz[node] -= dvz * h;
+    }
+  }
+
+  /** Base posture stabilization after integration. Explicit task nodes were
+   * already actuated pre-integration and are deliberately not double-driven. */
+  drive(
+    w: World,
+    a: Actor,
+    rig: BodyRig,
+    dt: number,
+    mode: BodyMode,
+  ) {
+    const modeGain = modeAuthority(mode);
+    if (modeGain <= 0 || !a.alive) return;
+
+    const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
+
+    // Keep rig.tx/ty/tz coherent for recovery diagnostics and non-task nodes.
+    bodyTaskTargets.apply(a, rig);
+    sampleMechanicalState(w, a, rig, h, this.state);
+
+    const fatigueAuthority = clamp01(1 - a.fatigue * 0.62);
+    const painAuthority = clamp01(1 - a.pain * 0.34);
+    const consciousAuthority = 0.08 + this.state.consciousness * 0.92;
+    const disturbanceAuthority = 1 / (1 + this.state.disturbance * 0.72);
+    const balanceAuthority = 0.42 + clamp01(a.balance) * 0.58;
+    const groundedAuthority =
+      this.state.supportCount > 0
+        ? 0.68 + this.state.supportScore * 0.32
+        : mode === "follow"
+          ? 0.58
+          : 0.34;
+
+    const global =
+      modeGain *
+      fatigueAuthority *
+      painAuthority *
+      consciousAuthority *
+      disturbanceAuthority *
+      balanceAuthority;
+
+    const scale = bodyScale(a);
+    const maxDv =
+      (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
+
+    for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      // Explicit locomotion/action targets were already integrated this step.
+      if (bodyTaskTargets.priorityFor(a, node) > 0) continue;
+
+      const region = NODE_REGION[node]!;
+      const integrity = regionIntegrity(a, region);
+      let authority = global * NODE_AUTHORITY[node]! * (0.22 + integrity * 0.78);
+
+      if (
+        node === BODY.pelvis ||
+        node === BODY.chest ||
+        node === BODY.lHip ||
+        node === BODY.rHip ||
+        node === BODY.lKnee ||
+        node === BODY.rKnee ||
+        node === BODY.lFoot ||
+        node === BODY.rFoot
+      ) {
+        authority *= groundedAuthority;
+      }
+
+      if (
+        (node === BODY.lFoot && this.state.leftSupported) ||
+        (node === BODY.rFoot && this.state.rightSupported)
+      ) {
+        authority *= 0.58 + this.state.grip * 0.28;
       }
 
       authority = Math.min(1.25, authority);
@@ -178,7 +278,7 @@ export class ActiveBodyControl {
       const vy = nodeVelocityComponent(rig.y[node]!, rig.py[node]!, h);
       const vz = nodeVelocityComponent(rig.z[node]!, rig.pz[node]!, h);
 
-      const omega = OMEGA[node]! * frequencyGain;
+      const omega = OMEGA[node]!;
       const kp = omega * omega;
       const kd = 2 * 0.9 * omega;
       let dvx = (kp * ex - kd * vx) * h * authority;
@@ -193,7 +293,6 @@ export class ActiveBodyControl {
         dvz *= q;
       }
 
-      // Velocity-space actuation. No solved node is teleported to its target.
       rig.px[node] -= dvx * h;
       rig.py[node] -= dvy * h;
       rig.pz[node] -= dvz * h;
