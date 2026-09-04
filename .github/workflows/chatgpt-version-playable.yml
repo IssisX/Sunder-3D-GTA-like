@@ -1,0 +1,44 @@
+name: Build ChatGPT-version playable
+
+on:
+  push:
+    branches:
+      - ChatGPT-version
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  playable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout canonical branch state
+        uses: actions/checkout@v4
+
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install project dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck current source (diagnostic)
+        continue-on-error: true
+        run: npm run typecheck
+
+      - name: Build single-file canonical playable
+        run: npm run build:local-preview
+
+      - name: Verify playable artifact exists
+        run: test -s local-preview-dist/SUNDER.html
+
+      - name: Upload playable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUNDER-ChatGPT-version-${{ github.sha }}
+          path: local-preview-dist/SUNDER.html
+          if-no-files-found: error
+          retention-days: 14

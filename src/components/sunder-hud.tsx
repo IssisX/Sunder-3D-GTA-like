@@ -43,6 +43,7 @@ export function SunderHud({
 }: Props) {
   const [muted, setMuted] = useState(false);
   const [touch, setTouch] = useState(false);
+
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)").matches;
     setTouch(coarse || navigator.maxTouchPoints > 0);
@@ -50,7 +51,13 @@ export function SunderHud({
 
   const hurt = Object.values(hud.injuries).some((v) => v > 0.08);
   const hour =
-    hud.timeOfDay > 0.78 || hud.timeOfDay < 0.2 ? "Night" : hud.timeOfDay > 0.7 ? "Dusk" : hud.timeOfDay < 0.3 ? "Dawn" : "Day";
+    hud.timeOfDay > 0.78 || hud.timeOfDay < 0.2
+      ? "Night"
+      : hud.timeOfDay > 0.7
+        ? "Dusk"
+        : hud.timeOfDay < 0.3
+          ? "Dawn"
+          : "Day";
 
   return (
     <div className="pointer-events-none absolute inset-0 font-sans text-fg">
@@ -129,9 +136,7 @@ export function SunderHud({
               {hud.blood < 0.97 && <Meter label="Blood" value={hud.blood} warn />}
               {hud.breath < 0.85 && <Meter label="Air" value={hud.breath} />}
               {hud.held && <p className="text-xs tracking-wide text-muted uppercase">{hud.held}</p>}
-              {hud.weapon !== "fist" && (
-                <p className="text-xs tracking-wide text-accent uppercase">{hud.weapon}</p>
-              )}
+              {hud.weapon !== "fist" && <p className="text-xs tracking-wide text-accent uppercase">{hud.weapon}</p>}
             </div>
           </div>
 
@@ -231,8 +236,8 @@ function Title({
             </button>
             <p className="text-xs leading-relaxed text-subtle">
               {touch
-                ? "Left stick walks. Drag the right pad to look. Strike, grab, run on the right. Folded or open — thumbs stay in the corners, off the hinge."
-                : "WASD move · Shift run · Mouse look · LMB strike · RMB grab/throw · E shove · F kick · R ignite · T bind"}
+                ? "Left stick walks. Drag the right pad to look. Punch, grab, run on the right. Folded or open — thumbs stay in the corners, off the hinge."
+                : "WASD move · Shift run · Mouse look · LMB punch · RMB grab/throw · E shove · F kick · R ignite · T bind"}
             </p>
           </div>
         </div>
@@ -313,7 +318,7 @@ function TouchControls({
         </div>
         <div className="flex gap-2">
           <ActionBtn id="grab" label="Grab" onVirtual={onVirtual} />
-          <ActionBtn id="attack" label="Strike" onVirtual={onVirtual} large />
+          <ActionBtn id="attack" label="Punch" onVirtual={onVirtual} large />
         </div>
         <div className="flex gap-2">
           <ActionBtn id="kick" label="Kick" onVirtual={onVirtual} />
@@ -357,6 +362,7 @@ function ActionBtn({
     onPointerCancel: () => onVirtual(id, false),
     onLostPointerCapture: () => onVirtual(id, false),
   };
+
   return (
     <button
       type="button"
