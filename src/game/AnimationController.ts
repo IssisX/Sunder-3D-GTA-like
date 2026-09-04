@@ -68,10 +68,10 @@ function calmCrowdAI(a: Actor) {
 /**
  * Locomotion/task generator only.
  *
- * This class no longer moves articulated nodes after physics. It observes the
- * solved body, advances gait phase from actual root displacement, and writes
- * pre-solve whole-body targets. ActiveBodyControl is the sole consumer that
- * turns those targets into bounded physical actuation.
+ * Intent shaping happens before World simulation. Whole-body task generation
+ * happens afterward, against the root/mechanical state that the body solver is
+ * actually about to consume. This prevents a one-step frame mismatch where
+ * the articulated body was perpetually chasing stale task coordinates.
  */
 export class AnimationController extends AnimatedPhysicalBodies {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
@@ -160,9 +160,9 @@ export class AnimationController extends AnimatedPhysicalBodies {
     super.captureInput(input);
   }
 
+  /** Pre-world intent shaping only. No articulated task coordinates are emitted here. */
   prepareStep(w: World, dt: number) {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
-    bodyTaskTargets.beginStep();
 
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
@@ -172,26 +172,7 @@ export class AnimationController extends AnimatedPhysicalBodies {
         this.register(a);
         slot = this.slot(a.id);
       }
-      if (slot < 0) continue;
-
-      // Gait phase is driven by the displacement the authoritative body really
-      // achieved last step, not by elapsed animation time.
-      const traveled = Math.hypot(
-        a.x - this.lastX[slot]!,
-        a.z - this.lastZ[slot]!,
-      );
-      this.lastX[slot] = a.x;
-      this.lastZ[slot] = a.z;
-      const oldStride = lerp(0.54, 1.08, this.runBlend[slot]!) * bodyScale(a);
-      if (traveled > 1e-5 && oldStride > 1e-5) {
-        const adv = Math.min(1.15, (traveled / oldStride) * TAU);
-        let p = this.phase[slot]! + adv;
-        if (p >= TAU) p -= TAU * Math.floor(p / TAU);
-        this.phase[slot] = p;
-      }
-      a.walkPhase = this.phase[slot]!;
-
-      if (!locomotionEligible(a)) continue;
+      if (slot < 0 || !locomotionEligible(a)) continue;
 
       let desiredX = a.intendX;
       let desiredZ = a.intendZ;
@@ -272,7 +253,40 @@ export class AnimationController extends AnimatedPhysicalBodies {
       a.intendX = sx;
       a.intendZ = sz;
       a.intendSpeed = root;
+    }
+  }
 
+  /** Post-world, pre-body-solve target generation against current root state. */
+  prepareBodyStep(w: World, dt: number) {
+    void dt;
+    bodyTaskTargets.beginStep();
+
+    for (let i = 0; i < w.actors.length; i++) {
+      const a = w.actors[i]!;
+      if (!human(a)) continue;
+      let slot = this.slot(a.id);
+      if (slot < 0) {
+        this.register(a);
+        slot = this.slot(a.id);
+      }
+      if (slot < 0) continue;
+
+      const traveled = Math.hypot(
+        a.x - this.lastX[slot]!,
+        a.z - this.lastZ[slot]!,
+      );
+      this.lastX[slot] = a.x;
+      this.lastZ[slot] = a.z;
+      const stride = lerp(0.54, 1.08, this.runBlend[slot]!) * bodyScale(a);
+      if (traveled > 1e-5 && stride > 1e-5) {
+        const adv = Math.min(1.15, (traveled / stride) * TAU);
+        let p = this.phase[slot]! + adv;
+        if (p >= TAU) p -= TAU * Math.floor(p / TAU);
+        this.phase[slot] = p;
+      }
+      a.walkPhase = this.phase[slot]!;
+
+      if (!locomotionEligible(a)) continue;
       const rig = this.get(a);
       if (!rig?.initialized || rig.mode !== "follow") continue;
       this.writeLocomotionTasks(w, a, rig, slot);
@@ -281,8 +295,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
   override step(w: World, dt: number) {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
-    // PhysicalBodies consumes all targets through ActiveBodyControl here.
-    // No locomotion pose or IK may touch solved nodes after this call.
     super.step(w, h);
     this.playerActionBlockT = Math.max(0, this.playerActionBlockT - h);
   }
