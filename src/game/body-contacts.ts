@@ -2,6 +2,7 @@ import type { Actor, Collider } from "./types";
 import { HALF } from "./types";
 import type { World } from "./world";
 import { clamp } from "./world";
+import { impactDynamics } from "./impact-dynamics";
 import {
   BASE_RADIUS,
   BODY,
@@ -210,7 +211,16 @@ function resolveNodeAabb(
   const vn = vx * nx + vy * ny + vz * nz;
 
   if (registerImpact && vn < -3.2) {
-    applyImpact(w, a, rig, node, -vn);
+    const closing = -vn;
+    applyImpact(w, a, rig, node, closing);
+    impactDynamics.contactNode(
+      a,
+      node,
+      nx * closing * 0.42,
+      ny * closing * 0.42,
+      nz * closing * 0.42,
+      0.78,
+    );
   }
 
   rig.x[node] += nx * penetration;
@@ -251,7 +261,16 @@ export function collideRig(
         dt,
       );
       if (registerImpact && vy < -3.2) {
-        applyImpact(w, a, rig, i, -vy);
+        const closing = -vy;
+        applyImpact(w, a, rig, i, closing);
+        impactDynamics.contactNode(
+          a,
+          i,
+          0,
+          closing * 0.36,
+          0,
+          0.72,
+        );
       }
       rig.y[i] = radius;
       if (vy < 0) {
@@ -469,13 +488,24 @@ export function solveBodyPair(
 
       if (rel >= -3.4) continue;
 
+      const closing = -rel;
+      const shareA = b.mass / Math.max(1, a.mass + b.mass);
+      const shareB = a.mass / Math.max(1, a.mass + b.mass);
       if (modeA > 0) {
         applyImpact(
           w,
           a,
           ra,
           ia,
-          -rel * (b.mass / (a.mass + b.mass)),
+          closing * shareA,
+        );
+        impactDynamics.contactNode(
+          a,
+          ia,
+          -nx * closing * shareA * 0.38,
+          -ny * closing * shareA * 0.38,
+          -nz * closing * shareA * 0.38,
+          0.7,
         );
       }
       if (modeB > 0) {
@@ -484,7 +514,15 @@ export function solveBodyPair(
           b,
           rb,
           ib,
-          -rel * (a.mass / (a.mass + b.mass)),
+          closing * shareB,
+        );
+        impactDynamics.contactNode(
+          b,
+          ib,
+          nx * closing * shareB * 0.38,
+          ny * closing * shareB * 0.38,
+          nz * closing * shareB * 0.38,
+          0.7,
         );
       }
     }
