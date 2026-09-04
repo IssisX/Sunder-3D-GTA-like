@@ -10,6 +10,7 @@ import { activeBodyControl } from "./active-body-control";
 import { bodyMode } from "./body-model";
 import { supportMotion } from "./support-motion";
 import { WholeBodyCoupling } from "./whole-body-coupling";
+import { bodyTaskTargets } from "./body-task-targets";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -19,6 +20,7 @@ import { WholeBodyCoupling } from "./whole-body-coupling";
  *   world sim: AI/world compatibility prediction
  *   post-world/pre-body: locomotion + melee end-effector task generation
  *   whole-body coupling: support / COM / stance tasks derived from those actions
+ *   task finalization: position + target-velocity field
  *   pre-integration: bounded joint actuation + friction-limited support reaction
  *   body solve: integration -> posture control -> joint constraints -> contacts
  *   post-solve: real effector contact -> impulse -> stability outcome
@@ -65,26 +67,23 @@ export class ProceduralAnimationController extends AnimationController {
 
   override prepareStep(w: World, dt: number) {
     this.social.beginStep(w);
-    // Only intent shaping belongs before stepWorld. Absolute body task geometry
-    // is generated after the compatibility world step from the current state.
     super.prepareStep(w, dt);
   }
 
   override step(w: World, dt: number) {
     this.social.endStep(w);
 
-    // Generate locomotion and action tasks against the current predicted world
-    // state. These are requests only; no solved body node is moved here.
     super.prepareBodyStep(w, dt);
     this.melee.prepareStep(w, dt);
 
-    // Convert isolated end-effector requests into whole-body stance/support/COM
-    // requirements before any motor command is applied.
+    // Isolated end-effector requests become support/COM/stance requirements.
     this.coupling.prepare(w);
 
-    // Explicit task velocity must be written before Verlet integration. The
-    // friction-limited support reaction follows it so internal motor targets do
-    // not cancel the external momentum source required for locomotion.
+    // Compute target velocity only after every producer has written its final
+    // winning task for this fixed step. This prevents intermediate task layers
+    // from creating synthetic feed-forward spikes.
+    bodyTaskTargets.finalizeStep(dt);
+
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
       if (a.kind !== "player" && a.species !== "human") continue;
@@ -95,17 +94,10 @@ export class ProceduralAnimationController extends AnimationController {
       supportMotion.drive(w, a, rig, dt, mode);
     }
 
-    // PhysicalBodies integrates those velocity changes in this same fixed step,
-    // then solves anatomical constraints and real world/body contacts.
     super.step(w, dt);
 
-    // Contact is measured from the solved physical fist/foot trajectory only.
     this.melee.step(w, dt);
-
-    // The same impulse field drives visible recoil and coarse root momentum.
     impactDynamics.step(w, dt);
-
-    // Support/COM mechanics decide absorb, corrective recovery, stumble or fall.
     this.causality.step(w, dt);
   }
 }
