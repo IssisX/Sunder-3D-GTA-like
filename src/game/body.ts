@@ -30,6 +30,7 @@ import {
   solveSelfContacts,
   supportHeight,
 } from "./body-contacts";
+import { activeBodyControl } from "./active-body-control";
 
 export {
   BODY,
@@ -56,8 +57,7 @@ function solveDistance(
   const wa = NODE_INV_MASS[ia]!;
   const wb = NODE_INV_MASS[ib]!;
   const sum = wa + wb;
-  const corr =
-    ((d - rest * scale) / d) * stiffness;
+  const corr = ((d - rest * scale) / d) * stiffness;
 
   rig.x[ia] += dx * corr * (wa / sum);
   rig.y[ia] += dy * corr * (wa / sum);
@@ -120,28 +120,8 @@ function solveLinks(
   }
 
   for (const [ia, ib, min, max] of JOINT_RANGES) {
-    solveRange(
-      rig,
-      ia,
-      ib,
-      min,
-      max,
-      scale,
-    );
+    solveRange(rig, ia, ib, min, max, scale);
   }
-}
-
-function pinNode(
-  rig: BodyRig,
-  i: number,
-  strength: number,
-) {
-  rig.x[i] +=
-    (rig.tx[i]! - rig.x[i]!) * strength;
-  rig.y[i] +=
-    (rig.ty[i]! - rig.y[i]!) * strength;
-  rig.z[i] +=
-    (rig.tz[i]! - rig.z[i]!) * strength;
 }
 
 function closestGrabNode(
@@ -204,12 +184,7 @@ function solveGrab(
   }
 
   if (rig.grabNode < 0) {
-    rig.grabNode = closestGrabNode(
-      rig,
-      tx,
-      ty,
-      tz,
-    );
+    rig.grabNode = closestGrabNode(rig, tx, ty, tz);
   }
 
   const i = rig.grabNode;
@@ -217,21 +192,19 @@ function solveGrab(
   const dy = ty - rig.y[i]!;
   const dz = tz - rig.z[i]!;
   const dist = Math.hypot(dx, dy, dz);
-  const k =
-    dist > 1.1
-      ? Math.min(1, strength * 1.2)
-      : strength;
+  const k = dist > 1.1 ? Math.min(1, strength * 1.2) : strength;
 
+  // Grab remains a closed-chain positional constraint for now. It is solved
+  // inside the same body constraint loop so environment/body contacts can still
+  // defeat it. Migrating this to load-aware bilateral actuation is a later slice.
   rig.x[i] += dx * k;
   rig.y[i] += dy * k;
   rig.z[i] += dz * k;
 
   if (dist > 0.5) {
-    const load =
-      a.mass / Math.max(1, a.mass + holder.mass);
+    const load = a.mass / Math.max(1, a.mass + holder.mass);
     holder.balance = clamp(
-      holder.balance -
-        Math.min(0.04, dist * load * 0.012),
+      holder.balance - Math.min(0.04, dist * load * 0.012),
       0,
       1,
     );
@@ -247,21 +220,9 @@ function injectExternalImpulse(
   dt: number,
 ) {
   const p = BODY.pelvis;
-  const rvx = nodeVelocityComponent(
-    rig.x[p]!,
-    rig.px[p]!,
-    dt,
-  );
-  const rvy = nodeVelocityComponent(
-    rig.y[p]!,
-    rig.py[p]!,
-    dt,
-  );
-  const rvz = nodeVelocityComponent(
-    rig.z[p]!,
-    rig.pz[p]!,
-    dt,
-  );
+  const rvx = nodeVelocityComponent(rig.x[p]!, rig.px[p]!, dt);
+  const rvy = nodeVelocityComponent(rig.y[p]!, rig.py[p]!, dt);
+  const rvz = nodeVelocityComponent(rig.z[p]!, rig.pz[p]!, dt);
 
   let dvx = a.vx - rvx;
   let dvy = a.vy - rvy;
@@ -278,23 +239,17 @@ function injectExternalImpulse(
   let bestDelta = 0;
 
   for (let i = 0; i < BODY_REGIONS.length; i++) {
-    const delta =
-      injuryScore(a, BODY_REGIONS[i]!) -
-      rig.injurySnapshot[i]!;
+    const delta = injuryScore(a, BODY_REGIONS[i]!) - rig.injurySnapshot[i]!;
     if (delta > bestDelta) {
       bestDelta = delta;
       bestRegion = i;
     }
   }
 
-  const recentHit =
-    Boolean(a.lastHitBy) &&
-    w.time - a.lastHitT < dt * 1.6;
+  const recentHit = Boolean(a.lastHitBy) && w.time - a.lastHitT < dt * 1.6;
 
   if (recentHit && bestRegion >= 0) {
-    const node = representativeNode(
-      BODY_REGIONS[bestRegion]!,
-    );
+    const node = representativeNode(BODY_REGIONS[bestRegion]!);
     rig.px[node] -= dvx * dt * 0.85;
     rig.py[node] -= dvy * dt * 0.85;
     rig.pz[node] -= dvz * dt * 0.85;
@@ -313,7 +268,7 @@ function injectExternalImpulse(
   }
 }
 
-function integrateDynamic(
+function integrateBody(
   w: World,
   rig: BodyRig,
   dt: number,
@@ -324,12 +279,14 @@ function integrateDynamic(
       ? 0.988
       : mode === "stumble"
         ? 0.965
-        : 0.955;
+        : mode === "recover"
+          ? 0.958
+          : 0.972;
   const gravity =
     mode === "recover"
-      ? GRAVITY * 0.55
+      ? GRAVITY * 0.72
       : mode === "stumble"
-        ? GRAVITY * 0.78
+        ? GRAVITY * 0.9
         : GRAVITY;
 
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
@@ -356,30 +313,6 @@ function integrateDynamic(
   }
 }
 
-function followPose(
-  a: Actor,
-  rig: BodyRig,
-  dt: number,
-) {
-  computeTarget(a, rig, a.y);
-  const k = 1 - Math.exp(-dt * 34);
-
-  for (let i = 0; i < BODY_NODE_COUNT; i++) {
-    const x = rig.x[i]!;
-    const y = rig.y[i]!;
-    const z = rig.z[i]!;
-    rig.px[i] = x;
-    rig.py[i] = y;
-    rig.pz[i] = z;
-    rig.x[i] =
-      x + (rig.tx[i]! - x) * k;
-    rig.y[i] =
-      y + (rig.ty[i]! - y) * k;
-    rig.z[i] =
-      z + (rig.tz[i]! - z) * k;
-  }
-}
-
 function deriveActorFromRig(
   a: Actor,
   rig: BodyRig,
@@ -387,44 +320,21 @@ function deriveActorFromRig(
 ) {
   const p = BODY.pelvis;
   const feet = Math.min(
-    rig.y[BODY.lFoot]! -
-      nodeRadius(a, BODY.lFoot),
-    rig.y[BODY.rFoot]! -
-      nodeRadius(a, BODY.rFoot),
+    rig.y[BODY.lFoot]! - nodeRadius(a, BODY.lFoot),
+    rig.y[BODY.rFoot]! - nodeRadius(a, BODY.rFoot),
     rig.y[p]! - 0.78 * bodyScale(a),
   );
 
-  a.x = clamp(
-    rig.x[p]!,
-    -HALF + 1,
-    HALF - 1,
-  );
-  a.z = clamp(
-    rig.z[p]!,
-    -HALF + 1,
-    HALF - 1,
-  );
+  a.x = clamp(rig.x[p]!, -HALF + 1, HALF - 1);
+  a.z = clamp(rig.z[p]!, -HALF + 1, HALF - 1);
   a.y = Math.max(0, feet);
-  a.vx = nodeVelocityComponent(
-    rig.x[p]!,
-    rig.px[p]!,
-    dt,
-  );
-  a.vy = nodeVelocityComponent(
-    rig.y[p]!,
-    rig.py[p]!,
-    dt,
-  );
-  a.vz = nodeVelocityComponent(
-    rig.z[p]!,
-    rig.pz[p]!,
-    dt,
-  );
+  a.vx = nodeVelocityComponent(rig.x[p]!, rig.px[p]!, dt);
+  a.vy = nodeVelocityComponent(rig.y[p]!, rig.py[p]!, dt);
+  a.vz = nodeVelocityComponent(rig.z[p]!, rig.pz[p]!, dt);
   a.grounded = rig.groundedNodes > 0;
 
   if (rig.mode === "dynamic") {
-    const rise =
-      rig.y[BODY.chest]! - rig.y[p]!;
+    const rise = rig.y[BODY.chest]! - rig.y[p]!;
     const lean = Math.hypot(
       rig.x[BODY.chest]! - rig.x[p]!,
       rig.z[BODY.chest]! - rig.z[p]!,
@@ -441,10 +351,7 @@ export class PhysicalBodies {
 
   bootstrap(w: World) {
     for (const a of w.actors) {
-      if (
-        a.species === "human" ||
-        a.kind === "player"
-      ) {
+      if (a.species === "human" || a.kind === "player") {
         this.ensure(a);
       }
     }
@@ -476,10 +383,7 @@ export class PhysicalBodies {
     const humans: Actor[] = [];
 
     for (const a of w.actors) {
-      if (
-        a.species !== "human" &&
-        a.kind !== "player"
-      ) {
+      if (a.species !== "human" && a.kind !== "player") {
         continue;
       }
 
@@ -487,30 +391,22 @@ export class PhysicalBodies {
       const rig = this.ensure(a);
 
       for (let i = 0; i < BODY_NODE_COUNT; i++) {
-        rig.impactCd[i] = Math.max(
-          0,
-          rig.impactCd[i]! - dt,
-        );
+        rig.impactCd[i] = Math.max(0, rig.impactCd[i]! - dt);
       }
 
       const mode = bodyMode(a);
-      if (
-        mode !== rig.mode &&
-        mode === "follow"
-      ) {
-        resetRig(a, rig);
-      }
+      // Do not reset when control returns. Pose, momentum, contacts, injuries and
+      // impact history remain on the same authoritative body across regimes.
       rig.mode = mode;
       rig.groundedNodes = 0;
 
-      if (mode === "follow") {
-        followPose(a, rig, dt);
-        snapshotInjuries(a, rig);
-        continue;
+      if (mode !== "follow") {
+        injectExternalImpulse(w, a, rig, dt);
       }
 
-      injectExternalImpulse(w, a, rig, dt);
-      integrateDynamic(w, rig, dt, mode);
+      // Every regime, including ordinary standing/walking, now advances through
+      // gravity + velocity integration. Active control must keep the body up.
+      integrateBody(w, rig, dt, mode);
 
       const floor = supportHeight(
         w,
@@ -520,35 +416,20 @@ export class PhysicalBodies {
       );
       computeTarget(a, rig, floor);
 
-      const iterations =
-        mode === "dynamic" ? 6 : 5;
+      // Desired pose becomes bounded actuation in velocity space. Contacts and
+      // joint constraints are solved afterward and therefore override intent.
+      activeBodyControl.drive(w, a, rig, dt, mode);
+
+      const iterations = mode === "dynamic" ? 6 : 5;
+      const linkStrength =
+        mode === "dynamic"
+          ? 1
+          : mode === "follow"
+            ? 0.96
+            : 0.94;
 
       for (let iter = 0; iter < iterations; iter++) {
-        solveLinks(
-          a,
-          rig,
-          mode === "dynamic" ? 1 : 0.94,
-        );
-
-        if (mode === "stumble") {
-          pinNode(rig, BODY.pelvis, 0.1);
-          pinNode(rig, BODY.chest, 0.08);
-          pinNode(rig, BODY.head, 0.045);
-          pinNode(rig, BODY.lFoot, 0.035);
-          pinNode(rig, BODY.rFoot, 0.035);
-        } else if (mode === "recover") {
-          const k =
-            0.16 +
-            (iter / iterations) * 0.08;
-          for (
-            let i = 0;
-            i < BODY_NODE_COUNT;
-            i++
-          ) {
-            pinNode(rig, i, k);
-          }
-        }
-
+        solveLinks(a, rig, linkStrength);
         solveGrab(
           w,
           a,
@@ -556,25 +437,15 @@ export class PhysicalBodies {
           (actor) => this.get(actor),
           mode === "dynamic" ? 0.72 : 0.58,
         );
-        collideRig(
-          w,
-          a,
-          rig,
-          dt,
-          iter === 0,
-        );
+        collideRig(w, a, rig, dt, iter === 0);
         solveSelfContacts(a, rig);
       }
 
       if (mode === "stumble") {
-        const rise =
-          rig.y[BODY.chest]! -
-          rig.y[BODY.pelvis]!;
+        const rise = rig.y[BODY.chest]! - rig.y[BODY.pelvis]!;
         const lean = Math.hypot(
-          rig.x[BODY.chest]! -
-            rig.x[BODY.pelvis]!,
-          rig.z[BODY.chest]! -
-            rig.z[BODY.pelvis]!,
+          rig.x[BODY.chest]! - rig.x[BODY.pelvis]!,
+          rig.z[BODY.chest]! - rig.z[BODY.pelvis]!,
         );
 
         if (
@@ -594,16 +465,9 @@ export class PhysicalBodies {
         const a = humans[i]!;
         const ra = this.ensure(a);
 
-        for (
-          let j = i + 1;
-          j < humans.length;
-          j++
-        ) {
+        for (let j = i + 1; j < humans.length; j++) {
           const b = humans[j]!;
-          if (
-            a.grabbedId === b.id ||
-            b.grabbedId === a.id
-          ) {
+          if (a.grabbedId === b.id || b.grabbedId === a.id) {
             continue;
           }
 
@@ -623,22 +487,17 @@ export class PhysicalBodies {
     for (const a of humans) {
       const rig = this.ensure(a);
 
-      if (rig.mode !== "follow") {
-        solveLinks(a, rig, 0.82);
-        deriveActorFromRig(a, rig, dt);
-      }
+      // Final constraint projection keeps anatomical lengths valid after any
+      // body-body contacts. The solved pelvis is now the final root authority
+      // for the next world step in every control regime, not only ragdoll.
+      solveLinks(a, rig, rig.mode === "dynamic" ? 0.82 : 0.76);
+      deriveActorFromRig(a, rig, dt);
 
-      if (
-        rig.mode === "recover" &&
-        a.getupT <= 0
-      ) {
+      if (rig.mode === "recover" && a.getupT <= 0) {
         const err = Math.hypot(
-          rig.x[BODY.head]! -
-            rig.tx[BODY.head]!,
-          rig.y[BODY.head]! -
-            rig.ty[BODY.head]!,
-          rig.z[BODY.head]! -
-            rig.tz[BODY.head]!,
+          rig.x[BODY.head]! - rig.tx[BODY.head]!,
+          rig.y[BODY.head]! - rig.ty[BODY.head]!,
+          rig.z[BODY.head]! - rig.tz[BODY.head]!,
         );
 
         if (err > 0.42 * bodyScale(a)) {
