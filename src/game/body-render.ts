@@ -11,14 +11,10 @@ interface HumanVisual {
   chest: THREE.Mesh;
   pelvis: THREE.Mesh;
   neck: THREE.Mesh;
-  lUpperArm: THREE.Mesh;
-  lLowerArm: THREE.Mesh;
-  rUpperArm: THREE.Mesh;
-  rLowerArm: THREE.Mesh;
-  lUpperLeg: THREE.Mesh;
-  lLowerLeg: THREE.Mesh;
-  rUpperLeg: THREE.Mesh;
-  rLowerLeg: THREE.Mesh;
+  lArm: THREE.Mesh;
+  rArm: THREE.Mesh;
+  lLeg: THREE.Mesh;
+  rLeg: THREE.Mesh;
   lHand: THREE.Mesh;
   rHand: THREE.Mesh;
   lFoot: THREE.Mesh;
@@ -36,7 +32,10 @@ interface HumanVisual {
   };
 }
 
-function material(color: number, metalness = 0.03, roughness = 0.84) {
+const LIMB_RINGS = 11;
+const LIMB_RADIAL = 9;
+
+function material(color: number, metalness = 0.03, roughness = 0.78) {
   return new THREE.MeshStandardMaterial({ color, metalness, roughness });
 }
 
@@ -55,21 +54,43 @@ function weaponLength(kind: WeaponKind) {
   return 0.3;
 }
 
+function makeLimbGeometry() {
+  const vertexCount = LIMB_RINGS * LIMB_RADIAL;
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const indices: number[] = [];
+  for (let ring = 0; ring < LIMB_RINGS - 1; ring++) {
+    for (let j = 0; j < LIMB_RADIAL; j++) {
+      const a = ring * LIMB_RADIAL + j;
+      const b = ring * LIMB_RADIAL + ((j + 1) % LIMB_RADIAL);
+      const c = (ring + 1) * LIMB_RADIAL + j;
+      const d = (ring + 1) * LIMB_RADIAL + ((j + 1) % LIMB_RADIAL);
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  geo.setIndex(indices);
+  return geo;
+}
+
 export class BodyView {
   private visuals = new Map<number, HumanVisual>();
-  private sphere = new THREE.SphereGeometry(0.5, 12, 10);
-  private box = new THREE.BoxGeometry(1, 1, 1);
-  private neckGeo = new THREE.CylinderGeometry(0.46, 0.52, 1, 10);
-  private torsoGeo = new THREE.CylinderGeometry(0.5, 0.36, 1, 12);
-  private upperArmGeo = new THREE.CylinderGeometry(0.43, 0.53, 1, 10);
-  private lowerArmGeo = new THREE.CylinderGeometry(0.38, 0.46, 1, 10);
-  private upperLegGeo = new THREE.CylinderGeometry(0.44, 0.56, 1, 10);
-  private lowerLegGeo = new THREE.CylinderGeometry(0.36, 0.45, 1, 10);
-  private cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
+  private sphere = new THREE.SphereGeometry(0.5, 18, 14);
+  private handGeo = new THREE.SphereGeometry(0.5, 12, 9);
+  private footGeo = new THREE.SphereGeometry(0.5, 12, 8);
+  private neckGeo = new THREE.CylinderGeometry(0.46, 0.52, 1, 12);
+  private torsoGeo = new THREE.CylinderGeometry(0.5, 0.36, 1, 16);
+  private cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 12);
   private up = new THREE.Vector3(0, 1, 0);
   private a = new THREE.Vector3();
   private b = new THREE.Vector3();
   private d = new THREE.Vector3();
+  private tangent = new THREE.Vector3();
+  private normal = new THREE.Vector3();
+  private binormal = new THREE.Vector3();
+  private ref = new THREE.Vector3();
   private q = new THREE.Quaternion();
   private color = new THREE.Color();
 
@@ -127,18 +148,14 @@ export class BodyView {
     const chest = new THREE.Mesh(this.sphere, mats.chest);
     const pelvis = new THREE.Mesh(this.sphere, mats.pelvis);
     const neck = new THREE.Mesh(this.neckGeo, mats.head);
-    const lUpperArm = new THREE.Mesh(this.upperArmGeo, mats.lArm);
-    const lLowerArm = new THREE.Mesh(this.lowerArmGeo, mats.lArm);
-    const rUpperArm = new THREE.Mesh(this.upperArmGeo, mats.rArm);
-    const rLowerArm = new THREE.Mesh(this.lowerArmGeo, mats.rArm);
-    const lUpperLeg = new THREE.Mesh(this.upperLegGeo, mats.lLeg);
-    const lLowerLeg = new THREE.Mesh(this.lowerLegGeo, mats.lLeg);
-    const rUpperLeg = new THREE.Mesh(this.upperLegGeo, mats.rLeg);
-    const rLowerLeg = new THREE.Mesh(this.lowerLegGeo, mats.rLeg);
-    const lHand = new THREE.Mesh(this.box, mats.lArm);
-    const rHand = new THREE.Mesh(this.box, mats.rArm);
-    const lFoot = new THREE.Mesh(this.box, mats.lLeg);
-    const rFoot = new THREE.Mesh(this.box, mats.rLeg);
+    const lArm = new THREE.Mesh(makeLimbGeometry(), mats.lArm);
+    const rArm = new THREE.Mesh(makeLimbGeometry(), mats.rArm);
+    const lLeg = new THREE.Mesh(makeLimbGeometry(), mats.lLeg);
+    const rLeg = new THREE.Mesh(makeLimbGeometry(), mats.rLeg);
+    const lHand = new THREE.Mesh(this.handGeo, mats.lArm);
+    const rHand = new THREE.Mesh(this.handGeo, mats.rArm);
+    const lFoot = new THREE.Mesh(this.footGeo, mats.lLeg);
+    const rFoot = new THREE.Mesh(this.footGeo, mats.rLeg);
     const weapon = new THREE.Mesh(this.cylinder, mats.weapon);
 
     for (const mesh of [
@@ -147,14 +164,10 @@ export class BodyView {
       chest,
       pelvis,
       neck,
-      lUpperArm,
-      lLowerArm,
-      rUpperArm,
-      rLowerArm,
-      lUpperLeg,
-      lLowerLeg,
-      rUpperLeg,
-      rLowerLeg,
+      lArm,
+      rArm,
+      lLeg,
+      rLeg,
       lHand,
       rHand,
       lFoot,
@@ -165,6 +178,7 @@ export class BodyView {
       mesh.receiveShadow = true;
       group.add(mesh);
     }
+    for (const limb of [lArm, rArm, lLeg, rLeg]) limb.frustumCulled = false;
 
     if (a.helmet) {
       const helmet = new THREE.Mesh(
@@ -184,14 +198,10 @@ export class BodyView {
       chest,
       pelvis,
       neck,
-      lUpperArm,
-      lLowerArm,
-      rUpperArm,
-      rLowerArm,
-      lUpperLeg,
-      lLowerLeg,
-      rUpperLeg,
-      rLowerLeg,
+      lArm,
+      rArm,
+      lLeg,
+      rLeg,
       lHand,
       rHand,
       lFoot,
@@ -217,8 +227,6 @@ export class BodyView {
     return out;
   }
 
-  // Limbs overlap their node endpoints. The bend itself is the joint - there
-  // is no separate sphere covering elbows/knees/shoulders/hips anymore.
   private segment(
     mesh: THREE.Mesh,
     rig: BodyRig,
@@ -238,6 +246,78 @@ export class BodyView {
     this.q.setFromUnitVectors(this.up, this.d);
     mesh.quaternion.copy(this.q);
     mesh.scale.set(width, rawLength + pad * 2, depth);
+  }
+
+  // One continuously curved mesh passes through start -> joint -> end.
+  // The joint is therefore a bend in one volume, never a ball between sticks.
+  private curvedLimb(
+    mesh: THREE.Mesh,
+    actor: Actor,
+    rig: BodyRig,
+    startNode: number,
+    jointNode: number,
+    endNode: number,
+    startRadius: number,
+    jointRadius: number,
+    endRadius: number,
+    alpha: number,
+  ) {
+    const p0 = new THREE.Vector3();
+    const p1 = new THREE.Vector3();
+    const p2 = new THREE.Vector3();
+    this.node(rig, startNode, alpha, p0);
+    this.node(rig, jointNode, alpha, p1);
+    this.node(rig, endNode, alpha, p2);
+
+    const pos = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const nor = mesh.geometry.getAttribute("normal") as THREE.BufferAttribute;
+    const scale = actor.height / 1.72;
+    const f = { x: -Math.sin(actor.yaw), z: -Math.cos(actor.yaw) };
+
+    for (let ring = 0; ring < LIMB_RINGS; ring++) {
+      const t = ring / (LIMB_RINGS - 1);
+      const l0 = 2 * (t - 0.5) * (t - 1);
+      const l1 = -4 * t * (t - 1);
+      const l2 = 2 * t * (t - 0.5);
+      const dl0 = 4 * t - 3;
+      const dl1 = -8 * t + 4;
+      const dl2 = 4 * t - 1;
+
+      const px = p0.x * l0 + p1.x * l1 + p2.x * l2;
+      const py = p0.y * l0 + p1.y * l1 + p2.y * l2;
+      const pz = p0.z * l0 + p1.z * l1 + p2.z * l2;
+      this.tangent.set(
+        p0.x * dl0 + p1.x * dl1 + p2.x * dl2,
+        p0.y * dl0 + p1.y * dl1 + p2.y * dl2,
+        p0.z * dl0 + p1.z * dl1 + p2.z * dl2,
+      ).normalize();
+
+      if (Math.abs(this.tangent.y) < 0.86) this.ref.set(0, 1, 0);
+      else this.ref.set(f.x, 0, f.z).normalize();
+      this.normal.crossVectors(this.tangent, this.ref).normalize();
+      if (this.normal.lengthSq() < 1e-6) this.normal.set(1, 0, 0);
+      this.binormal.crossVectors(this.normal, this.tangent).normalize();
+
+      const s = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+      const r0 = t < 0.5 ? startRadius : jointRadius;
+      const r1 = t < 0.5 ? jointRadius : endRadius;
+      const q = s * s * (3 - 2 * s);
+      const radius = (r0 + (r1 - r0) * q) * scale;
+
+      for (let j = 0; j < LIMB_RADIAL; j++) {
+        const angle = (j / LIMB_RADIAL) * Math.PI * 2;
+        const ca = Math.cos(angle);
+        const sa = Math.sin(angle);
+        const nx = this.normal.x * ca + this.binormal.x * sa;
+        const ny = this.normal.y * ca + this.binormal.y * sa;
+        const nz = this.normal.z * ca + this.binormal.z * sa;
+        const index = ring * LIMB_RADIAL + j;
+        pos.setXYZ(index, px + nx * radius, py + ny * radius, pz + nz * radius);
+        nor.setXYZ(index, nx, ny, nz);
+      }
+    }
+    pos.needsUpdate = true;
+    nor.needsUpdate = true;
   }
 
   private orientEndpoint(
@@ -278,15 +358,10 @@ export class BodyView {
     if (!a.grabbedId) return;
     const held = this.view.propMap.get(a.grabbedId);
     if (!held) return;
-
     const scale = a.height / 1.72;
     this.node(rig, BODY.rHand, alpha, this.a);
     held.visible = true;
-    held.position.set(
-      this.a.x,
-      this.a.y - 0.06 * scale,
-      this.a.z,
-    );
+    held.position.set(this.a.x, this.a.y - 0.06 * scale, this.a.z);
     held.rotation.set(0, a.yaw, 0);
   }
 
@@ -300,79 +375,34 @@ export class BodyView {
     v.group.position.set(0, 0, 0);
     v.group.rotation.set(0, 0, 0);
 
-    // Organic torso volumes replace the old box-plank body. The tapered trunk
-    // follows pelvis-to-chest while the chest/pelvis ellipsoids cover shoulder
-    // and hip roots without exposing construction joints.
-    this.segment(
-      v.torso,
-      rig,
-      BODY.pelvis,
-      BODY.chest,
-      0.62 * scale,
-      0.4 * scale,
-      alpha,
-      0.055 * scale,
-    );
+    this.segment(v.torso, rig, BODY.pelvis, BODY.chest, 0.62 * scale, 0.4 * scale, alpha, 0.055 * scale);
 
     this.node(rig, BODY.chest, alpha, this.a);
     v.chest.position.copy(this.a);
     v.chest.quaternion.copy(v.torso.quaternion);
-    v.chest.scale.set(0.7 * scale, 0.36 * scale, 0.44 * scale);
+    v.chest.scale.set(0.69 * scale, 0.34 * scale, 0.43 * scale);
 
     this.node(rig, BODY.pelvis, alpha, this.a);
     v.pelvis.position.copy(this.a);
     v.pelvis.quaternion.copy(v.torso.quaternion);
-    v.pelvis.scale.set(0.57 * scale, 0.28 * scale, 0.39 * scale);
+    v.pelvis.scale.set(0.56 * scale, 0.27 * scale, 0.38 * scale);
 
-    this.segment(
-      v.neck,
-      rig,
-      BODY.chest,
-      BODY.head,
-      0.17 * scale,
-      0.15 * scale,
-      alpha,
-      0.03 * scale,
-    );
+    this.segment(v.neck, rig, BODY.chest, BODY.head, 0.17 * scale, 0.15 * scale, alpha, 0.03 * scale);
 
-    const armPad = 0.055 * scale;
-    const legPad = 0.065 * scale;
-    this.segment(v.lUpperArm, rig, BODY.lShoulder, BODY.lElbow, 0.22 * scale, 0.2 * scale, alpha, armPad);
-    this.segment(v.lLowerArm, rig, BODY.lElbow, BODY.lHand, 0.19 * scale, 0.17 * scale, alpha, armPad);
-    this.segment(v.rUpperArm, rig, BODY.rShoulder, BODY.rElbow, 0.22 * scale, 0.2 * scale, alpha, armPad);
-    this.segment(v.rLowerArm, rig, BODY.rElbow, BODY.rHand, 0.19 * scale, 0.17 * scale, alpha, armPad);
-    this.segment(v.lUpperLeg, rig, BODY.lHip, BODY.lKnee, 0.27 * scale, 0.23 * scale, alpha, legPad);
-    this.segment(v.lLowerLeg, rig, BODY.lKnee, BODY.lFoot, 0.22 * scale, 0.19 * scale, alpha, legPad);
-    this.segment(v.rUpperLeg, rig, BODY.rHip, BODY.rKnee, 0.27 * scale, 0.23 * scale, alpha, legPad);
-    this.segment(v.rLowerLeg, rig, BODY.rKnee, BODY.rFoot, 0.22 * scale, 0.19 * scale, alpha, legPad);
+    this.curvedLimb(v.lArm, a, rig, BODY.lShoulder, BODY.lElbow, BODY.lHand, 0.125, 0.105, 0.082, alpha);
+    this.curvedLimb(v.rArm, a, rig, BODY.rShoulder, BODY.rElbow, BODY.rHand, 0.125, 0.105, 0.082, alpha);
+    this.curvedLimb(v.lLeg, a, rig, BODY.lHip, BODY.lKnee, BODY.lFoot, 0.155, 0.13, 0.095, alpha);
+    this.curvedLimb(v.rLeg, a, rig, BODY.rHip, BODY.rKnee, BODY.rFoot, 0.155, 0.13, 0.095, alpha);
 
     this.node(rig, BODY.head, alpha, this.a);
     v.head.position.copy(this.a);
     v.head.quaternion.copy(v.neck.quaternion);
     v.head.scale.set(0.29 * scale, 0.33 * scale, 0.27 * scale);
 
-    this.orientEndpoint(v.lHand, rig, BODY.lElbow, BODY.lHand, 0.14 * scale, 0.19 * scale, 0.1 * scale, alpha);
-    this.orientEndpoint(v.rHand, rig, BODY.rElbow, BODY.rHand, 0.14 * scale, 0.19 * scale, 0.1 * scale, alpha);
-
-    const forwardX = -Math.sin(a.yaw);
-    const forwardZ = -Math.cos(a.yaw);
-    this.node(rig, BODY.lFoot, alpha, this.a);
-    v.lFoot.position.set(
-      this.a.x + forwardX * 0.07 * scale,
-      this.a.y,
-      this.a.z + forwardZ * 0.07 * scale,
-    );
-    v.lFoot.scale.set(0.18 * scale, 0.11 * scale, 0.34 * scale);
-    v.lFoot.rotation.set(0, a.yaw, 0);
-
-    this.node(rig, BODY.rFoot, alpha, this.a);
-    v.rFoot.position.set(
-      this.a.x + forwardX * 0.07 * scale,
-      this.a.y,
-      this.a.z + forwardZ * 0.07 * scale,
-    );
-    v.rFoot.scale.set(0.18 * scale, 0.11 * scale, 0.34 * scale);
-    v.rFoot.rotation.set(0, a.yaw, 0);
+    this.orientEndpoint(v.lHand, rig, BODY.lElbow, BODY.lHand, 0.13 * scale, 0.18 * scale, 0.09 * scale, alpha);
+    this.orientEndpoint(v.rHand, rig, BODY.rElbow, BODY.rHand, 0.13 * scale, 0.18 * scale, 0.09 * scale, alpha);
+    this.orientEndpoint(v.lFoot, rig, BODY.lKnee, BODY.lFoot, 0.18 * scale, 0.24 * scale, 0.13 * scale, alpha);
+    this.orientEndpoint(v.rFoot, rig, BODY.rKnee, BODY.rFoot, 0.18 * scale, 0.24 * scale, 0.13 * scale, alpha);
 
     const helmet = v.group.getObjectByName("helmet") as THREE.Mesh | undefined;
     if (helmet) {
@@ -382,14 +412,13 @@ export class BodyView {
       helmet.scale.set(0.34 * scale, 0.24 * scale, 0.32 * scale);
     }
 
+    const forwardX = -Math.sin(a.yaw);
+    const forwardZ = -Math.cos(a.yaw);
     const len = weaponLength(a.weapon) * scale;
     this.node(rig, BODY.rHand, alpha, this.a);
     this.b.set(
       this.a.x + forwardX * len,
-      this.a.y +
-        (a.weapon === "spear" || a.weapon === "pitchfork"
-          ? 0.05 * scale
-          : -0.04 * scale),
+      this.a.y + (a.weapon === "spear" || a.weapon === "pitchfork" ? 0.05 * scale : -0.04 * scale),
       this.a.z + forwardZ * len,
     );
     this.d.subVectors(this.b, this.a);
@@ -402,11 +431,7 @@ export class BodyView {
     v.weapon.visible = a.weapon !== "fist" && !a.grabbedId;
     v.mats.weapon.color.setHex(weaponColor(a.weapon));
     v.mats.weapon.metalness =
-      a.weapon === "knife" ||
-      a.weapon === "spear" ||
-      a.weapon === "pitchfork"
-        ? 0.42
-        : 0.08;
+      a.weapon === "knife" || a.weapon === "spear" || a.weapon === "pitchfork" ? 0.42 : 0.08;
 
     this.tint(v.mats.head, a.skin, injurySum(a.injuries.head));
     this.tint(v.mats.chest, a.cloth, injurySum(a.injuries.torso));
