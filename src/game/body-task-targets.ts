@@ -120,6 +120,18 @@ class BodyTaskTargets {
     }
   }
 
+  priorityFor(a: Actor, node: number) {
+    const slot = this.slot(a.id);
+    if (slot < 0 || node < 0 || node >= STRIDE) return 0;
+    return this.priority[slot * STRIDE + node]!;
+  }
+
+  weightFor(a: Actor, node: number) {
+    const slot = this.slot(a.id);
+    if (slot < 0 || node < 0 || node >= STRIDE) return 0;
+    return this.weight[slot * STRIDE + node]!;
+  }
+
   private slot(id: number) {
     return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
