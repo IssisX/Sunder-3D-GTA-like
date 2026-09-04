@@ -8,9 +8,21 @@ let html = await readFile(indexPath, "utf8");
 const css = await readFile(path.join(outDir, "style.css"), "utf8");
 const js = await readFile(path.join(outDir, "sunder.js"), "utf8");
 
+const inlineCss = `<style>${css.replace(/<\/style/gi, "<\\/style")}</style>`;
+const inlineJs = `<script type="module">${js.replace(/<\/script/gi, "<\\/script")}</script>`;
+
+// IMPORTANT: use function replacers. A bundled JS string can legitimately
+// contain "$&"; passing the bundle as a replacement string would expand "$&"
+// into the matched external <script> tag and corrupt the inline executable.
 html = html
-  .replace(/<link\b[^>]*href=["']\.\/style\.css["'][^>]*>/i, `<style>${css.replace(/<\/style/gi, "<\\/style")}</style>`)
-  .replace(/<script\b[^>]*src=["']\.\/sunder\.js["'][^>]*><\/script>/i, `<script type="module">${js.replace(/<\/script/gi, "<\\/script")}</script>`);
+  .replace(
+    /<link\b[^>]*href=["']\.\/style\.css["'][^>]*>/i,
+    () => inlineCss,
+  )
+  .replace(
+    /<script\b[^>]*src=["']\.\/sunder\.js["'][^>]*><\/script>/i,
+    () => inlineJs,
+  );
 
 const outPath = path.join(outDir, "SUNDER.html");
 await writeFile(outPath, html, "utf8");
