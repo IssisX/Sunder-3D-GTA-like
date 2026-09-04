@@ -195,6 +195,7 @@ export class Game {
       this.acc += raw;
       let steps = 0;
       while (this.acc >= STEP && steps < 5) {
+        this.bodies.prepareInput(this.world, input, STEP);
         stepWorld(this.world, STEP, input, this.cam, simPlaying);
         this.bodies.step(this.world, STEP);
         this.acc -= STEP;
