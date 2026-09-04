@@ -658,7 +658,13 @@ function addBridge(w: World) {
   });
 }
 
-function human(w: World, faction: Faction, x: number, z: number, extra: Partial<Actor> = {}): Actor {
+function human(
+  w: World,
+  faction: Faction,
+  x: number,
+  z: number,
+  extra: Partial<Actor> = {},
+): Actor {
   const sex = w.rng();
   const stats = makeHumanStats(w, faction);
   const cloth =
@@ -668,7 +674,13 @@ function human(w: World, faction: Faction, x: number, z: number, extra: Partial<
         ? 0x3a3428
         : [0x5a4638, 0x4a3a32, 0x6a5850, 0x3e3430, 0x705848][(w.rng() * 5) | 0]!;
   const weapon: WeaponKind =
-    faction === "guard" ? (w.rng() > 0.5 ? "spear" : "club") : faction === "hunter" ? "knife" : "fist";
+    faction === "guard"
+      ? w.rng() > 0.5
+        ? "spear"
+        : "club"
+      : faction === "hunter"
+        ? "knife"
+        : "fist";
   return w.addActor({
     kind: "human",
     species: "human",
@@ -710,7 +722,12 @@ function addPeople(w: World) {
     a.routine = marketPts.map(([x, z]) => ({ x: x + (w.rng() - 0.5), z: z + (w.rng() - 0.5) }));
     a.routineI = i;
   });
-  human(w, "civilian", -13.2, 5.8, { routine: [{ x: -13.2, z: 5.8 }, { x: -4, z: 1 }] });
+  human(w, "civilian", -13.2, 5.8, {
+    routine: [
+      { x: -13.2, z: 5.8 },
+      { x: -4, z: 1 },
+    ],
+  });
   human(w, "civilian", -18, -3.5);
   human(w, "civilian", -18.2, 1.4);
   human(w, "civilian", 10.5, 9);

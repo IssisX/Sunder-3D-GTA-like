@@ -517,14 +517,14 @@ function checkCoactivity(): CheckResult {
   // damage, motor authority, the support polygon and body-vs-body load are all
   // in play in one event.
   const other = w.actors.find((o) => o.kind === "human" && o.alive)!;
-  place(w, other, a.x + 1.3, a.z);
+  place(w, other, a.x + 0.7, a.z);
   other.stanceAuth = 0;
   other.consciousness = 0.02;
   other.loco = "ragdoll";
   other.locoT = 1e6;
   run(w, 60);
   const plan = w.bodies.plan(a.body);
-  w.bodies.applyImpulse(a.body, plan.chest, a.mass * 9, a.mass * 2.2, 0, STEP);
+  w.bodies.applyImpulse(a.body, plan.chest, a.mass * 8, a.mass * 1.8, 0, STEP);
   a.consciousness = 0.55;
 
   const sample = () => ({
@@ -669,6 +669,132 @@ function checkImpactLocality(): CheckResult {
 }
 
 /* ------------------------------------------------------------------ *
+ * The AI's reading of the substrate
+ * ------------------------------------------------------------------ */
+
+/** Drops `n` limp bodies in a line across a corridor at (x, z). */
+function layBodies(w: World, n: number, x: number, z: number) {
+  const out: Actor[] = [];
+  for (const a of w.actors) {
+    if (a.kind !== "human" || !a.alive || out.length >= n) continue;
+    place(w, a, x + (out.length - (n - 1) / 2) * 0.55, z);
+    a.stanceAuth = 0;
+    a.consciousness = 0.02;
+    a.loco = "ragdoll";
+    a.locoT = 1e6;
+    out.push(a);
+  }
+  run(w, 90); // let them settle flat
+  return out;
+}
+
+/**
+ * A guard's route past a row of bodies. Returns the closest it ever came to
+ * one, m: steering that reads the ground keeps its distance.
+ */
+function measureGuardDetour() {
+  const w = freshWorld(2211);
+  stage(w, 30, 30); // player parked far away
+  const guard = w.actors.find((o) => o.faction === "guard" && o.alive)!;
+  place(w, guard, -30, -34);
+  const bodies = layBodies(w, 3, -30, -30);
+  // Send the guard through the line of bodies.
+  let closest = Infinity;
+  for (let i = 0; i < 300; i++) {
+    guard.routine = [];
+    guard.ai = "wander";
+    guard.wayX = -30;
+    guard.wayZ = -24;
+    guard.aiT = 1e6;
+    run(w, 1);
+    for (const o of bodies) closest = Math.min(closest, Math.hypot(guard.x - o.x, guard.z - o.z));
+  }
+  return closest;
+}
+
+/**
+ * A downed player and a guard beside them.
+ *
+ * Reading the body, the guard stops fighting and secures: takes hold and hauls
+ * the prisoner across the ground. Not reading it, the guard keeps swinging at
+ * someone who is already finished. Returns the distance the player was dragged,
+ * m -- which is zero unless a hold was actually taken.
+ */
+function measureSecure() {
+  const w = freshWorld(3312);
+  const a = stage(w, -32, 6); // open ground west of the village
+  const guard = w.actors.find((o) => o.faction === "guard" && o.alive)!;
+  place(w, guard, -30.8, 6);
+  guard.known.push(a.id);
+  guard.alert = 1;
+  w.wanted = 1;
+  // Every other guard is elsewhere: this measures one man securing a prisoner,
+  // not a crowd converging on the same body.
+  for (const o of w.actors) {
+    if (o.faction === "guard" && o.id !== guard.id) place(w, o, 40, -40);
+  }
+  a.consciousness = 0.05;
+  a.stanceAuth = 0;
+  a.loco = "down";
+  let held = 0;
+  for (let i = 0; i < 600; i++) {
+    // Concussed, so they stay under: recovery is real but slow.
+    a.injuries.head.bruise = Math.max(a.injuries.head.bruise, 1.1);
+    run(w, 1);
+    if (a.grabbedBy) held++;
+    if (w.phase === "captured") return held + 200;
+  }
+  return held;
+}
+
+/**
+ * Whether a fighter aims at the limb that is already gone.
+ *
+ * `impact-locality` above establishes that a crouched swing lands somewhere
+ * different from a standing one, because swing height is read from the
+ * attacker's own solved hand. What this measures is the decision: does an
+ * attacker facing a target whose legs are wrecked actually drop and go for
+ * them? Returns the share of combat ticks the guard spent crouched.
+ */
+function measurePressingTheInjury() {
+  const w = freshWorld(4413);
+  const a = stage(w, -32, 6);
+  const guard = w.actors.find((o) => o.faction === "guard" && o.alive)!;
+  for (const o of w.actors) {
+    if (o.faction === "guard" && o.id !== guard.id) place(w, o, 40, -40);
+  }
+  place(w, guard, -30.9, 6);
+  guard.weapon = "club";
+  guard.known.push(a.id);
+  guard.alert = 1;
+  w.wanted = 1;
+  // The legs are wrecked but the target is still on its feet, so the guard
+  // fights rather than secures and the only question is where it aims.
+  a.injuries.lleg.fracture = 0.75;
+  a.injuries.rleg.fracture = 0.75;
+  let crouched = 0;
+  let able = 0;
+  for (let i = 0; i < 300; i++) {
+    a.consciousness = 1;
+    a.stanceAuth = 1;
+    run(w, 1);
+    // Only ticks where the guard is on its feet and in range: chasing a target
+    // across a field, or lying on the ground, says nothing about where it
+    // intends to hit.
+    const up =
+      guard.loco !== "ragdoll" &&
+      guard.loco !== "getup" &&
+      guard.loco !== "down" &&
+      guard.loco !== "pin";
+    if (guard.ai === "combat" && up && Math.hypot(guard.x - a.x, guard.z - a.z) < 2.3) {
+      able++;
+      if (guard.crouch) crouched++;
+    }
+  }
+  return able > 15 ? crouched / able : 0;
+}
+
+/* ------------------------------------------------------------------ *
  * Suite
  * ------------------------------------------------------------------ */
 
@@ -686,6 +812,9 @@ export function runFalsifiers(): CheckResult[] {
     severance("supportBalance", "support->stays on its feet", measurePushSurvival, 5),
     severance("bodyPairs", "body-body drape", measureDrape, 0.05),
     severance("grabLoad", "grab->hauler load", measureDragLoad, 1e-3),
+    severance("bodyTactics", "bodies->routing", measureGuardDetour, 0.15),
+    severance("bodyTactics", "downed target->secured and dragged", measureSecure, 0.5),
+    severance("bodyTactics", "damaged limb->aim low", measurePressingTheInjury, 0.2),
     checkAblation(),
     checkCoactivity(),
   ];

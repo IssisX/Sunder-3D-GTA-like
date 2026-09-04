@@ -34,6 +34,14 @@ import {
   stepBodies,
   updateMotor,
 } from "./physique";
+import {
+  avoidBodies,
+  incapacity,
+  isHelpless,
+  isOffBalance,
+  shouldStrikeLow,
+  threatLevel,
+} from "./tactics";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
@@ -364,9 +372,19 @@ function stepPerception(w: World, dt: number) {
         w.addMemory(a, "threat", o.x, o.z, o.id, 1);
         if (!a.known.includes(o.id)) a.known.push(o.id);
       }
-      if (!o.alive) {
+      if (!o.alive || isHelpless(o)) {
         w.addMemory(a, "body", o.x, o.z, o.id, 1);
-        a.fear = Math.min(1, a.fear + 0.25 * (1 - a.courage));
+        // How badly wrecked, and whether it is one of ours. A man pinned under
+        // a heap in the street is a different sight from a body in a ditch.
+        const wreck = incapacity(o) * (o.faction === a.faction ? 1.5 : 0.8);
+        const heap = Math.min(1, o.pileLoad / 90);
+        a.fear = Math.min(1, a.fear + (0.14 + wreck * 0.22 + heap * 0.2) * (1 - a.courage));
+        if (a.faction === "guard" && o.faction === "guard" && a.shoutCd <= 0) {
+          a.alert = 1;
+          a.shoutCd = 4;
+          w.emitSound(a.x, a.z, 1.0, "shout", a.id);
+          w.wanted = Math.min(1, w.wanted + 0.12);
+        }
       }
     }
     for (let i = 0; i < w.burning.length; i++) {
@@ -386,6 +404,9 @@ function stepPerception(w: World, dt: number) {
 
 function isThreat(a: Actor, o: Actor, w: World) {
   if (!o.alive) return false;
+  // Someone who cannot stand is not a threat. Guards still deal with them --
+  // see the securing branch in humanAI -- but not by squaring up to them.
+  if (isHelpless(o) && a.faction !== "wild") return false;
   if (a.known.includes(o.id)) return true;
   if (o.kind === "player") {
     if (a.faction === "guard" && (w.wanted > 0.15 || (o.weapon !== "fist" && w.wanted > 0)))
@@ -474,7 +495,13 @@ function closestFire(w: World, x: number, z: number) {
   return { x: bx, z: bz, d: best };
 }
 
-function seek(a: Actor, x: number, z: number, speed: number) {
+/**
+ * Steer toward a point, around whatever is lying between here and there.
+ *
+ * `w` is threaded through so the route can consult the bodies on the ground.
+ * Without it every agent walks into the heap it just helped make.
+ */
+function seek(w: World, a: Actor, x: number, z: number, speed: number, towardId = 0) {
   const dx = x - a.x;
   const dz = z - a.z;
   const m = Math.hypot(dx, dz);
@@ -482,8 +509,9 @@ function seek(a: Actor, x: number, z: number, speed: number) {
     a.intendSpeed = 0;
     return m;
   }
-  a.intendX = dx / m;
-  a.intendZ = dz / m;
+  const dir = avoidBodies(w, a, dx / m, dz / m, towardId);
+  a.intendX = dir.x;
+  a.intendZ = dir.z;
   a.intendSpeed = speed;
   a.yaw = lerpAng(a.yaw, Math.atan2(-a.intendX, -a.intendZ), 0.25);
   return m;
@@ -491,6 +519,9 @@ function seek(a: Actor, x: number, z: number, speed: number) {
 
 function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d: number } | null) {
   const player = w.player();
+  // Crouching is a combat decision, taken below; it must not persist into
+  // walking a beat or fleeing a fire.
+  a.crouch = false;
   const seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
   const hostile = a.known.includes(player.id) || (a.faction === "guard" && w.wanted > 0.2);
   const panic = a.fear > 0.55 + a.courage * 0.35;
@@ -500,7 +531,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     const awayX = a.x - player.x;
     const awayZ = a.z - player.z;
     const m = Math.hypot(awayX, awayZ) || 1;
-    seek(a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
+    seek(w, a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
     if (a.shoutCd <= 0) {
       w.emitSound(a.x, a.z, 0.9, "scream", a.id);
       a.shoutCd = 2.4;
@@ -511,13 +542,13 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
 
   if (fire && fire.d < 7 && a.faction !== "guard" && a.courage < 0.7) {
     a.ai = "flee";
-    seek(a, a.x + (a.x - fire.x), a.z + (a.z - fire.z), 4.5);
+    seek(w, a, a.x + (a.x - fire.x), a.z + (a.z - fire.z), 4.5);
     return;
   }
 
   if (fire && fire.d < 5 && a.faction === "guard" && a.courage > 0.5) {
     a.ai = "extinguish";
-    const d = seek(a, fire.x, fire.z, 3.5);
+    const d = seek(w, a, fire.x, fire.z, 3.5);
     if (d < 1.6) {
       const i = w.cell(fire.x, fire.z);
       w.heat[i] *= 0.85;
@@ -528,17 +559,91 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
   }
 
   if (a.faction === "guard" && hostile) {
-    if (seesPlayer) {
-      a.ai = "combat";
+    // A guard already hauling someone finishes the job rather than restarting a
+    // fight; the drag itself is what ends in a capture.
+    if (a.grabbedId === player.id) {
+      a.ai = "recover";
+      a.crouch = false;
+      secureTarget(w, a, player, dt);
+      return;
+    }
+    if (seesPlayer || (isHelpless(player) && dist2(a.x, a.z, player.x, player.z) < 36)) {
       const d = Math.hypot(player.x - a.x, player.z - a.z);
-      if (d > 1.5) seek(a, player.x, player.z, 5.2);
-      else a.intendSpeed = 0.4;
       a.targetId = player.id;
       if (a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 1.0, "shout", a.id);
         a.shoutCd = 3;
         callAllies(w, a, player);
       }
+
+      // A man on the ground is not fought, he is secured. Closing to take hold
+      // of him is a different behaviour from squaring up, and it is what turns
+      // "the player is down" into something that actually happens to them.
+      if (isHelpless(player)) {
+        a.ai = "recover";
+        a.crouch = false;
+        // One pair of hands. A crowd all closing on the same body walks into
+        // each other, knocks each other down and drops the prisoner between
+        // them; the rest stand off and keep the ring.
+        const holder = w.actors.find((o) => o.grabbedId === player.id && o.alive);
+        let nearer = holder ? holder.id !== a.id : false;
+        if (!holder) {
+          for (const o of w.nearby(player.x, player.z, d)) {
+            if (o.id === a.id || o.faction !== a.faction || !o.alive || isHelpless(o)) continue;
+            if (Math.hypot(o.x - player.x, o.z - player.z) < d - 0.15) nearer = true;
+          }
+        }
+        if (nearer) {
+          const away = Math.hypot(a.x - player.x, a.z - player.z) || 1;
+          const rx = player.x + ((a.x - player.x) / away) * 2.4;
+          const rz = player.z + ((a.z - player.z) / away) * 2.4;
+          seek(w, a, rx, rz, 2.2, player.id);
+          return;
+        }
+        // Stop beside the body and reach down for it, rather than walking on
+        // to it. A guard that closes all the way puts its feet on a ribcage,
+        // trips over what it came to collect, and drops the prisoner -- which
+        // is the trip test working correctly on a decision that was wrong.
+        const STANDOFF = 1.05;
+        if (d > STANDOFF + 0.2) {
+          const ux = (a.x - player.x) / (d || 1);
+          const uz = (a.z - player.z) / (d || 1);
+          // Close at a walk: a body on the ground is something you step around.
+          seek(
+            w,
+            a,
+            player.x + ux * STANDOFF,
+            player.z + uz * STANDOFF,
+            d > 2.8 ? 4.4 : 1.6,
+            player.id,
+          );
+        } else {
+          a.intendSpeed = 0;
+          a.yaw = lerpAng(a.yaw, Math.atan2(-(player.x - a.x), -(player.z - a.z)), 0.3);
+          takeHold(w, a, player);
+        }
+        return;
+      }
+
+      a.ai = "combat";
+      // Commit against a target that is already losing its footing: close hard
+      // and take hold rather than trading blows it could still recover from.
+      const commit = isOffBalance(player) && a.courage > 0.4;
+      if (d > 1.5) seek(w, a, player.x, player.z, commit ? 6.0 : 5.2);
+      else a.intendSpeed = commit ? 1.2 : 0.4;
+      if (commit && d < 1.25 && !a.grabbedId && a.aggression > 0.35) {
+        takeHold(w, a, player);
+        return;
+      }
+
+      // Aim where the target is weakest. Crouching lowers the guard's own hand,
+      // and the strike height is read from that hand, so this genuinely changes
+      // which region the blow lands on rather than labelling it.
+      // Drop into a low guard while closing, not only once already in range:
+      // committing to the legs is a decision about the whole approach.
+      const low = shouldStrikeLow(player);
+      a.crouch = low && d < WEAPON_STATS[a.weapon].reach * 1.6 + 0.5;
+
       if (d < WEAPON_STATS[a.weapon].reach + 0.4 && a.attackCd <= 0) {
         a.strikeT = 0.32;
         a.strikeCd = 0.7 / (0.7 + a.competence);
@@ -547,9 +652,10 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
       }
       return;
     }
+    a.crouch = false;
     if (w.time - a.lastSeenT < 8) {
       a.ai = "pursue";
-      const d = seek(a, a.lastSeenX, a.lastSeenZ, 5.4);
+      const d = seek(w, a, a.lastSeenX, a.lastSeenZ, 5.4);
       if (d < 1.2) {
         a.ai = "search";
         a.searchT = 7;
@@ -560,7 +666,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     if (a.ai === "search" || a.searchT > 0) {
       a.searchT -= dt;
       a.ai = "search";
-      const d = seek(a, a.searchX, a.searchZ, 3.2);
+      const d = seek(w, a, a.searchX, a.searchZ, 3.2);
       if (d < 1 || a.aiT <= 0) pickSearch(w, a);
       followTracks(w, a);
       if (a.searchT <= 0) a.ai = "wander";
@@ -572,30 +678,50 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     const mem = a.memories.find((m) => m.kind === "threat" || m.kind === "sound");
     if (mem) {
       a.ai = "investigate";
-      seek(a, mem.x, mem.z, 3.6);
+      seek(w, a, mem.x, mem.z, 3.6);
       return;
     }
   }
 
+  // Rescue. The wounded are found by how incapacitated they are, not by blood
+  // alone -- a man pinned under a beam with a broken leg needs hauling out as
+  // much as a bleeding one -- and they are hauled AWAY from whatever is burning
+  // rather than toward a doorstep that may be inside it.
   const ally = w
-    .nearby(a.x, a.z, 8)
-    .find((o) => o.faction === a.faction && o.alive && o.blood < 0.55 && o.id !== a.id);
+    .nearby(a.x, a.z, 9)
+    .find(
+      (o) =>
+        o.faction === a.faction &&
+        o.alive &&
+        o.id !== a.id &&
+        !o.grabbedBy &&
+        (o.blood < 0.6 || incapacity(o) > 0.6),
+    );
   if (ally && a.loyalty > 0.45 && a.fear < 0.6) {
     a.ai = "rescue";
-    const d = seek(a, ally.x, ally.z, 3.8);
-    if (d < 1.2 && a.grabbedId === 0) {
-      a.grabbedId = ally.id;
-      ally.grabbedBy = a.id;
-      a.carry = ally.mass * 0.5;
+    if (a.grabbedId === ally.id) {
+      let tx = a.homeX;
+      let tz = a.homeZ;
+      if (fire && fire.d < 16) {
+        const dx = a.x - fire.x;
+        const dz = a.z - fire.z;
+        const m = Math.hypot(dx, dz) || 1;
+        tx = a.x + (dx / m) * 12;
+        tz = a.z + (dz / m) * 12;
+      }
+      seek(w, a, tx, tz, 2.4);
+      return;
     }
-    if (a.grabbedId === ally.id) seek(a, a.homeX, a.homeZ, 2.4);
+    const d0 = Math.hypot(ally.x - a.x, ally.z - a.z);
+    const d = seek(w, a, ally.x, ally.z, d0 > 2.6 ? 3.8 : 1.5, ally.id);
+    if (d < 1.2) takeHold(w, a, ally);
     return;
   }
 
   if (a.routine.length) {
     a.ai = "work";
     const wp = a.routine[a.routineI % a.routine.length]!;
-    const d = seek(a, wp.x, wp.z, 1.7);
+    const d = seek(w, a, wp.x, wp.z, 1.7);
     if (d < 0.8) {
       a.routineI++;
       a.intendSpeed = 0;
@@ -610,7 +736,73 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     a.wayZ = a.homeZ + (w.rng() - 0.5) * 10;
     a.aiT = 3 + w.rng() * 4;
   }
-  seek(a, a.wayX, a.wayZ, 1.5);
+  seek(w, a, a.wayX, a.wayZ, 1.5);
+}
+
+/**
+ * Take hold of a target: the same physical grab the player uses, so the
+ * attachment constraint hauls on both bodies and the target's weight shows up
+ * in the holder's own balance.
+ */
+function takeHold(w: World, a: Actor, t: Actor) {
+  if (a.grabbedId || t.grabbedBy) return;
+  if (a.body < 0) return;
+  const B = w.bodies;
+  const grip = armMotor(a);
+  if (grip < 0.3) return;
+  // A struggling target is harder to get hold of than a limp one.
+  const resist = threatLevel(t) * (t.mass / (a.mass + t.mass));
+  if (resist > 0.34 + a.strength * 0.2) {
+    t.stanceAuth = Math.max(0.2, t.stanceAuth - 0.15);
+    return;
+  }
+  a.grabbedId = t.id;
+  t.grabbedBy = a.id;
+  a.grabNodeA = B.plan(a.body).grabHand;
+  a.grabNodeB = t.body >= 0 ? B.plan(t.body).chest : -1;
+  // Long enough to hold someone at arm's length beside you rather than under
+  // your feet.
+  a.grabRest = 0.9;
+  a.carry = t.mass * 0.5;
+  w.emitSound(a.x, a.z, 0.5, "grab", a.id);
+  if (t.kind === "player") w.whisper("A hand closes on you.");
+}
+
+/**
+ * Drag a held prisoner back to the barracks. Capture is the end of a haul that
+ * really happened -- across the ground, leaving a drag mark -- rather than a
+ * timer that fires because a guard stood near you.
+ */
+const GAOL_X = 9.5;
+const GAOL_Z = -8.2;
+
+function secureTarget(w: World, a: Actor, t: Actor, dt: number) {
+  if (!t.alive) {
+    releaseGrab(w, a);
+    return;
+  }
+  // Fighting free: a target that recovers its feet and its strength can break
+  // the hold, and the holder's grip is its own arm's motor authority.
+  if (threatLevel(t) > 0.45 && !isHelpless(t)) {
+    releaseGrab(w, a);
+    w.emitSound(a.x, a.z, 0.4, "grab", a.id);
+    return;
+  }
+  const d = seek(w, a, GAOL_X, GAOL_Z, 2.6, t.id);
+  if (t.kind === "player") {
+    w.captureT += dt;
+    // Capture is the end of a haul, so it takes a haul: reaching the barracks
+    // with a prisoner already in hand is not the same as having dragged one
+    // there, and a guard who happened to be standing at the door should not
+    // skip the part the player is supposed to experience.
+    if ((d < 2.2 && w.captureT > 1.6) || w.captureT > 14) {
+      w.phase = "captured";
+      w.captureT = 0;
+      releaseGrab(w, a);
+    }
+  } else if (d < 2.5) {
+    releaseGrab(w, a);
+  }
 }
 
 function pickSearch(w: World, a: Actor) {
@@ -677,7 +869,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.fear = Math.min(1, a.fear + 0.3);
       const tx = threat ? threat.x : fire ? fire.x : a.x;
       const tz = threat ? threat.z : fire ? fire.z : a.z;
-      seek(a, a.x + (a.x - tx) * 2, a.z + (a.z - tz) * 2, a.species === "cow" ? 4.2 : 6.5);
+      seek(w, a, a.x + (a.x - tx) * 2, a.z + (a.z - tz) * 2, a.species === "cow" ? 4.2 : 6.5);
       if (a.species !== "deer" && a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 0.7, "animal", a.id);
         a.shoutCd = 1.6;
@@ -691,7 +883,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * (a.species === "deer" ? 16 : 5);
       a.aiT = 2 + w.rng() * 4;
     }
-    seek(a, a.wayX, a.wayZ, 1.1);
+    seek(w, a, a.wayX, a.wayZ, 1.1);
     return;
   }
   if (a.species === "wolf") {
@@ -706,11 +898,19 @@ function beastAI(w: World, a: Actor, _dt: number) {
             o.species === "pig" ||
             (o.kind === "player" && (o.blood < 0.85 || o.bleed > 0.1))),
       )
-      .sort((b, c) => dist2(a.x, a.z, b.x, b.z) - dist2(a.x, a.z, c.x, c.z))[0];
+      // Nearest, but weighted by how badly the prey is already hurt: a wolf
+      // takes the animal that cannot run, not the one that happens to be
+      // closest. `incapacity` is the substrate's own number, so a limp a wolf
+      // reacts to is a limp the solver is producing.
+      .sort(
+        (b, c) =>
+          dist2(a.x, a.z, b.x, b.z) * (1 - incapacity(b) * 0.7) -
+          dist2(a.x, a.z, c.x, c.z) * (1 - incapacity(c) * 0.7),
+      )[0];
     if (prey) {
       a.ai = "hunt";
       a.targetId = prey.id;
-      const d = seek(a, prey.x, prey.z, 6.4);
+      const d = seek(w, a, prey.x, prey.z, 6.4 * (0.85 + incapacity(prey) * 0.3));
       if (d < 1.3 && a.attackCd <= 0) {
         a.strikeT = 0.28;
         a.strikeHit = 0;
@@ -724,7 +924,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * 18;
       a.aiT = 4;
     }
-    seek(a, a.wayX, a.wayZ, 2.4);
+    seek(w, a, a.wayX, a.wayZ, 2.4);
     return;
   }
   if (a.species === "bear") {
@@ -743,7 +943,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
     ) {
       a.ai = "hunt";
       a.targetId = close.id;
-      const d = seek(a, close.x, close.z, 5.6);
+      const d = seek(w, a, close.x, close.z, 5.6);
       if (d < 2 && a.attackCd <= 0) {
         a.strikeT = 0.4;
         a.strikeHit = 0;
@@ -757,7 +957,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * 14;
       a.aiT = 5;
     }
-    seek(a, a.wayX, a.wayZ, 1.8);
+    seek(w, a, a.wayX, a.wayZ, 1.8);
   }
 }
 
@@ -1526,6 +1726,15 @@ function stepInjury(w: World, dt: number) {
     if (a.blood < 0.25) a.consciousness = Math.min(a.consciousness, a.blood * 2);
     if (a.breath <= 0) a.consciousness -= dt * 0.4;
     if (injurySum(a.injuries.head) > 1.6) a.consciousness -= dt * 0.15;
+    // Coming round. Consciousness could only ever fall, which made every
+    // knockdown terminal -- there was no state between standing and dead. A
+    // body that is breathing, not bleeding out and not concussed past saving
+    // comes back, slowly, and how slowly is what head trauma costs you.
+    if (a.alive && a.blood > 0.35 && a.breath > 0.25) {
+      const head = injurySum(a.injuries.head);
+      const rate = 0.055 * clamp(1 - head / 1.8, 0, 1) * clamp((a.blood - 0.35) / 0.5, 0, 1);
+      a.consciousness += rate * dt;
+    }
     a.consciousness = clamp(a.consciousness, 0, 1);
     if (a.alive && (a.blood <= 0.02 || a.consciousness <= 0 || a.y < -2.5)) {
       kill(w, a, a.blood <= 0.02 ? "bled out" : a.y < -2.5 ? "drowned" : "the body gave out");
@@ -1537,13 +1746,14 @@ function stepInjury(w: World, dt: number) {
       a.stanceAuth = 0;
       a.downT += dt;
       if (a.kind === "player") {
-        w.phase = "down";
-        const guards = w.nearby(a.x, a.z, 4).filter((g) => g.faction === "guard" && g.alive);
-        if (guards.length && a.downT > 1.6) {
-          w.phase = "captured";
-          w.captureT = 0;
-          w.whisper("They drag you.");
-        }
+        // Do not clobber a capture that has already happened: being unconscious
+        // is why they took you, not a reason to forget that they did.
+        if (w.phase !== "captured" && w.phase !== "dead") w.phase = "down";
+        // Capture is no longer a proximity timer. A guard has to reach you,
+        // take hold, and haul you across the ground to the barracks, which is
+        // why a doorway full of bodies is a real reason none of them gets to
+        // you. `secureTarget` ends it.
+        if (a.grabbedBy) w.whisper("They drag you.");
       }
     }
   }

@@ -38,6 +38,7 @@ import {
   solvePair,
   solvePose,
   poseError,
+  attachToPoint,
   solveWorld,
 } from "./body";
 import {
@@ -505,7 +506,9 @@ function gatherPairs(w: World) {
 }
 
 interface Attachment {
-  ka: number;
+  /** Node index within the holder's own body. */
+  nodeA: number;
+  /** Absolute node index of the far side, or -1 when the far side is a prop. */
   kb: number;
   rest: number;
   gain: number;
@@ -513,6 +516,7 @@ interface Attachment {
   prop: Prop | null;
 }
 const attachments: Attachment[] = [];
+const propPush = { x: 0, y: 0, z: 0 };
 
 /**
  * Rebuilds the grab attachment set for this tick.
@@ -528,7 +532,6 @@ function gatherAttachments(w: World) {
   for (const a of w.actors) {
     if (!a.grabbedId || a.body < 0) continue;
     const hand = a.grabNodeA >= 0 ? a.grabNodeA : B.plan(a.body).grabHand;
-    const ka = B.base(a.body) + hand;
     const t = w.actor(a.grabbedId);
     if (t && t.body >= 0) {
       const node =
@@ -540,10 +543,10 @@ function gatherAttachments(w: World) {
         continue;
       }
       attachments.push({
-        ka,
+        nodeA: hand,
         kb: B.base(t.body) + node,
         rest: a.grabRest,
-        gain: 0.35 * grip,
+        gain: 0.28 * grip,
         holder: a,
         prop: null,
       });
@@ -552,10 +555,10 @@ function gatherAttachments(w: World) {
     const pr = w.prop(a.grabbedId);
     if (pr) {
       attachments.push({
-        ka,
+        nodeA: hand,
         kb: -1,
         rest: a.grabRest,
-        gain: 0.42 * clamp(armMotor(a), 0, 1),
+        gain: 0.34 * clamp(armMotor(a), 0, 1),
         holder: a,
         prop: pr,
       });
@@ -586,30 +589,48 @@ export function releaseGrab(w: World, a: Actor) {
 function solveAttachments(w: World, h: number) {
   const B = w.bodies;
   for (const at of attachments) {
+    // How much mass is braced behind the grip. A strong arm that still answers
+    // hauls with the body behind it; a failing one is hauling with the hand
+    // alone, which is why grip strength decides whether a heavy body can be
+    // moved at all. Feet on the ground add far more than the body does: the
+    // reaction goes into the floor, which is the difference between planting
+    // yourself to drag someone and being pulled over by them.
+    const holder = at.holder;
+    const footing = holder.body >= 0 ? Math.min(1, B.supportCount[holder.body]! * 0.5) : 0;
+    const brace = holder.mass * (0.62 + footing * 2.5) * clamp(armMotor(holder), 0, 1);
     if (at.prop) {
       const pr = at.prop;
-      const dx = B.px[at.ka]! - pr.x;
-      const dy = B.py[at.ka]! - (pr.y + pr.sy * 0.5);
-      const dz = B.pz[at.ka]! - pr.z;
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < 1e-12) continue;
-      const d = Math.sqrt(d2);
-      const C = d - at.rest;
-      if (C <= 0) continue;
-      const wa = B.invMass[at.ka]!;
-      const wb = pr.mass > 0 ? 1 / pr.mass : 0;
-      const wSum = wa + wb;
-      if (wSum <= 0) continue;
-      const s = (C * at.gain) / (d * wSum);
-      B.px[at.ka] = B.px[at.ka]! - dx * s * wa;
-      B.py[at.ka] = B.py[at.ka]! - dy * s * wa;
-      B.pz[at.ka] = B.pz[at.ka]! - dz * s * wa;
-      pr.x += dx * s * wb;
-      pr.y += dy * s * wb;
-      pr.z += dz * s * wb;
-      if (EDGES.grabLoad) at.holder.dragLoad += (C * at.gain) / (wSum * h);
+      const invB = pr.mass > 0 ? 1 / pr.mass : 0;
+      const j = attachToPoint(
+        B,
+        at.holder.body,
+        at.nodeA,
+        pr.x,
+        pr.y + pr.sy * 0.5,
+        pr.z,
+        invB,
+        at.rest,
+        at.gain,
+        h,
+        brace,
+        propPush,
+      );
+      pr.x += propPush.x;
+      pr.y += propPush.y;
+      pr.z += propPush.z;
+      if (EDGES.grabLoad) at.holder.dragLoad += j;
     } else {
-      const j = solveAttach(B, at.ka, at.kb, at.rest, at.gain, h);
+      const j = solveAttach(
+        B,
+        at.holder.body,
+        at.nodeA,
+        at.kb,
+        B.invMass[at.kb]!,
+        at.rest,
+        at.gain,
+        h,
+        brace,
+      );
       if (EDGES.grabLoad) at.holder.dragLoad += j;
     }
   }
@@ -937,14 +958,16 @@ const LIMP_RATE = 4.2;
  * stop and the chest keeps going.
  */
 export function checkTrips(w: World, dt: number) {
-  const B = w.bodies;
   for (let i = 0; i < pairCount; i++) {
-    const ia = pairActA[i]!;
-    const ib = pairActB[i]!;
-    tripOne(w, w.actors[ia]!, pairA[i]!, dt);
-    tripOne(w, w.actors[ib]!, pairB[i]!, dt);
+    const a = w.actors[pairActA[i]!]!;
+    const b = w.actors[pairActB[i]!]!;
+    // You do not trip over the body you are carrying.
+    const linked = a.grabbedId === b.id || b.grabbedId === a.id;
+    if (!linked) {
+      tripOne(w, a, pairA[i]!, dt);
+      tripOne(w, b, pairB[i]!, dt);
+    }
   }
-  void B;
 }
 
 const TRIP_H = 0.17;

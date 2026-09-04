@@ -66,6 +66,8 @@ export const EDGES = {
   bodyPairs: true,
   /** grab reaction -> the grabber's own load and balance */
   grabLoad: true,
+  /** solved body state -> what agents perceive and decide (see tactics.ts) */
+  bodyTactics: true,
 };
 
 /* ------------------------------------------------------------------ *
@@ -746,6 +748,13 @@ export class Bodies {
       this.rx[k] = this.px[k]!;
       this.ry[k] = this.py[k]!;
       this.rz[k] = this.pz[k]!;
+      // Carry the pose targets along. Leaving them behind makes the tracking
+      // error the full teleport distance for one tick, which the pose-loss test
+      // reads as the body having been physically overpowered -- so anything
+      // teleported instantly falls over.
+      this.tx[k] = this.tx[k]! + dx;
+      this.ty[k] = this.ty[k]! + dy;
+      this.tz[k] = this.tz[k]! + dz;
     }
   }
 
@@ -1051,6 +1060,14 @@ const AIR_DRAG = 0.22;
  * enough that a limb cannot outrun a falling body.
  */
 const MAX_POSE_ACCEL = 600;
+/**
+ * Ceiling on the acceleration a grip may impose on what it holds, m/s^2.
+ *
+ * A hand transmits a bounded force. Without this a braced grip is effectively a
+ * winch: it closes the whole gap every substep, which hauls a body across the
+ * ground fast enough to kill it and yanks the holder off their feet.
+ */
+const MAX_GRIP_ACCEL = 900;
 
 /**
  * Semi-implicit prediction step. Velocity is updated before position, which is
@@ -1238,42 +1255,133 @@ function project(B: Bodies, ka: number, kb: number, rest: number, mode: number) 
 }
 
 /**
- * Soft attachment between two nodes, used for grabs. `gain` is the fraction of
- * the error resolved per substep; both ends move in inverse-mass proportion,
- * so grabbing something heavy pulls the grabber as hard as it pulls the load.
+ * Soft attachment between two nodes, used for grabs.
+ *
+ * Hauling on something is done with the whole body, not with the hand. Solving
+ * against the hand node's own 1.6 kg means a grip can barely move a torso --
+ * essentially all of the correction goes into the arm. `brace` is the share of
+ * the holder's mass the grip is braced against, and the resulting displacement
+ * is applied across the holder, because that is what actually moved.
+ *
+ * Both ends still move in inverse-mass proportion, so grabbing something heavy
+ * pulls the holder as hard as it pulls the load.
+ *
  * Returns the transmitted impulse magnitude, N*s.
  */
 export function solveAttach(
   B: Bodies,
-  ka: number,
+  slotA: number,
+  nodeA: number,
   kb: number,
+  invB: number,
   rest: number,
   gain: number,
   h: number,
+  brace: number,
 ) {
+  const ka = B.base(slotA) + nodeA;
   const dx = B.px[ka]! - B.px[kb]!;
   const dy = B.py[ka]! - B.py[kb]!;
   const dz = B.pz[ka]! - B.pz[kb]!;
+  return applyAttach(B, slotA, nodeA, ka, dx, dy, dz, invB, rest, gain, h, brace, kb, ATTACH_OUT);
+}
+
+/** Scratch for the free-body branch of an attachment; never allocated per call. */
+const ATTACH_OUT = { x: 0, y: 0, z: 0 };
+
+/**
+ * Attachment between a held node and a point in space that belongs to something
+ * outside the node store -- a prop. The displacement the far side should take
+ * is written into `out` for the caller to apply.
+ */
+export function attachToPoint(
+  B: Bodies,
+  slotA: number,
+  nodeA: number,
+  tx: number,
+  ty: number,
+  tz: number,
+  invB: number,
+  rest: number,
+  gain: number,
+  h: number,
+  brace: number,
+  out: { x: number; y: number; z: number },
+) {
+  const ka = B.base(slotA) + nodeA;
+  return applyAttach(
+    B,
+    slotA,
+    nodeA,
+    ka,
+    B.px[ka]! - tx,
+    B.py[ka]! - ty,
+    B.pz[ka]! - tz,
+    invB,
+    rest,
+    gain,
+    h,
+    brace,
+    -1,
+    out,
+  );
+}
+
+function applyAttach(
+  B: Bodies,
+  slotA: number,
+  nodeA: number,
+  ka: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  invB: number,
+  rest: number,
+  gain: number,
+  h: number,
+  brace: number,
+  kb: number,
+  out: { x: number; y: number; z: number },
+) {
+  out.x = 0;
+  out.y = 0;
+  out.z = 0;
   const d2 = dx * dx + dy * dy + dz * dz;
   if (d2 < 1e-12) return 0;
   const d = Math.sqrt(d2);
   const C = d - rest;
   if (C <= 0) return 0;
-  const wa = B.invMass[ka]!;
-  const wb = B.invMass[kb]!;
-  const wSum = wa + wb;
+  const mA = B.mass[ka]! + Math.max(0, brace);
+  const wa = 1 / mA;
+  const wSum = wa + invB;
   if (wSum <= 0) return 0;
-  const s = (C * gain) / (d * wSum);
-  B.px[ka] = B.px[ka]! - dx * s * wa;
-  B.py[ka] = B.py[ka]! - dy * s * wa;
-  B.pz[ka] = B.pz[ka]! - dz * s * wa;
-  B.px[kb] = B.px[kb]! + dx * s * wb;
-  B.py[kb] = B.py[kb]! + dy * s * wb;
-  B.pz[kb] = B.pz[kb]! + dz * s * wb;
+  const pull = Math.min(C * gain, MAX_GRIP_ACCEL * h * h);
+  const s = pull / (d * wSum);
+  const ax = -dx * s * wa;
+  const ay = -dy * s * wa;
+  const az = -dz * s * wa;
+  const share = brace > 0 ? brace / mA : 0;
+  const b = B.base(slotA);
+  const n = B.count[slotA]!;
+  for (let i = 0; i < n; i++) {
+    const k = b + i;
+    const f = i === nodeA ? 1 : share;
+    B.px[k] = B.px[k]! + ax * f;
+    B.py[k] = B.py[k]! + ay * f;
+    B.pz[k] = B.pz[k]! + az * f;
+  }
+  if (kb >= 0) {
+    B.px[kb] = B.px[kb]! + dx * s * invB;
+    B.py[kb] = B.py[kb]! + dy * s * invB;
+    B.pz[kb] = B.pz[kb]! + dz * s * invB;
+  } else {
+    out.x = dx * s * invB;
+    out.y = dy * s * invB;
+    out.z = dz * s * invB;
+  }
   // |dp| / (w * h) has units of m / ((1/kg) * s) = N*s
-  return (C * gain) / (wSum * h);
+  return pull / (wSum * h);
 }
-
 /**
  * World contacts against the cached collider shortlist plus the ground plane.
  *
@@ -1416,13 +1524,20 @@ function contact(
   // body loses and regains its base of support every other tick.
   if (pen > -SUPPORT_EPS && ny > 0.3) B.touched[k] = 1;
   if (pen <= 0) return;
+  // A penetration deeper than the node itself is not a collision, it is a body
+  // that started inside geometry -- a teleport, a spawn, a collapsing wall that
+  // appeared around it. Push it out, but do not bill it for an impact it never
+  // had: the alternative is that anything placed badly is instantly maimed.
+  const artefact = pen > B.rad[k]!;
   // signed normal displacement over the substep: v_n * h
   const on = (B.px[k]! - B.ox[k]!) * nx + (B.py[k]! - B.oy[k]!) * ny + (B.pz[k]! - B.oz[k]!) * nz;
   if (on < 0) {
     const closing = -on / h; // m/s
-    B.jimp[k] = B.jimp[k]! + B.mass[k]! * closing; // N*s, summed: this is force
-    if (closing > B.vmax[k]!) B.vmax[k] = closing; // m/s, peak: this is damage
-    if (hard > B.jhard[k]!) B.jhard[k] = hard;
+    if (!artefact) {
+      B.jimp[k] = B.jimp[k]! + B.mass[k]! * closing; // N*s, summed: this is force
+      if (closing > B.vmax[k]!) B.vmax[k] = closing; // m/s, peak: this is damage
+      if (hard > B.jhard[k]!) B.jhard[k] = hard;
+    }
     // remove the closing normal velocity (perfectly inelastic)
     B.ox[k] = B.ox[k]! + nx * on;
     B.oy[k] = B.oy[k]! + ny * on;
@@ -1451,6 +1566,7 @@ function contact(
   B.px[k] = B.px[k]! - tx * s;
   B.py[k] = B.py[k]! - ty * s;
   B.pz[k] = B.pz[k]! - tz * s;
+  if (artefact) return;
   const slide = (tm * s) / h; // m/s of sliding actually arrested
   B.jtan[k] = B.jtan[k]! + B.mass[k]! * slide;
   if (slide > B.vtan[k]!) B.vtan[k] = slide;
