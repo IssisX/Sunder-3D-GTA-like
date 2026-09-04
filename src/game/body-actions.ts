@@ -18,6 +18,7 @@ type GrabPhase =
   | "recover";
 
 type RecoverFrom = "reach" | "release";
+type Vec3 = readonly [number, number, number];
 
 interface GrabMotion {
   phase: GrabPhase;
@@ -32,23 +33,23 @@ const RELEASE_T = 0.15;
 const RECOVER_T = 0.18;
 
 const ANTICIPATE = {
-  shoulder: [0.3, 1.3, -0.07] as const,
-  elbow: [0.34, 1.08, -0.03] as const,
-  hand: [0.27, 0.98, -0.12] as const,
+  shoulder: [0.3, 1.3, -0.07] as Vec3,
+  elbow: [0.34, 1.08, -0.03] as Vec3,
+  hand: [0.27, 0.98, -0.12] as Vec3,
   chestZ: -0.035,
 };
 
 const CONTACT = {
-  shoulder: [0.27, 1.29, 0.08] as const,
-  elbow: [0.32, 1.1, 0.31] as const,
-  hand: [0.2, 1.01, 0.62] as const,
+  shoulder: [0.27, 1.29, 0.08] as Vec3,
+  elbow: [0.32, 1.1, 0.31] as Vec3,
+  hand: [0.2, 1.01, 0.62] as Vec3,
   chestZ: 0.025,
 };
 
 const RELEASE = {
-  shoulder: [0.25, 1.3, 0.14] as const,
-  elbow: [0.25, 1.16, 0.52] as const,
-  hand: [0.12, 1.12, 0.86] as const,
+  shoulder: [0.25, 1.3, 0.14] as Vec3,
+  elbow: [0.25, 1.16, 0.52] as Vec3,
+  hand: [0.12, 1.12, 0.86] as Vec3,
   chestZ: 0.09,
 };
 
@@ -108,10 +109,10 @@ function applyPose(
 ) {
   if (!canPose(a) || phase === "idle") return;
 
-  let shoulder = CONTACT.shoulder;
-  let elbow = CONTACT.elbow;
-  let hand = CONTACT.hand;
-  let chestZ = CONTACT.chestZ;
+  let shoulder: Vec3 = CONTACT.shoulder;
+  let elbow: Vec3 = CONTACT.elbow;
+  let hand: Vec3 = CONTACT.hand;
+  let chestZ: number = CONTACT.chestZ;
   let weight = 1;
   let support = 0;
 
