@@ -67,11 +67,8 @@ function calmCrowdAI(a: Actor) {
 
 /**
  * Locomotion/task generator only.
- *
- * Intent shaping happens before World simulation. Whole-body task generation
- * happens afterward, against the root/mechanical state that the body solver is
- * actually about to consume. This prevents a one-step frame mismatch where
- * the articulated body was perpetually chasing stale task coordinates.
+ * Intent shaping happens before World simulation; body tasks are generated from
+ * the current physical/mechanical state immediately before actuation.
  */
 export class AnimationController extends AnimatedPhysicalBodies {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
@@ -160,7 +157,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
     super.captureInput(input);
   }
 
-  /** Pre-world intent shaping only. No articulated task coordinates are emitted here. */
   prepareStep(w: World, dt: number) {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
 
@@ -256,9 +252,8 @@ export class AnimationController extends AnimatedPhysicalBodies {
     }
   }
 
-  /** Post-world, pre-body-solve target generation against current root state. */
   prepareBodyStep(w: World, dt: number) {
-    void dt;
+    const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
     bodyTaskTargets.beginStep();
 
     for (let i = 0; i < w.actors.length; i++) {
@@ -277,9 +272,30 @@ export class AnimationController extends AnimatedPhysicalBodies {
       );
       this.lastX[slot] = a.x;
       this.lastZ[slot] = a.z;
-      const stride = lerp(0.54, 1.08, this.runBlend[slot]!) * bodyScale(a);
-      if (traveled > 1e-5 && stride > 1e-5) {
-        const adv = Math.min(1.15, (traveled / stride) * TAU);
+
+      const rig = this.get(a);
+      let physicalSpeed = traveled / Math.max(h, 1e-5);
+      if (rig?.initialized) {
+        sampleMechanicalState(w, a, rig, h, this.mech);
+        physicalSpeed = Math.hypot(this.mech.velX, this.mech.velZ);
+      }
+
+      // Phase-matched cadence. Physical COM velocity remains the primary source,
+      // but intent contributes enough phase to initiate stepping instead of the
+      // old self-locking "must already move before feet can move" loop.
+      const commandSpeed = this.rootSpeed[slot]!;
+      const intentBlend =
+        a.kind === "player"
+          ? 0.72
+          : calmCrowdAI(a)
+            ? 0.14
+            : 0.4;
+      const phaseSpeed =
+        physicalSpeed + Math.max(0, commandSpeed - physicalSpeed) * intentBlend;
+      const cycleDistance =
+        lerp(1.45, 2.55, this.runBlend[slot]!) * bodyScale(a);
+      if (phaseSpeed > 0.035 && cycleDistance > 1e-5) {
+        const adv = Math.min(0.5, (phaseSpeed * h / cycleDistance) * TAU);
         let p = this.phase[slot]! + adv;
         if (p >= TAU) p -= TAU * Math.floor(p / TAU);
         this.phase[slot] = p;
@@ -287,7 +303,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
       a.walkPhase = this.phase[slot]!;
 
       if (!locomotionEligible(a)) continue;
-      const rig = this.get(a);
       if (!rig?.initialized || rig.mode !== "follow") continue;
       this.writeLocomotionTasks(w, a, rig, slot);
     }
@@ -360,7 +375,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
     bodyTaskTargets.offerLocal(a, BODY.rHand, 0.35, 0.81 + Math.abs(arm) * 0.04, arm, 0.78, TASK_PRIORITY.LOCOMOTION);
   }
 
-  /** Capture-point recovery: x_cp = x_com + v_com / sqrt(g / h). */
   private offerCorrectiveStep(
     w: World,
     a: Actor,
