@@ -309,6 +309,7 @@ function TouchControls({
       <div className="touch-right pointer-events-none absolute right-0 bottom-0 z-20 flex flex-col items-end gap-2 p-3 pb-[max(1.25rem,env(safe-area-inset-bottom))] pr-[max(0.75rem,env(safe-area-inset-right))]">
         <div className="flex gap-2">
           <ActionBtn id="sprint" label="Run" onVirtual={onVirtual} />
+          <ActionBtn id="crouch" label="Duck" onVirtual={onVirtual} />
           <ActionBtn id="jump" label="Jump" onVirtual={onVirtual} />
         </div>
         <div className="flex gap-2">
@@ -317,8 +318,8 @@ function TouchControls({
         </div>
         <div className="flex gap-2">
           <ActionBtn id="kick" label="Kick" onVirtual={onVirtual} />
+          <ActionBtn id="shove" label="Shove" onVirtual={onVirtual} />
           <ActionBtn id="ignite" label="Fire" onVirtual={onVirtual} />
-          <ActionBtn id="crouch" label="Duck" onVirtual={onVirtual} />
         </div>
       </div>
       {(coach || hint) && (

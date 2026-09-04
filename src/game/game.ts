@@ -6,7 +6,7 @@ import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
-import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR } from "./physique";
+import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P } from "./physique";
 
 export class Game {
   world = new World();
@@ -382,22 +382,60 @@ export class Game {
         p.kickT = KICK_DUR;
         p.strikeHit = 0;
       },
+      forceGrab: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        if (!p.grabbedId) {
+          p.grabT = GRAB_DUR;
+          p.strikeHit = 0;
+        }
+      },
+      setWeapon: (kind: string) => {
+        const p = self.world.player();
+        if (kind === "fist" || kind === "knife" || kind === "club" || kind === "spear" || kind === "torch" || kind === "board" || kind === "pitchfork") {
+          p.weapon = kind;
+        }
+      },
+      forceFlinch: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        p.flinchT = FLINCH_DUR;
+        if (p.body) p.body.lastHit = P.head;
+      },
       getCombat: () => {
         const p = self.world.player();
-        let best: { d: number; loco: string; pain: number; id: number; balance: number } | null = null;
+        let best: { d: number; loco: string; pain: number; id: number; balance: number; flinchT?: number } | null = null;
         for (const o of self.world.actors) {
           if (o.id === p.id) continue;
           const d = Math.hypot(o.x - p.x, o.z - p.z);
-          if (!best || d < best.d) best = { d, loco: o.loco, pain: o.pain, id: o.id, balance: o.balance };
+          if (!best || d < best.d) best = { d, loco: o.loco, pain: o.pain, id: o.id, balance: o.balance, flinchT: o.flinchT };
         }
         const hand = p.body?.parts[6];
+        const left = p.body?.parts[4];
         return {
           strikeT: p.strikeT,
           kickT: p.kickT,
           shoveT: p.shoveT,
+          grabT: p.grabT,
+          flinchT: p.flinchT,
+          grabbedId: p.grabbedId,
+          weapon: p.weapon,
+          twoHand: p.body?.grab?.myPart2 ?? -1,
           handZ: hand ? hand.z - p.z : 0,
           handFwd: hand
             ? -(hand.x - p.x) * Math.sin(p.yaw) + -(hand.z - p.z) * Math.cos(p.yaw)
+            : 0,
+          handY: hand ? hand.y - p.y : 0,
+          leftFwd: left
+            ? -(left.x - p.x) * Math.sin(p.yaw) + -(left.z - p.z) * Math.cos(p.yaw)
             : 0,
           nearest: best,
           support: p.body?.support ?? 0,
@@ -441,6 +479,9 @@ declare global {
       forceRagdoll?: () => void;
       forceStrike?: () => void;
       forceKick?: () => void;
+      forceGrab?: () => void;
+      forceFlinch?: () => void;
+      setWeapon?: (kind: string) => void;
       getCombat?: () => unknown;
       setKeys?: (codes: string[]) => void;
       setSteer?: (v: number) => void;

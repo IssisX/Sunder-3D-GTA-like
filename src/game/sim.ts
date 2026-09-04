@@ -30,12 +30,15 @@ import {
   isDynamicBody,
   KICK_DUR,
   meleeTip,
+  nearestPart,
   regionOfPart,
   setGrab,
   SHOVE_DUR,
   stepBodies,
   strikeDuration,
   actionUnit,
+  GRAB_DUR,
+  FLINCH_DUR,
 } from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
@@ -149,9 +152,9 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   let max = p.crouch ? 1.5 : 3.45;
   if (input.sprint && p.stamina > 0.08 && wishMag > 0.2 && !p.crouch) max = 6.6;
   max *= leg * load * mud * (0.55 + p.consciousness * 0.45) * (1 - p.fatigue * 0.35);
-  if (p.grabbedId) max *= 0.72;
+  if (p.grabbedId) max *= 0.55;
   p.intendSpeed = wishMag * max;
-  if (p.strikeT > 0 || p.kickT > 0 || p.shoveT > 0) p.intendSpeed *= 0.32;
+  if (p.strikeT > 0 || p.kickT > 0 || p.shoveT > 0 || p.grabT > 0) p.intendSpeed *= 0.32;
 
   if (wishMag > 0.08) {
     const ty = Math.atan2(-p.intendX, -p.intendZ);
@@ -704,6 +707,7 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
       p.strikeT = strikeDuration(p);
       p.strikeCd = p.strikeT + 0.16;
       p.strikeHit = 0;
+      if (!p.grabbedId) p.grabT = 0;
       p.stamina = Math.max(0, p.stamina - 0.06);
       w.emitSound(p.x, p.z, 0.35, "weapon", p.id);
     }
@@ -720,6 +724,7 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
   for (const a of w.actors) {
     a.strikeCd = Math.max(0, a.strikeCd - dt);
     a.attackCd = Math.max(0, a.attackCd - dt);
+    a.flinchT = Math.max(0, a.flinchT - dt);
     if (a.strikeT > 0) {
       const dur =
         a.species === "human" || a.kind === "player" ? strikeDuration(a) : a.species === "bear" ? 0.42 : 0.34;
@@ -908,6 +913,9 @@ function hitActor(
   } else if (vic.balance < 0.4) {
     vic.loco = "stumble";
     vic.locoT = 0.4;
+    vic.flinchT = Math.max(vic.flinchT, FLINCH_DUR);
+  } else {
+    vic.flinchT = Math.max(vic.flinchT, 0.2 + force * 0.1);
   }
   w.emitSound(vic.x, vic.z, 0.55 + force * 0.2, "impact", atk.id);
   if (vic.kind === "human" || vic.kind === "player") {
@@ -922,69 +930,9 @@ function hitActor(
 function stepGrab(w: World, dt: number, input: Actions | null) {
   const p = w.player();
   if (input && p.alive) {
-    if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll") {
-      const f = facing(p.yaw);
-      let best: Actor | Prop | null = null;
-      let bd = 1.12;
-      for (const o of w.nearby(p.x, p.z, 1.25)) {
-        if (o.id === p.id) continue;
-        const dx = o.x - p.x;
-        const dz = o.z - p.z;
-        const d = Math.hypot(dx, dz);
-        const dot = (dx * f.x + dz * f.z) / (d || 1);
-        if (dot < 0.35) continue;
-        if (d < bd) {
-          bd = d;
-          best = o;
-        }
-      }
-      for (const pr of w.props) {
-        if (pr.anchored && pr.mass > 40 && !pr.dynamic) continue;
-        if (pr.kind === "wall" || pr.kind === "roof") continue;
-        const d = Math.hypot(pr.x - p.x, pr.z - p.z);
-        const dx = pr.x - p.x;
-        const dz = pr.z - p.z;
-        const dot = (dx * f.x + dz * f.z) / (d || 1);
-        if (dot < 0.3 || d > 1.15) continue;
-        if (d < bd) {
-          bd = d;
-          best = pr;
-        }
-      }
-      if (best) {
-        p.grabbedId = best.id;
-        if ("species" in best) {
-          const a = best as Actor;
-          const rel = p.mass / (p.mass + a.mass);
-          if (rel < 0.38 && a.balance > 0.6 && a.grounded) {
-            a.balance -= 0.3;
-            p.grabbedId = 0;
-            w.emitSound(p.x, p.z, 0.3, "grab", p.id);
-          } else {
-            a.grabbedBy = p.id;
-            p.carry = a.mass * 0.45;
-            if (!setGrab(p, a)) {
-              a.x = p.x + f.x * 0.55;
-              a.z = p.z + f.z * 0.55;
-            } else if (a.balance < 0.55) {
-              a.loco = "ragdoll";
-              a.locoT = 0.6;
-              if (a.body) a.body.mode = "ragdoll";
-            }
-            w.emitSound(p.x, p.z, 0.4, "grab", p.id);
-          }
-        } else {
-          const pr = best as Prop;
-          pr.heldBy = p.id;
-          pr.dynamic = true;
-          pr.anchored = false;
-          p.carry = pr.mass;
-          if (pr.weapon) p.weapon = pr.weapon;
-          if (pr.kind === "lamp") p.weapon = "torch";
-          if (pr.kind === "board") p.weapon = "board";
-          w.emitSound(p.x, p.z, 0.3, "grab", p.id);
-        }
-      }
+    if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll" && p.grabT <= 0) {
+      p.grabT = GRAB_DUR;
+      p.strikeHit = 0;
     }
     if (input.grabReleased && p.grabbedId) {
       const spd = 7 + Math.hypot(p.vx, p.vz);
@@ -992,36 +940,118 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
     }
   }
   for (const a of w.actors) {
+    if (a.grabT > 0 && !a.grabbedId) {
+      a.grabT = Math.max(0, a.grabT - dt);
+      const u = actionUnit(a.grabT, GRAB_DUR);
+      if (u >= 0.32 && u <= 0.68) tryLockGrab(w, a);
+    } else if (a.grabT > 0) {
+      a.grabT = Math.max(0, a.grabT - dt);
+    }
     if (!a.grabbedId) continue;
     const t = w.actor(a.grabbedId);
     const pr = t ? null : w.prop(a.grabbedId);
-    const f = facing(a.yaw);
     if (t) {
-      if (a.body?.grab && t.body) {
-        /* constraint in physique owns the hold */
-      } else {
-        t.x = a.x + f.x * 0.55;
-        t.z = a.z + f.z * 0.55;
-        t.y = a.y + (a.loco === "ragdoll" ? 0.2 : 0.15);
-        t.vx = a.vx;
-        t.vz = a.vz;
-        t.vy = a.vy;
-        t.yaw = a.yaw;
-      }
-      if (!t.alive) {
-        a.carry = t.mass * 0.7;
+      if (!t.alive) a.carry = t.mass * 0.7;
+      if (t.body) {
+        const two = t.mass > a.mass * 0.62 || !t.alive || t.body.mode !== "stance";
+        if (!a.body?.grab || (two && a.body.grab.myPart2 < 0)) setGrab(a, t);
       }
     } else if (pr) {
-      pr.x = a.x + f.x * 0.5;
-      pr.z = a.z + f.z * 0.5;
-      pr.y = a.y + a.height * 0.55;
-      pr.vx = a.vx;
-      pr.vz = a.vz;
-      pr.yaw = a.yaw;
+      const hand = a.body?.parts[6];
+      if (hand) {
+        pr.x = hand.x;
+        pr.y = hand.y - pr.sy * 0.25;
+        pr.z = hand.z;
+        pr.vx = hand.vx;
+        pr.vz = hand.vz;
+        pr.yaw = a.yaw;
+      } else {
+        const f = facing(a.yaw);
+        pr.x = a.x + f.x * 0.5;
+        pr.z = a.z + f.z * 0.5;
+        pr.y = a.y + a.height * 0.55;
+        pr.vx = a.vx;
+        pr.vz = a.vz;
+        pr.yaw = a.yaw;
+      }
     } else {
       a.grabbedId = 0;
       a.carry = 0;
+      clearGrab(a);
     }
+  }
+}
+
+function tryLockGrab(w: World, a: Actor) {
+  const hand = a.body?.parts[6];
+  const f = facing(a.yaw);
+  const hx = hand?.x ?? a.x + f.x * 0.5;
+  const hy = hand?.y ?? a.y + 1.05;
+  const hz = hand?.z ?? a.z + f.z * 0.5;
+  let best: Actor | Prop | null = null;
+  let bd = 0.34;
+  for (const o of w.nearby(hx, hz, 0.85)) {
+    if (o.id === a.id || !o.alive) continue;
+    if (marked(a, o.id)) continue;
+    let d: number;
+    if (o.body) {
+      const i = nearestPart(o.body, hx, hy, hz);
+      const p = o.body.parts[i]!;
+      d = Math.hypot(p.x - hx, p.y - hy, p.z - hz);
+    } else {
+      d = Math.hypot(o.x - hx, o.y + o.height * 0.5 - hy, o.z - hz);
+    }
+    if (d < bd) {
+      bd = d;
+      best = o;
+    }
+  }
+  for (const pr of w.props) {
+    if (pr.anchored && pr.mass > 40 && !pr.dynamic) continue;
+    if (pr.kind === "wall" || pr.kind === "roof" || pr.heldBy) continue;
+    const d = Math.hypot(pr.x - hx, pr.y + pr.sy * 0.4 - hy, pr.z - hz);
+    if (d < bd) {
+      bd = d;
+      best = pr;
+    }
+  }
+  if (!best) return;
+  if ("species" in best) {
+    const o = best as Actor;
+    const rel = a.mass / (a.mass + o.mass);
+    if (rel < 0.38 && o.balance > 0.6 && o.grounded && o.alive && o.body?.mode === "stance") {
+      mark(a, o.id);
+      o.balance -= 0.22;
+      o.flinchT = Math.max(o.flinchT, 0.18);
+      o.vx += f.x * 0.8;
+      o.vz += f.z * 0.8;
+      a.stamina = Math.max(0, a.stamina - 0.08);
+      a.grabT = Math.min(a.grabT, 0.08);
+      w.emitSound(a.x, a.z, 0.3, "grab", a.id);
+      return;
+    }
+    a.grabbedId = o.id;
+    o.grabbedBy = a.id;
+    mark(a, o.id);
+    a.carry = o.mass * (o.mass > a.mass * 0.62 || !o.alive ? 0.7 : 0.42);
+    setGrab(a, o);
+    if (o.balance < 0.55) {
+      o.loco = "ragdoll";
+      o.locoT = 0.6;
+      if (o.body) o.body.mode = "ragdoll";
+    }
+    w.emitSound(a.x, a.z, 0.4, "grab", a.id);
+  } else {
+    const pr = best as Prop;
+    a.grabbedId = pr.id;
+    pr.heldBy = a.id;
+    pr.dynamic = true;
+    pr.anchored = false;
+    a.carry = pr.mass;
+    if (pr.weapon) a.weapon = pr.weapon;
+    if (pr.kind === "lamp") a.weapon = "torch";
+    if (pr.kind === "board") a.weapon = "board";
+    w.emitSound(a.x, a.z, 0.3, "grab", a.id);
   }
 }
 
@@ -1058,6 +1088,7 @@ function stepLocomotion(w: World, dt: number) {
       a.intendSpeed *= 0.4;
       if (a.locoT <= 0) a.loco = "idle";
     }
+    if (a.grabbedBy) a.intendSpeed *= 0.35;
     if (a.loco === "down") {
       a.intendSpeed = 0;
       continue;

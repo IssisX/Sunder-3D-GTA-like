@@ -205,6 +205,8 @@ export class World {
       strikeHit: 0,
       kickT: 0,
       shoveT: 0,
+      grabT: 0,
+      flinchT: 0,
       vaultT: 0,
       getupT: 0,
       climbId: 0,

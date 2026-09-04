@@ -151,6 +151,8 @@ export interface GrabLink {
   myPart: number;
   otherPart: number;
   rest: number;
+  myPart2: number;
+  otherPart2: number;
 }
 
 export interface Physique {
@@ -208,6 +210,8 @@ export interface Actor {
   strikeHit: number;
   kickT: number;
   shoveT: number;
+  grabT: number;
+  flinchT: number;
   vaultT: number;
   getupT: number;
   climbId: number;
