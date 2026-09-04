@@ -8,10 +8,11 @@ import { SocialAwarenessController } from "./social-awareness";
 /**
  * Canonical runtime animation orchestrator.
  *
- * The existing AnimationController owns phase-matched locomotion/root motion.
- * MeleeKinematics owns contact-authoritative kinetic-chain Strike/Kick.
- * AnimatedPhysicalBodies underneath still owns Grab while INTERACTION is the
- * next migration slice. All systems project into the same authoritative BodyRig.
+ * AnimationController owns phase-matched locomotion/root motion.
+ * MeleeKinematics owns contact-authoritative kinetic-chain Punch/Kick and
+ * weapon melee. AnimatedPhysicalBodies underneath still owns Grab while
+ * INTERACTION remains the next migration slice. Every system projects into
+ * the same authoritative BodyRig.
  */
 export class ProceduralAnimationController extends AnimationController {
   private readonly melee = new MeleeKinematics(this);
