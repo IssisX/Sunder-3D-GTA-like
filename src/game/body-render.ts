@@ -4,18 +4,13 @@ import { injurySum } from "./world";
 import { BODY, type BodyRig, PhysicalBodies } from "./body";
 import type { View } from "./render";
 
-interface JointVisual {
-  mesh: THREE.Mesh;
-  node: number;
-  diameter: number;
-}
-
 interface HumanVisual {
   group: THREE.Group;
   head: THREE.Mesh;
-  neck: THREE.Mesh;
+  torso: THREE.Mesh;
   chest: THREE.Mesh;
   pelvis: THREE.Mesh;
+  neck: THREE.Mesh;
   lUpperArm: THREE.Mesh;
   lLowerArm: THREE.Mesh;
   rUpperArm: THREE.Mesh;
@@ -29,7 +24,6 @@ interface HumanVisual {
   lFoot: THREE.Mesh;
   rFoot: THREE.Mesh;
   weapon: THREE.Mesh;
-  joints: JointVisual[];
   mats: {
     head: THREE.MeshStandardMaterial;
     chest: THREE.MeshStandardMaterial;
@@ -63,9 +57,15 @@ function weaponLength(kind: WeaponKind) {
 
 export class BodyView {
   private visuals = new Map<number, HumanVisual>();
-  private sphere = new THREE.SphereGeometry(0.5, 10, 8);
+  private sphere = new THREE.SphereGeometry(0.5, 12, 10);
   private box = new THREE.BoxGeometry(1, 1, 1);
-  private cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
+  private neckGeo = new THREE.CylinderGeometry(0.46, 0.52, 1, 10);
+  private torsoGeo = new THREE.CylinderGeometry(0.5, 0.36, 1, 12);
+  private upperArmGeo = new THREE.CylinderGeometry(0.43, 0.53, 1, 10);
+  private lowerArmGeo = new THREE.CylinderGeometry(0.38, 0.46, 1, 10);
+  private upperLegGeo = new THREE.CylinderGeometry(0.44, 0.56, 1, 10);
+  private lowerLegGeo = new THREE.CylinderGeometry(0.36, 0.45, 1, 10);
+  private cylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 10);
   private up = new THREE.Vector3(0, 1, 0);
   private a = new THREE.Vector3();
   private b = new THREE.Vector3();
@@ -114,76 +114,39 @@ export class BodyView {
       rArm: material(a.skin),
       lLeg: material(a.accent),
       rLeg: material(a.accent),
-      weapon: material(weaponColor(a.weapon), a.weapon === "knife" ? 0.42 : 0.08, 0.62),
+      weapon: material(
+        weaponColor(a.weapon),
+        a.weapon === "knife" ? 0.42 : 0.08,
+        0.62,
+      ),
     };
     const group = new THREE.Group();
 
     const head = new THREE.Mesh(this.sphere, mats.head);
-    const neck = new THREE.Mesh(this.cylinder, mats.head);
-    const chest = new THREE.Mesh(this.box, mats.chest);
-    const pelvis = new THREE.Mesh(this.box, mats.pelvis);
-    const lUpperArm = new THREE.Mesh(this.cylinder, mats.lArm);
-    const lLowerArm = new THREE.Mesh(this.cylinder, mats.lArm);
-    const rUpperArm = new THREE.Mesh(this.cylinder, mats.rArm);
-    const rLowerArm = new THREE.Mesh(this.cylinder, mats.rArm);
-    const lUpperLeg = new THREE.Mesh(this.cylinder, mats.lLeg);
-    const lLowerLeg = new THREE.Mesh(this.cylinder, mats.lLeg);
-    const rUpperLeg = new THREE.Mesh(this.cylinder, mats.rLeg);
-    const rLowerLeg = new THREE.Mesh(this.cylinder, mats.rLeg);
-    const lHand = new THREE.Mesh(this.sphere, mats.lArm);
-    const rHand = new THREE.Mesh(this.sphere, mats.rArm);
+    const torso = new THREE.Mesh(this.torsoGeo, mats.chest);
+    const chest = new THREE.Mesh(this.sphere, mats.chest);
+    const pelvis = new THREE.Mesh(this.sphere, mats.pelvis);
+    const neck = new THREE.Mesh(this.neckGeo, mats.head);
+    const lUpperArm = new THREE.Mesh(this.upperArmGeo, mats.lArm);
+    const lLowerArm = new THREE.Mesh(this.lowerArmGeo, mats.lArm);
+    const rUpperArm = new THREE.Mesh(this.upperArmGeo, mats.rArm);
+    const rLowerArm = new THREE.Mesh(this.lowerArmGeo, mats.rArm);
+    const lUpperLeg = new THREE.Mesh(this.upperLegGeo, mats.lLeg);
+    const lLowerLeg = new THREE.Mesh(this.lowerLegGeo, mats.lLeg);
+    const rUpperLeg = new THREE.Mesh(this.upperLegGeo, mats.rLeg);
+    const rLowerLeg = new THREE.Mesh(this.lowerLegGeo, mats.rLeg);
+    const lHand = new THREE.Mesh(this.box, mats.lArm);
+    const rHand = new THREE.Mesh(this.box, mats.rArm);
     const lFoot = new THREE.Mesh(this.box, mats.lLeg);
     const rFoot = new THREE.Mesh(this.box, mats.rLeg);
     const weapon = new THREE.Mesh(this.cylinder, mats.weapon);
 
-    const joints: JointVisual[] = [
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.chest),
-        node: BODY.lShoulder,
-        diameter: 0.27,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.chest),
-        node: BODY.rShoulder,
-        diameter: 0.27,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.lArm),
-        node: BODY.lElbow,
-        diameter: 0.205,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.rArm),
-        node: BODY.rElbow,
-        diameter: 0.205,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.pelvis),
-        node: BODY.lHip,
-        diameter: 0.285,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.pelvis),
-        node: BODY.rHip,
-        diameter: 0.285,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.lLeg),
-        node: BODY.lKnee,
-        diameter: 0.235,
-      },
-      {
-        mesh: new THREE.Mesh(this.sphere, mats.rLeg),
-        node: BODY.rKnee,
-        diameter: 0.235,
-      },
-    ];
-
     for (const mesh of [
       head,
-      neck,
+      torso,
       chest,
       pelvis,
+      neck,
       lUpperArm,
       lLowerArm,
       rUpperArm,
@@ -197,7 +160,6 @@ export class BodyView {
       lFoot,
       rFoot,
       weapon,
-      ...joints.map((j) => j.mesh),
     ]) {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -218,9 +180,10 @@ export class BodyView {
     const visual: HumanVisual = {
       group,
       head,
-      neck,
+      torso,
       chest,
       pelvis,
+      neck,
       lUpperArm,
       lLowerArm,
       rUpperArm,
@@ -234,14 +197,18 @@ export class BodyView {
       lFoot,
       rFoot,
       weapon,
-      joints,
       mats,
     };
     this.visuals.set(a.id, visual);
     return visual;
   }
 
-  private node(rig: BodyRig, i: number, alpha: number, out: THREE.Vector3) {
+  private node(
+    rig: BodyRig,
+    i: number,
+    alpha: number,
+    out: THREE.Vector3,
+  ) {
     out.set(
       rig.px[i]! + (rig.x[i]! - rig.px[i]!) * alpha,
       rig.py[i]! + (rig.y[i]! - rig.py[i]!) * alpha,
@@ -250,6 +217,8 @@ export class BodyView {
     return out;
   }
 
+  // Limbs overlap their node endpoints. The bend itself is the joint - there
+  // is no separate sphere covering elbows/knees/shoulders/hips anymore.
   private segment(
     mesh: THREE.Mesh,
     rig: BodyRig,
@@ -258,19 +227,45 @@ export class BodyView {
     width: number,
     depth: number,
     alpha: number,
+    pad = 0,
   ) {
     this.node(rig, ia, alpha, this.a);
     this.node(rig, ib, alpha, this.b);
     this.d.subVectors(this.b, this.a);
-    const length = Math.max(0.001, this.d.length());
+    const rawLength = Math.max(0.001, this.d.length());
     mesh.position.copy(this.a).addScaledVector(this.d, 0.5);
-    this.d.multiplyScalar(1 / length);
+    this.d.multiplyScalar(1 / rawLength);
     this.q.setFromUnitVectors(this.up, this.d);
+    mesh.quaternion.copy(this.q);
+    mesh.scale.set(width, rawLength + pad * 2, depth);
+  }
+
+  private orientEndpoint(
+    mesh: THREE.Mesh,
+    rig: BodyRig,
+    from: number,
+    at: number,
+    width: number,
+    length: number,
+    depth: number,
+    alpha: number,
+  ) {
+    this.node(rig, from, alpha, this.a);
+    this.node(rig, at, alpha, this.b);
+    this.d.subVectors(this.b, this.a);
+    const rawLength = Math.max(0.001, this.d.length());
+    this.d.multiplyScalar(1 / rawLength);
+    this.q.setFromUnitVectors(this.up, this.d);
+    mesh.position.copy(this.b);
     mesh.quaternion.copy(this.q);
     mesh.scale.set(width, length, depth);
   }
 
-  private tint(mat: THREE.MeshStandardMaterial, base: number, amount: number) {
+  private tint(
+    mat: THREE.MeshStandardMaterial,
+    base: number,
+    amount: number,
+  ) {
     this.color.set(base);
     const t = Math.min(1.2, amount);
     this.color.r = Math.min(1, this.color.r + t * 0.22);
@@ -289,58 +284,93 @@ export class BodyView {
     held.visible = true;
     held.position.set(
       this.a.x,
-      this.a.y - 0.08 * scale,
+      this.a.y - 0.06 * scale,
       this.a.z,
     );
     held.rotation.set(0, a.yaw, 0);
   }
 
-  private syncHuman(a: Actor, rig: BodyRig, v: HumanVisual, alpha: number) {
+  private syncHuman(
+    a: Actor,
+    rig: BodyRig,
+    v: HumanVisual,
+    alpha: number,
+  ) {
     const scale = a.height / 1.72;
     v.group.position.set(0, 0, 0);
     v.group.rotation.set(0, 0, 0);
 
-    this.segment(v.chest, rig, BODY.pelvis, BODY.chest, 0.42 * scale, 0.24 * scale, alpha);
-    this.segment(v.pelvis, rig, BODY.lHip, BODY.rHip, 0.2 * scale, 0.23 * scale, alpha);
-    this.segment(v.neck, rig, BODY.chest, BODY.head, 0.105 * scale, 0.105 * scale, alpha);
-    this.segment(v.lUpperArm, rig, BODY.lShoulder, BODY.lElbow, 0.12 * scale, 0.12 * scale, alpha);
-    this.segment(v.lLowerArm, rig, BODY.lElbow, BODY.lHand, 0.105 * scale, 0.105 * scale, alpha);
-    this.segment(v.rUpperArm, rig, BODY.rShoulder, BODY.rElbow, 0.12 * scale, 0.12 * scale, alpha);
-    this.segment(v.rLowerArm, rig, BODY.rElbow, BODY.rHand, 0.105 * scale, 0.105 * scale, alpha);
-    this.segment(v.lUpperLeg, rig, BODY.lHip, BODY.lKnee, 0.145 * scale, 0.145 * scale, alpha);
-    this.segment(v.lLowerLeg, rig, BODY.lKnee, BODY.lFoot, 0.125 * scale, 0.125 * scale, alpha);
-    this.segment(v.rUpperLeg, rig, BODY.rHip, BODY.rKnee, 0.145 * scale, 0.145 * scale, alpha);
-    this.segment(v.rLowerLeg, rig, BODY.rKnee, BODY.rFoot, 0.125 * scale, 0.125 * scale, alpha);
+    // Organic torso volumes replace the old box-plank body. The tapered trunk
+    // follows pelvis-to-chest while the chest/pelvis ellipsoids cover shoulder
+    // and hip roots without exposing construction joints.
+    this.segment(
+      v.torso,
+      rig,
+      BODY.pelvis,
+      BODY.chest,
+      0.62 * scale,
+      0.4 * scale,
+      alpha,
+      0.055 * scale,
+    );
 
-    for (const joint of v.joints) {
-      this.node(rig, joint.node, alpha, this.a);
-      joint.mesh.position.copy(this.a);
-      joint.mesh.quaternion.identity();
-      joint.mesh.scale.setScalar(joint.diameter * scale);
-    }
+    this.node(rig, BODY.chest, alpha, this.a);
+    v.chest.position.copy(this.a);
+    v.chest.quaternion.copy(v.torso.quaternion);
+    v.chest.scale.set(0.7 * scale, 0.36 * scale, 0.44 * scale);
+
+    this.node(rig, BODY.pelvis, alpha, this.a);
+    v.pelvis.position.copy(this.a);
+    v.pelvis.quaternion.copy(v.torso.quaternion);
+    v.pelvis.scale.set(0.57 * scale, 0.28 * scale, 0.39 * scale);
+
+    this.segment(
+      v.neck,
+      rig,
+      BODY.chest,
+      BODY.head,
+      0.17 * scale,
+      0.15 * scale,
+      alpha,
+      0.03 * scale,
+    );
+
+    const armPad = 0.055 * scale;
+    const legPad = 0.065 * scale;
+    this.segment(v.lUpperArm, rig, BODY.lShoulder, BODY.lElbow, 0.22 * scale, 0.2 * scale, alpha, armPad);
+    this.segment(v.lLowerArm, rig, BODY.lElbow, BODY.lHand, 0.19 * scale, 0.17 * scale, alpha, armPad);
+    this.segment(v.rUpperArm, rig, BODY.rShoulder, BODY.rElbow, 0.22 * scale, 0.2 * scale, alpha, armPad);
+    this.segment(v.rLowerArm, rig, BODY.rElbow, BODY.rHand, 0.19 * scale, 0.17 * scale, alpha, armPad);
+    this.segment(v.lUpperLeg, rig, BODY.lHip, BODY.lKnee, 0.27 * scale, 0.23 * scale, alpha, legPad);
+    this.segment(v.lLowerLeg, rig, BODY.lKnee, BODY.lFoot, 0.22 * scale, 0.19 * scale, alpha, legPad);
+    this.segment(v.rUpperLeg, rig, BODY.rHip, BODY.rKnee, 0.27 * scale, 0.23 * scale, alpha, legPad);
+    this.segment(v.rLowerLeg, rig, BODY.rKnee, BODY.rFoot, 0.22 * scale, 0.19 * scale, alpha, legPad);
 
     this.node(rig, BODY.head, alpha, this.a);
     v.head.position.copy(this.a);
-    v.head.quaternion.identity();
-    v.head.scale.set(0.29 * scale, 0.32 * scale, 0.28 * scale);
+    v.head.quaternion.copy(v.neck.quaternion);
+    v.head.scale.set(0.29 * scale, 0.33 * scale, 0.27 * scale);
 
-    this.node(rig, BODY.lHand, alpha, this.a);
-    v.lHand.position.copy(this.a);
-    v.lHand.quaternion.identity();
-    v.lHand.scale.setScalar(0.14 * scale);
-    this.node(rig, BODY.rHand, alpha, this.a);
-    v.rHand.position.copy(this.a);
-    v.rHand.quaternion.identity();
-    v.rHand.scale.setScalar(0.14 * scale);
+    this.orientEndpoint(v.lHand, rig, BODY.lElbow, BODY.lHand, 0.14 * scale, 0.19 * scale, 0.1 * scale, alpha);
+    this.orientEndpoint(v.rHand, rig, BODY.rElbow, BODY.rHand, 0.14 * scale, 0.19 * scale, 0.1 * scale, alpha);
 
     const forwardX = -Math.sin(a.yaw);
     const forwardZ = -Math.cos(a.yaw);
     this.node(rig, BODY.lFoot, alpha, this.a);
-    v.lFoot.position.set(this.a.x + forwardX * 0.06 * scale, this.a.y, this.a.z + forwardZ * 0.06 * scale);
+    v.lFoot.position.set(
+      this.a.x + forwardX * 0.07 * scale,
+      this.a.y,
+      this.a.z + forwardZ * 0.07 * scale,
+    );
     v.lFoot.scale.set(0.18 * scale, 0.11 * scale, 0.34 * scale);
     v.lFoot.rotation.set(0, a.yaw, 0);
+
     this.node(rig, BODY.rFoot, alpha, this.a);
-    v.rFoot.position.set(this.a.x + forwardX * 0.06 * scale, this.a.y, this.a.z + forwardZ * 0.06 * scale);
+    v.rFoot.position.set(
+      this.a.x + forwardX * 0.07 * scale,
+      this.a.y,
+      this.a.z + forwardZ * 0.07 * scale,
+    );
     v.rFoot.scale.set(0.18 * scale, 0.11 * scale, 0.34 * scale);
     v.rFoot.rotation.set(0, a.yaw, 0);
 
@@ -348,6 +378,7 @@ export class BodyView {
     if (helmet) {
       helmet.position.copy(v.head.position);
       helmet.position.y += 0.06 * scale;
+      helmet.quaternion.copy(v.head.quaternion);
       helmet.scale.set(0.34 * scale, 0.24 * scale, 0.32 * scale);
     }
 
@@ -355,7 +386,10 @@ export class BodyView {
     this.node(rig, BODY.rHand, alpha, this.a);
     this.b.set(
       this.a.x + forwardX * len,
-      this.a.y + (a.weapon === "spear" || a.weapon === "pitchfork" ? 0.05 * scale : -0.04 * scale),
+      this.a.y +
+        (a.weapon === "spear" || a.weapon === "pitchfork"
+          ? 0.05 * scale
+          : -0.04 * scale),
       this.a.z + forwardZ * len,
     );
     this.d.subVectors(this.b, this.a);
@@ -367,7 +401,12 @@ export class BodyView {
     v.weapon.scale.set(0.045 * scale, wlen, 0.045 * scale);
     v.weapon.visible = a.weapon !== "fist" && !a.grabbedId;
     v.mats.weapon.color.setHex(weaponColor(a.weapon));
-    v.mats.weapon.metalness = a.weapon === "knife" || a.weapon === "spear" || a.weapon === "pitchfork" ? 0.42 : 0.08;
+    v.mats.weapon.metalness =
+      a.weapon === "knife" ||
+      a.weapon === "spear" ||
+      a.weapon === "pitchfork"
+        ? 0.42
+        : 0.08;
 
     this.tint(v.mats.head, a.skin, injurySum(a.injuries.head));
     this.tint(v.mats.chest, a.cloth, injurySum(a.injuries.torso));
