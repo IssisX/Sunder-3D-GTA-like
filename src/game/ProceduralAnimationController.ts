@@ -6,6 +6,8 @@ import { MeleeKinematics } from "./melee-kinematics";
 import { SocialAwarenessController } from "./social-awareness";
 import { impactDynamics } from "./impact-dynamics";
 import { BodyCausality } from "./body-causality";
+import { activeBodyControl } from "./active-body-control";
+import { bodyMode } from "./body-model";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -14,7 +16,8 @@ import { BodyCausality } from "./body-causality";
  *   pre-world: input/action selection + locomotion intent shaping
  *   world sim: AI/world/root compatibility movement
  *   post-world/pre-body: locomotion + melee whole-body task generation
- *   body solve: active motors -> joint constraints -> contacts
+ *   pre-integration: bounded task actuation into physical velocity state
+ *   body solve: integration -> posture control -> joint constraints -> contacts
  *   post-solve: real effector contact -> impulse -> stability outcome
  */
 export class ProceduralAnimationController extends AnimationController {
@@ -68,7 +71,19 @@ export class ProceduralAnimationController extends AnimationController {
     super.prepareBodyStep(w, dt);
     this.melee.prepareStep(w, dt);
 
-    // ActiveBodyControl consumes the merged locomotion/action targets here.
+    // Explicit task velocity must be written BEFORE Verlet integration. Doing it
+    // afterward only changed next-frame velocity and was the source of the
+    // "peanut butter" / tiny-action regression.
+    for (let i = 0; i < w.actors.length; i++) {
+      const a = w.actors[i]!;
+      if (a.kind !== "player" && a.species !== "human") continue;
+      const rig = this.get(a);
+      if (!rig?.initialized) continue;
+      activeBodyControl.driveTasksPreIntegration(w, a, rig, dt, bodyMode(a));
+    }
+
+    // PhysicalBodies now integrates the task impulse in this same fixed step.
+    // Its normal ActiveBodyControl pass only stabilizes non-task posture nodes.
     super.step(w, dt);
 
     // Contact is measured from the solved physical fist/foot trajectory only.
