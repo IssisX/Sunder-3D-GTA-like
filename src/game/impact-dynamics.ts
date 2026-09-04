@@ -55,13 +55,14 @@ function human(a: Actor) {
 }
 
 /**
- * Zero-allocation articulated contact response.
+ * Zero-allocation articulated contact response and root impulse authority.
  *
- * Contact impulses are distributed over the anatomical constraint graph and
- * augmented with the angular velocity implied by r x J about the pelvis.
- * The resulting per-node velocity field is injected after the pose solver;
- * the normal follow controller supplies the restoring spring while dynamic
- * modes naturally inherit the injected motion on the next Verlet step.
+ * Every physical contact enters here as a delta-velocity at one anatomical
+ * node. The field distributes that impulse over the body graph, derives the
+ * off-centre angular component from r x J, accumulates the body's coarse root
+ * impulse, and exposes one persistent disturbance magnitude for the stability
+ * solver. Visual recoil, translation and loss of support therefore consume
+ * the same contact state instead of parallel hit reactions.
  */
 export class ImpactDynamics {
   private bodies: BodyAccess | null = null;
@@ -70,6 +71,10 @@ export class ImpactDynamics {
   private readonly vx = new Float32Array(BODY_CAP * STRIDE);
   private readonly vy = new Float32Array(BODY_CAP * STRIDE);
   private readonly vz = new Float32Array(BODY_CAP * STRIDE);
+  private readonly rootVX = new Float32Array(BODY_CAP);
+  private readonly rootVY = new Float32Array(BODY_CAP);
+  private readonly rootVZ = new Float32Array(BODY_CAP);
+  private readonly load = new Float32Array(BODY_CAP);
   private slotCount = 0;
 
   constructor() {
@@ -94,6 +99,10 @@ export class ImpactDynamics {
     this.vx.fill(0);
     this.vy.fill(0);
     this.vz.fill(0);
+    this.rootVX.fill(0);
+    this.rootVY.fill(0);
+    this.rootVZ.fill(0);
+    this.load.fill(0);
     this.slotCount = 0;
   }
 
@@ -104,6 +113,15 @@ export class ImpactDynamics {
     this.vx.fill(0, base, base + STRIDE);
     this.vy.fill(0, base, base + STRIDE);
     this.vz.fill(0, base, base + STRIDE);
+    this.rootVX[slot] = 0;
+    this.rootVY[slot] = 0;
+    this.rootVZ[slot] = 0;
+    this.load[slot] = 0;
+  }
+
+  disturbance(a: Actor) {
+    const slot = this.slot(a.id);
+    return slot < 0 ? 0 : this.load[slot]!;
   }
 
   contactRegion(
@@ -132,9 +150,9 @@ export class ImpactDynamics {
     if (slot < 0) slot = this.register(a);
     if (slot < 0) return;
 
-    const speed = Math.hypot(dvx, dvy, dvz);
-    if (speed < 0.02) return;
-    const capped = Math.min(8.5, speed) / speed;
+    const rawSpeed = Math.hypot(dvx, dvy, dvz);
+    if (rawSpeed < 0.02) return;
+    const capped = Math.min(8.5, rawSpeed) / rawSpeed;
     dvx *= capped * gain;
     dvy *= capped * gain;
     dvz *= capped * gain;
@@ -146,9 +164,8 @@ export class ImpactDynamics {
     const ry = rig.y[node]! - pelvisY;
     const rz = rig.z[node]! - pelvisZ;
 
-    // Angular velocity proxy from tau = r x J, normalized by a compact-body
-    // inertia estimate. This is deliberately bounded; constraints remain the
-    // authority for anatomy while torque makes off-center impacts readable.
+    // Angular velocity proxy from tau = r x J. The constraint graph remains
+    // anatomical authority; this only supplies the momentum field it resolves.
     const scale = bodyScale(a);
     const invI = 1 / Math.max(0.2, 0.38 * scale * scale);
     const wx = (ry * dvz - rz * dvy) * invI * 0.28;
@@ -158,24 +175,38 @@ export class ImpactDynamics {
 
     for (let j = 0; j < BODY_NODE_COUNT; j++) {
       const coupling = COUPLING[node * BODY_NODE_COUNT + j]!;
-      const linear = (0.08 + coupling * 0.92);
+      const linear = 0.08 + coupling * 0.92;
       const jx = rig.x[j]! - pelvisX;
       const jy = rig.y[j]! - pelvisY;
       const jz = rig.z[j]! - pelvisZ;
       const rvx = wy * jz - wz * jy;
       const rvy = wz * jx - wx * jz;
       const rvz = wx * jy - wy * jx;
-      const rotational = (0.18 + coupling * 0.32);
+      const rotational = 0.18 + coupling * 0.32;
       const q = base + j;
       this.vx[q] += dvx * linear + rvx * rotational;
       this.vy[q] += dvy * linear + rvy * rotational;
       this.vz[q] += dvz * linear + rvz * rotational;
     }
 
-    // Immediate local compression gives the exact contact point a readable
-    // first-frame response before momentum spreads through the graph.
-    const invSpeed = 1 / speed;
-    const compression = Math.min(0.045 * scale, speed * 0.0055 * scale) * gain;
+    // The same anatomical impulse contributes a bounded whole-body momentum
+    // change. Distal contacts translate less and rotate more than core hits.
+    const pelvisCoupling = COUPLING[node * BODY_NODE_COUNT + BODY.pelvis]!;
+    const rootShare = 0.09 + pelvisCoupling * 0.19;
+    this.rootVX[slot] += dvx * rootShare;
+    this.rootVY[slot] += dvy * rootShare;
+    this.rootVZ[slot] += dvz * rootShare;
+
+    // Disturbance is the persistent scalar consumed by support/balance. It is
+    // energy-like rather than a binary "was hit" flag, so repeated contacts
+    // naturally accumulate and decay.
+    const normalized = Math.min(1.6, rawSpeed * gain * 0.105);
+    this.load[slot] = Math.min(2.2, this.load[slot]! + normalized);
+
+    // Immediate local compression makes the contact point move before the
+    // broader graph response, preserving contact locality visually.
+    const invSpeed = 1 / rawSpeed;
+    const compression = Math.min(0.045 * scale, rawSpeed * 0.0055 * scale) * gain;
     rig.x[node] += dvx * invSpeed * compression;
     rig.y[node] += dvy * invSpeed * compression;
     rig.z[node] += dvz * invSpeed * compression;
@@ -190,6 +221,20 @@ export class ImpactDynamics {
       if (slot < 0) continue;
       const rig = this.bodies?.get(a);
       if (!rig?.initialized) continue;
+
+      // Consume accumulated coarse impulse exactly once. The world collider
+      // sees this velocity next tick while the articulated rig shows it now.
+      const rvx = this.rootVX[slot]!;
+      const rvy = this.rootVY[slot]!;
+      const rvz = this.rootVZ[slot]!;
+      a.vx += Math.max(-2.8, Math.min(2.8, rvx));
+      a.vz += Math.max(-2.8, Math.min(2.8, rvz));
+      if (!a.grounded || rvy > 0) {
+        a.vy += Math.max(-1.4, Math.min(a.grounded ? 1.1 : 2.4, rvy));
+      }
+      this.rootVX[slot] = 0;
+      this.rootVY[slot] = 0;
+      this.rootVZ[slot] = 0;
 
       const damping = rig.mode === "follow" ? 13.5 : rig.mode === "stumble" ? 9 : 6.5;
       const decay = Math.exp(-damping * h);
@@ -221,6 +266,9 @@ export class ImpactDynamics {
         this.vy[q] = vy;
         this.vz[q] = vz;
       }
+
+      this.load[slot] *= Math.exp(-6.2 * h);
+      if (this.load[slot]! < 0.004) this.load[slot] = 0;
     }
   }
 
