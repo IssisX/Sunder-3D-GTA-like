@@ -9,6 +9,7 @@ import {
 const ENTITY_ID_CAP = 8192;
 const BODY_CAP = 128;
 const STRIDE = BODY_NODE_COUNT;
+const MAX_TARGET_SPEED = 18;
 
 export const TASK_PRIORITY = {
   LOCOMOTION: 10,
@@ -21,8 +22,8 @@ export const TASK_PRIORITY = {
  * Zero-allocation task-space target buffer.
  *
  * Producers describe desired body geometry here before the physical solve.
- * ActiveBodyControl consumes the same targets as velocity-space actuation.
- * Nothing in this module is allowed to move solved body nodes directly.
+ * ActiveBodyControl consumes position + target-velocity state as bounded
+ * actuation. Nothing in this module is allowed to move solved body nodes.
  */
 class BodyTaskTargets {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
@@ -30,6 +31,13 @@ class BodyTaskTargets {
   private readonly x = new Float32Array(BODY_CAP * STRIDE);
   private readonly y = new Float32Array(BODY_CAP * STRIDE);
   private readonly z = new Float32Array(BODY_CAP * STRIDE);
+  private readonly vx = new Float32Array(BODY_CAP * STRIDE);
+  private readonly vy = new Float32Array(BODY_CAP * STRIDE);
+  private readonly vz = new Float32Array(BODY_CAP * STRIDE);
+  private readonly prevX = new Float32Array(BODY_CAP * STRIDE);
+  private readonly prevY = new Float32Array(BODY_CAP * STRIDE);
+  private readonly prevZ = new Float32Array(BODY_CAP * STRIDE);
+  private readonly prevPriority = new Uint8Array(BODY_CAP * STRIDE);
   private readonly weight = new Float32Array(BODY_CAP * STRIDE);
   private readonly priority = new Uint8Array(BODY_CAP * STRIDE);
   private slotCount = 0;
@@ -51,12 +59,57 @@ class BodyTaskTargets {
     this.actorId.fill(0);
     this.weight.fill(0);
     this.priority.fill(0);
+    this.prevPriority.fill(0);
+    this.vx.fill(0);
+    this.vy.fill(0);
+    this.vz.fill(0);
     this.slotCount = 0;
   }
 
   beginStep() {
     this.weight.fill(0, 0, this.slotCount * STRIDE);
     this.priority.fill(0, 0, this.slotCount * STRIDE);
+    this.vx.fill(0, 0, this.slotCount * STRIDE);
+    this.vy.fill(0, 0, this.slotCount * STRIDE);
+    this.vz.fill(0, 0, this.slotCount * STRIDE);
+  }
+
+  /**
+   * Finalize the merged task field after locomotion/melee/support coupling.
+   * Moving-target velocity is estimated from the final winning target only,
+   * so intermediate same-step producers cannot inject fake feed-forward.
+   */
+  finalizeStep(dt: number) {
+    const h = Math.max(1e-5, dt);
+    const n = this.slotCount * STRIDE;
+    for (let q = 0; q < n; q++) {
+      const p = this.priority[q]!;
+      if (p <= 0) {
+        this.prevPriority[q] = 0;
+        continue;
+      }
+
+      if (this.prevPriority[q] === p) {
+        let vx = (this.x[q]! - this.prevX[q]!) / h;
+        let vy = (this.y[q]! - this.prevY[q]!) / h;
+        let vz = (this.z[q]! - this.prevZ[q]!) / h;
+        const speed = Math.hypot(vx, vy, vz);
+        if (speed > MAX_TARGET_SPEED) {
+          const k = MAX_TARGET_SPEED / speed;
+          vx *= k;
+          vy *= k;
+          vz *= k;
+        }
+        this.vx[q] = vx;
+        this.vy[q] = vy;
+        this.vz[q] = vz;
+      }
+
+      this.prevX[q] = this.x[q]!;
+      this.prevY[q] = this.y[q]!;
+      this.prevZ[q] = this.z[q]!;
+      this.prevPriority[q] = p;
+    }
   }
 
   offerWorld(
@@ -143,6 +196,21 @@ class BodyTaskTargets {
   targetZFor(a: Actor, node: number) {
     const q = this.index(a.id, node);
     return q < 0 ? 0 : this.z[q]!;
+  }
+
+  targetVxFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.vx[q]!;
+  }
+
+  targetVyFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.vy[q]!;
+  }
+
+  targetVzFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.vz[q]!;
   }
 
   private index(id: number, node: number) {
