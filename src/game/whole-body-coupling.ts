@@ -20,11 +20,7 @@ function human(a: Actor) {
 
 /**
  * Couples end-effector action requests back into support and COM tasks.
- *
- * Melee remains responsible for WHAT the fist/foot should do. This layer reads
- * those same task-space requests and adds the mechanically required whole-body
- * consequences: planted feet, support-leg authority, and weight transfer.
- * It never moves solved nodes directly and never invents a second animation.
+ * All outputs remain task-space requests consumed by the active controller.
  */
 export class WholeBodyCoupling {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
@@ -111,12 +107,11 @@ export class WholeBodyCoupling {
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
 
-    // Current boxer convention is an orthodox stance: left foot leads, right
-    // foot supplies the strongest drive for the rear cross. Anchors are captured
-    // from the actual solved feet at action onset so punching from uneven ground
-    // does not teleport the character into an abstract stance pose.
-    const leadStep = (jab ? 0.055 : 0.025) * drive * scale;
-    const rearSet = (jab ? 0.008 : 0.018) * drive * scale;
+    // Orthodox boxer footwork. The jab gets a visible lead-foot gather/step;
+    // the cross sets the rear foot harder and moves more body mass through the
+    // pelvis before the fist reaches full extension.
+    const leadStep = (jab ? 0.078 : 0.038) * drive * scale;
+    const rearSet = (jab ? 0.012 : 0.03) * drive * scale;
     bodyTaskTargets.offerWorld(
       a,
       BODY.lFoot,
@@ -141,13 +136,13 @@ export class WholeBodyCoupling {
     const pelvisZ = bodyTaskTargets.targetZFor(a, BODY.pelvis);
     const leadDx = this.lFootX[slot]! - rig.x[BODY.pelvis]!;
     const leadDz = this.lFootZ[slot]! - rig.z[BODY.pelvis]!;
-    const transfer = (jab ? 0.09 : 0.17) * drive;
-    const surge = (jab ? 0.028 : 0.052) * drive * scale;
+    const transfer = (jab ? 0.13 : 0.24) * drive;
+    const surge = (jab ? 0.04 : 0.08) * drive * scale;
     bodyTaskTargets.offerWorld(
       a,
       BODY.pelvis,
       pelvisX + leadDx * transfer + fx * surge,
-      pelvisY - (jab ? 0.01 : 0.022) * drive * scale,
+      pelvisY - (jab ? 0.014 : 0.028) * drive * scale,
       pelvisZ + leadDz * transfer + fz * surge,
       1,
       TASK_PRIORITY.ACTION,
@@ -159,9 +154,9 @@ export class WholeBodyCoupling {
     bodyTaskTargets.offerWorld(
       a,
       BODY.chest,
-      chestX + leadDx * transfer * 0.38 + fx * surge * 0.72,
+      chestX + leadDx * transfer * 0.46 + fx * surge * 0.82,
       chestY,
-      chestZ + leadDz * transfer * 0.38 + fz * surge * 0.72,
+      chestZ + leadDz * transfer * 0.46 + fz * surge * 0.82,
       1,
       TASK_PRIORITY.ACTION,
     );
@@ -172,7 +167,7 @@ export class WholeBodyCoupling {
         a,
         rearKnee,
         bodyTaskTargets.targetXFor(a, rearKnee),
-        bodyTaskTargets.targetYFor(a, rearKnee) - (jab ? 0.012 : 0.035) * drive * scale,
+        bodyTaskTargets.targetYFor(a, rearKnee) - (jab ? 0.018 : 0.052) * drive * scale,
         bodyTaskTargets.targetZFor(a, rearKnee),
         1,
         TASK_PRIORITY.ACTION,
@@ -210,49 +205,13 @@ export class WholeBodyCoupling {
     const forward =
       (rawFootX - rig.x[attackHip]!) * fx +
       (rawFootZ - rig.z[attackHip]!) * fz;
-    const flight = clamp01((rawFootY - supportY - 0.1 * scale) / (0.42 * scale));
-    const extension = clamp01((forward - 0.16 * scale) / (0.7 * scale));
-    const chamber = clamp01(flight * (1 - extension * 0.82));
-    const turn = clamp01(chamber * 0.72 + extension * 0.92);
-    const preload = flight * (1 - extension * 0.58);
+    const flight = clamp01((rawFootY - supportY - 0.09 * scale) / (0.44 * scale));
+    const extension = clamp01((forward - 0.13 * scale) / (0.72 * scale));
+    const chamber = clamp01(flight * (1 - extension * 0.78));
+    const turn = clamp01(chamber * 0.7 + extension);
 
-    // Kickboxer-style roundhouse geometry. The original melee phase still owns
-    // timing; this coupling remaps its straight front-kick effector into a
-    // chambered lateral arc. At chamber the knee comes up/out and the foot folds
-    // beneath it; through extension the hip turns and the foot sweeps diagonally
-    // across the target line rather than driving straight forward like a door kick.
-    const footLX = side * (0.13 + chamber * 0.2 - extension * 0.17) * scale;
-    const footLY = (0.08 + chamber * 0.29 + extension * 0.5) * scale;
-    const footLZ = (-0.03 + chamber * 0.08 + extension * 0.61) * scale;
-    const footX = a.x + rx * footLX + fx * footLZ;
-    const footY = a.y + footLY;
-    const footZ = a.z + rz * footLX + fz * footLZ;
-    bodyTaskTargets.offerWorld(
-      a,
-      attackFoot,
-      footX,
-      footY,
-      footZ,
-      1,
-      TASK_PRIORITY.ACTION,
-    );
-
-    const kneeLX = side * (0.13 + chamber * 0.19 + extension * 0.08) * scale;
-    const kneeLY = (0.42 + chamber * 0.16 + extension * 0.14) * scale;
-    const kneeLZ = (0.04 + chamber * 0.1 + extension * 0.25) * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      attackKnee,
-      a.x + rx * kneeLX + fx * kneeLZ,
-      a.y + kneeLY,
-      a.z + rz * kneeLX + fz * kneeLZ,
-      1,
-      TASK_PRIORITY.ACTION,
-    );
-
-    // Plant the opposite foot. The point foot cannot encode yaw by itself, so
-    // support-foot pivot is expressed by rotating the support knee/hip and the
-    // pelvis/shoulder lines around this fixed contact.
+    // Support is the pivot. The point foot is fixed in world space; the rest of
+    // the stance is organized around it rather than translating the whole rig.
     bodyTaskTargets.offerWorld(
       a,
       supportFoot,
@@ -263,105 +222,145 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.CONTACT_CRITICAL,
     );
 
-    const supportKneeX = bodyTaskTargets.targetXFor(a, supportKnee) - fx * turn * 0.035 * scale;
-    const supportKneeY = bodyTaskTargets.targetYFor(a, supportKnee) - flight * 0.025 * scale;
-    const supportKneeZ = bodyTaskTargets.targetZFor(a, supportKnee) - fz * turn * 0.035 * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      supportKnee,
-      supportKneeX,
-      supportKneeY,
-      supportKneeZ,
-      1,
-      TASK_PRIORITY.CONTACT_CRITICAL,
-    );
-
-    const supportHipBaseX = bodyTaskTargets.targetXFor(a, supportHip);
-    const supportHipBaseY = bodyTaskTargets.targetYFor(a, supportHip);
-    const supportHipBaseZ = bodyTaskTargets.targetZFor(a, supportHip);
-    const supportHipTurn = -side * 0.095 * turn * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      supportHip,
-      supportHipBaseX + fx * supportHipTurn,
-      supportHipBaseY - flight * 0.018 * scale,
-      supportHipBaseZ + fz * supportHipTurn,
-      1,
-      TASK_PRIORITY.CONTACT_CRITICAL,
-    );
-
-    const attackHipBaseX = bodyTaskTargets.targetXFor(a, attackHip);
-    const attackHipBaseY = bodyTaskTargets.targetYFor(a, attackHip);
-    const attackHipBaseZ = bodyTaskTargets.targetZFor(a, attackHip);
-    const attackHipTurn = side * 0.14 * turn * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      attackHip,
-      attackHipBaseX + fx * attackHipTurn,
-      attackHipBaseY + flight * 0.018 * scale,
-      attackHipBaseZ + fz * attackHipTurn,
-      1,
-      TASK_PRIORITY.ACTION,
-    );
-
-    const pelvisX = bodyTaskTargets.targetXFor(a, BODY.pelvis);
-    const pelvisY = bodyTaskTargets.targetYFor(a, BODY.pelvis);
-    const pelvisZ = bodyTaskTargets.targetZFor(a, BODY.pelvis);
+    const basePelvisX = bodyTaskTargets.targetXFor(a, BODY.pelvis);
+    const basePelvisY = bodyTaskTargets.targetYFor(a, BODY.pelvis);
+    const basePelvisZ = bodyTaskTargets.targetZFor(a, BODY.pelvis);
     const toSupportX = supportX - rig.x[BODY.pelvis]!;
     const toSupportZ = supportZ - rig.z[BODY.pelvis]!;
-    const supportShift = 0.34 + flight * 0.28;
-    const lateralBrace = -side * (0.055 + flight * 0.06) * scale;
+    const supportShift = 0.42 + flight * 0.24;
+    const lateralBrace = -side * (0.07 + flight * 0.07) * scale;
+    const pelvisX = basePelvisX + toSupportX * supportShift + rx * lateralBrace;
+    const pelvisY = basePelvisY - flight * 0.045 * scale;
+    const pelvisZ = basePelvisZ + toSupportZ * supportShift + rz * lateralBrace;
     bodyTaskTargets.offerWorld(
       a,
       BODY.pelvis,
-      pelvisX + toSupportX * supportShift + rx * lateralBrace + fx * preload * 0.015 * scale,
-      pelvisY - flight * 0.038 * scale,
-      pelvisZ + toSupportZ * supportShift + rz * lateralBrace + fz * preload * 0.015 * scale,
+      pelvisX,
+      pelvisY,
+      pelvisZ,
       1,
       TASK_PRIORITY.ACTION,
     );
 
-    // Counter-lean away from the kicking leg while the shoulders rotate with
-    // the hips. This is the characteristic side-on silhouette missing from the
-    // previous rigid front kick.
-    const chestX = bodyTaskTargets.targetXFor(a, BODY.chest);
-    const chestY = bodyTaskTargets.targetYFor(a, BODY.chest);
-    const chestZ = bodyTaskTargets.targetZFor(a, BODY.chest);
-    const counterSide = -side * (0.1 * flight + 0.045 * extension) * scale;
-    const counterBack = -extension * 0.035 * scale;
+    // True transverse-axis rotation instead of shear offsets. At peak turn the
+    // pelvis rotates about 70 degrees toward the attack while preserving hip
+    // width. Shoulders lag slightly, producing a real hip-to-torso torque chain.
+    const theta = side * turn * 1.22;
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+    const hipRightX = rx * c + fx * s;
+    const hipRightZ = rz * c + fz * s;
+
+    const shoulderTheta = theta * 0.82;
+    const cs = Math.cos(shoulderTheta);
+    const ss = Math.sin(shoulderTheta);
+    const shoulderRightX = rx * cs + fx * ss;
+    const shoulderRightZ = rz * cs + fz * ss;
+
+    const supportHipSide = -side * 0.14 * scale;
+    const attackHipSide = side * 0.14 * scale;
+    const supportHipX = pelvisX + hipRightX * supportHipSide;
+    const supportHipY = pelvisY - 0.06 * scale;
+    const supportHipZ = pelvisZ + hipRightZ * supportHipSide;
+    const attackHipX = pelvisX + hipRightX * attackHipSide;
+    const attackHipY = pelvisY - 0.045 * scale + flight * 0.03 * scale;
+    const attackHipZ = pelvisZ + hipRightZ * attackHipSide;
+
+    bodyTaskTargets.offerWorld(
+      a,
+      supportHip,
+      supportHipX,
+      supportHipY,
+      supportHipZ,
+      1,
+      TASK_PRIORITY.CONTACT_CRITICAL,
+    );
+    bodyTaskTargets.offerWorld(
+      a,
+      attackHip,
+      attackHipX,
+      attackHipY,
+      attackHipZ,
+      1,
+      TASK_PRIORITY.ACTION,
+    );
+
+    // Support knee remains under the rotating pelvis with a modest forward bend,
+    // giving the planted leg something to carry instead of remaining a rigid post.
+    bodyTaskTargets.offerWorld(
+      a,
+      supportKnee,
+      supportX + (supportHipX - supportX) * 0.5 + fx * 0.055 * turn * scale,
+      supportY + (supportHipY - supportY) * 0.5 - 0.035 * flight * scale,
+      supportZ + (supportHipZ - supportZ) * 0.5 + fz * 0.055 * turn * scale,
+      1,
+      TASK_PRIORITY.CONTACT_CRITICAL,
+    );
+
+    // The attacking leg sweeps on an arc: lateral chamber first, then the knee
+    // comes around and the foot crosses inward as forward reach increases.
+    const footSide = side * (0.3 + chamber * 0.1 - extension * 0.42) * scale;
+    const footForward = (0.02 + chamber * 0.1 + extension * 0.78) * scale;
+    const footHeight = (0.12 + chamber * 0.4 + extension * 0.38) * scale;
+    bodyTaskTargets.offerWorld(
+      a,
+      attackFoot,
+      pelvisX + rx * footSide + fx * footForward,
+      a.y + footHeight,
+      pelvisZ + rz * footSide + fz * footForward,
+      1,
+      TASK_PRIORITY.ACTION,
+    );
+
+    const kneeSide = side * (0.28 + chamber * 0.1 - extension * 0.2) * scale;
+    const kneeForward = (0.06 + chamber * 0.14 + extension * 0.42) * scale;
+    const kneeHeight = (0.42 + chamber * 0.22 + extension * 0.17) * scale;
+    bodyTaskTargets.offerWorld(
+      a,
+      attackKnee,
+      pelvisX + rx * kneeSide + fx * kneeForward,
+      a.y + kneeHeight,
+      pelvisZ + rz * kneeSide + fz * kneeForward,
+      1,
+      TASK_PRIORITY.ACTION,
+    );
+
+    const baseChestX = bodyTaskTargets.targetXFor(a, BODY.chest);
+    const baseChestY = bodyTaskTargets.targetYFor(a, BODY.chest);
+    const baseChestZ = bodyTaskTargets.targetZFor(a, BODY.chest);
+    const counterSide = -side * (0.14 * flight + 0.06 * extension) * scale;
+    const counterBack = -extension * 0.045 * scale;
+    const chestX = baseChestX + rx * counterSide + fx * counterBack + toSupportX * flight * 0.05;
+    const chestY = baseChestY + extension * 0.02 * scale;
+    const chestZ = baseChestZ + rz * counterSide + fz * counterBack + toSupportZ * flight * 0.05;
     bodyTaskTargets.offerWorld(
       a,
       BODY.chest,
-      chestX + rx * counterSide + fx * counterBack + toSupportX * flight * 0.045,
-      chestY + extension * 0.018 * scale,
-      chestZ + rz * counterSide + fz * counterBack + toSupportZ * flight * 0.045,
+      chestX,
+      chestY,
+      chestZ,
       1,
       TASK_PRIORITY.ACTION,
     );
 
-    const lShoulderX = bodyTaskTargets.targetXFor(a, BODY.lShoulder);
-    const lShoulderY = bodyTaskTargets.targetYFor(a, BODY.lShoulder);
-    const lShoulderZ = bodyTaskTargets.targetZFor(a, BODY.lShoulder);
-    const rShoulderX = bodyTaskTargets.targetXFor(a, BODY.rShoulder);
-    const rShoulderY = bodyTaskTargets.targetYFor(a, BODY.rShoulder);
-    const rShoulderZ = bodyTaskTargets.targetZFor(a, BODY.rShoulder);
-    const lTurn = attackLeft ? 0.17 : -0.14;
-    const rTurn = attackLeft ? -0.14 : 0.17;
+    // Shoulder line follows the rotating torso but lags the hips. This makes the
+    // upper body visibly turn sideways rather than merely leaning while the leg
+    // moves independently.
     bodyTaskTargets.offerWorld(
       a,
       BODY.lShoulder,
-      lShoulderX + fx * lTurn * turn * scale + rx * counterSide * 0.32,
-      lShoulderY,
-      lShoulderZ + fz * lTurn * turn * scale + rz * counterSide * 0.32,
+      chestX + shoulderRightX * (-0.27 * scale),
+      chestY + 0.11 * scale,
+      chestZ + shoulderRightZ * (-0.27 * scale),
       1,
       TASK_PRIORITY.ACTION,
     );
     bodyTaskTargets.offerWorld(
       a,
       BODY.rShoulder,
-      rShoulderX + fx * rTurn * turn * scale + rx * counterSide * 0.32,
-      rShoulderY,
-      rShoulderZ + fz * rTurn * turn * scale + rz * counterSide * 0.32,
+      chestX + shoulderRightX * (0.27 * scale),
+      chestY + 0.11 * scale,
+      chestZ + shoulderRightZ * (0.27 * scale),
       1,
       TASK_PRIORITY.ACTION,
     );
