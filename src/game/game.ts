@@ -5,7 +5,7 @@ import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
-import { AnimatedPhysicalBodies } from "./body-actions";
+import { AnimationController } from "./AnimationController";
 import { BodyView } from "./body-render";
 import { clearSave, loadSave, writeSave } from "./save";
 
@@ -14,7 +14,7 @@ export class Game {
   input: Input;
   audio = new GameAudio();
   view: View;
-  bodies = new AnimatedPhysicalBodies();
+  bodies = new AnimationController();
   bodyView: BodyView;
   cam: Cam = { yaw: 0, pitch: 0.18 };
   hud: HudState = defaultHud();
@@ -127,23 +127,46 @@ export class Game {
 
   restart(fresh = true) {
     if (fresh) clearSave();
+    const resumeLoop = this.running;
+    this.view.renderer.setAnimationLoop(null);
+
     this.view.dispose();
     this.bodyView.forget();
     this.bodies.clear();
+
     this.world = new World();
     this.world.seed = (Date.now() % 2147483646) + 1;
     buildLevel(this.world);
+
     this.view = new View(this.canvas);
     this.view.bootstrap(this.world);
-    this.bodies = new AnimatedPhysicalBodies();
+    this.bodies = new AnimationController();
     this.bodies.bootstrap(this.world);
     this.bodyView = new BodyView(this.view, this.bodies);
     this.bodyView.bootstrap(this.world.actors);
+
     this.cam = { yaw: this.world.player().yaw, pitch: 0.18 };
     this.hud = defaultHud();
-    this.input.enabled = false;
+    this.world.phase = "playing";
+    this.hud.phase = "playing";
+    this.acc = 0;
+    this.saveT = 0;
+    this.last = performance.now();
+
+    this.input.keys.clear();
+    this.input.heldButtons.clear();
+    this.input.injected = null;
+    this.input.mouseDx = 0;
+    this.input.mouseDy = 0;
+    this.input.lookTouchX = 0;
+    this.input.lookTouchY = 0;
+    this.input.setStick(0, 0);
+    this.input.enabled = true;
+
     this.resize();
     this.wireControlsTest();
+    if (resumeLoop) this.view.renderer.setAnimationLoop(this.frame);
+    if (!isTouchDevice()) this.input.requestLock();
     this.pushHud();
   }
 
@@ -196,6 +219,7 @@ export class Game {
       let steps = 0;
       while (this.acc >= STEP && steps < 5) {
         this.bodies.prepareInput(this.world, input, STEP);
+        this.bodies.prepareStep(this.world, STEP);
         stepWorld(this.world, STEP, input, this.cam, simPlaying);
         this.bodies.step(this.world, STEP);
         this.acc -= STEP;
