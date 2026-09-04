@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "SUNDER",
+      "hasCanvas": true,
+      "bodyTextLen": 229,
+      "bodyTextHash": "2bf36cb4a1e9fb24b82ae85dd6bbb76fc2af36b41de31a394be17d8995fa13b0",
+      "bodyTextPrefix": "HARROW'S FORD Sunder A body in a town that burns, panics, and re",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "SUNDER",
+      "hasCanvas": true,
+      "bodyTextLen": 229,
+      "bodyTextHash": "2bf36cb4a1e9fb24b82ae85dd6bbb76fc2af36b41de31a394be17d8995fa13b0",
+      "bodyTextPrefix": "HARROW'S FORD Sunder A body in a town that burns, panics, and re",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}
