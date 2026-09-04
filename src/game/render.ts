@@ -910,7 +910,16 @@ function placeSeg(
   a: { x: number; y: number; z: number },
   b: { x: number; y: number; z: number },
   thick: number,
+  maxLen = 0.55,
 ) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dz = b.z - a.z;
+  const n = Math.hypot(dx, dy, dz);
+  if (n > maxLen && n > 1e-6) {
+    const s = maxLen / n;
+    b = { x: a.x + dx * s, y: a.y + dy * s, z: a.z + dz * s };
+  }
   placeBody(mesh, a, b, { x: 1, z: 0 }, thick, thick);
 }
 
@@ -944,6 +953,20 @@ function placeArm(
   }
 }
 
+function clampToward(
+  from: { x: number; y: number; z: number },
+  to: { x: number; y: number; z: number },
+  max: number,
+) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = to.z - from.z;
+  const n = Math.hypot(dx, dy, dz);
+  if (n <= max || n < 1e-6) return { x: to.x, y: to.y, z: to.z };
+  const s = max / n;
+  return { x: from.x + dx * s, y: from.y + dy * s, z: from.z + dz * s };
+}
+
 function placeLeg(
   thigh: THREE.Object3D,
   shin: THREE.Object3D,
@@ -962,14 +985,24 @@ function placeLeg(
     y: hip.y - 0.02,
     z: hip.z + right.z * side * 0.1,
   };
-  placeSeg(thigh, hipP, knee, 0.155);
-  placeSeg(shin, knee, ankle, 0.115);
+  const span = Math.hypot(ankle.x - hipP.x, ankle.y - hipP.y, ankle.z - hipP.z);
+  let kneeP = clampToward(hipP, knee, 0.44);
+  if (span > 0.8) {
+    kneeP = {
+      x: kneeP.x - fwd.x * 0.07,
+      y: kneeP.y,
+      z: kneeP.z - fwd.z * 0.07,
+    };
+  }
+  const ankleP = clampToward(kneeP, ankle, 0.5);
+  placeSeg(thigh, hipP, kneeP, 0.155, 0.46);
+  placeSeg(shin, kneeP, ankleP, 0.115, 0.5);
   if (kneeMesh) {
-    kneeMesh.position.set(knee.x, knee.y, knee.z);
+    kneeMesh.position.set(kneeP.x, kneeP.y, kneeP.z);
     kneeMesh.scale.setScalar(0.1);
     kneeMesh.quaternion.identity();
   }
-  if (foot) placeFoot(foot, ankle, fwd, yaw);
+  if (foot) placeFoot(foot, ankleP, fwd, yaw);
 }
 
 const _x = new THREE.Vector3();

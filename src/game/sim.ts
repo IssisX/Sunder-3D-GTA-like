@@ -44,7 +44,7 @@ import {
 } from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
-const STEP_UP = 0.48;
+const STEP_UP = 0.32;
 
 export interface Cam {
   yaw: number;
@@ -181,22 +181,21 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   }
 
   if (input.jumpPressed && p.grounded) {
-    const front = probeHeight(w, p.x + f.x * 0.7, p.z + f.z * 0.7);
-    if (front > 0.35 && front < 1.15 && locoSpeed(p) > 2.2) {
+    const here = probeHeight(w, p.x, p.z);
+    const front = probeHeight(w, p.x + f.x * 0.65, p.z + f.z * 0.65);
+    const rise = front - Math.max(here, p.y);
+    if (rise > 0.28 && rise < 0.9 && locoSpeed(p) > 2.5) {
       p.loco = "vault";
       p.vaultT = 0.38;
-      p.vy = 3.6;
-      p.vx += f.x * 2.2;
-      p.vz += f.z * 2.2;
-    } else if (front > 1.15 && front < 2.4) {
-      p.loco = "climb";
-      p.locoT = 0.55;
-      p.vy = 2.4;
+      p.vy = 3.2;
+      p.vx += f.x * 2;
+      p.vz += f.z * 2;
     } else {
-      p.vy = 6.2 * (0.7 + p.stamina * 0.3) * leg;
-      p.grounded = false;
-      p.stamina -= 0.08;
+      p.vy = 4.4 * (0.78 + p.stamina * 0.22) * leg;
     }
+    p.grounded = false;
+    p.plantPart = -1;
+    p.stamina = Math.max(0, p.stamina - 0.08);
   }
 
   if (input.bandage) treat(w, p, dt);
@@ -1015,11 +1014,23 @@ function resolveShove(w: World, a: Actor) {
     if (!close) continue;
     mark(a, o.id);
     const rel = a.mass / (a.mass + o.mass);
-    o.vx += f.x * 4.2 * rel;
-    o.vz += f.z * 4.2 * rel;
-    o.balance = Math.max(0, o.balance - 0.12 * rel);
-    applyImpulseToNearest(o, o.x, o.y + 1.05, o.z, f.x * 5 * rel, 0.8 * rel, f.z * 5 * rel);
-    if (o.balance < 0.18) {
+    const planted = o.plantPart >= 0 && o.body?.mode === "stance" && o.grounded;
+    o.vx += f.x * (planted ? 3.2 : 4.2) * rel;
+    o.vz += f.z * (planted ? 3.2 : 4.2) * rel;
+    o.vy += planted ? 0.55 : 0.08;
+    o.balance = Math.max(0, o.balance - (planted ? 0.42 : 0.12) * rel);
+    applyImpulseToNearest(o, o.x, o.y + 1.05, o.z, f.x * 5 * rel, (planted ? 1.6 : 0.8) * rel, f.z * 5 * rel);
+    if (planted) {
+      o.plantPart = -1;
+      o.loco = "stumble";
+      o.locoT = 0.45;
+      if (o.balance < 0.28 && o.body) {
+        o.loco = "ragdoll";
+        o.locoT = 0.75;
+        o.body.mode = "ragdoll";
+        o.balance = 0;
+      }
+    } else if (o.balance < 0.18) {
       o.loco = "stumble";
       o.locoT = 0.32;
     }
@@ -1402,9 +1413,9 @@ function stepPhysics(w: World, dt: number) {
             a.plantPart === P.shinL
               ? injurySum(a.injuries.lleg) + a.injuries.lleg.fracture
               : injurySum(a.injuries.rleg) + a.injuries.rleg.fracture;
-          plantMul = 0.38 + 0.62 * (1 - clamp(inj, 0, 1));
+          plantMul = 0.55 + 0.45 * (1 - clamp(inj, 0, 1));
         } else if (a.grounded && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint")) {
-          plantMul = 0.42;
+          plantMul = 0.7;
         }
       }
       a.vx += (wishX - a.vx) * (1 - Math.exp(-dt * acc * 0.25 * plantMul));
@@ -1564,18 +1575,18 @@ function collideY(w: World, a: Actor) {
     if (!c.solid || c.water) continue;
     const r = a.radius * 0.85;
     if (a.x + r < c.minX || a.x - r > c.maxX || a.z + r < c.minZ || a.z - r > c.maxZ) continue;
-    if (a.vy <= 0 && a.y >= c.maxY - STEP_UP && a.y <= c.maxY + 0.12) {
+    if (a.vy <= 0 && a.y >= c.maxY - 0.18 && a.y <= c.maxY + 0.1) {
       a.y = c.maxY;
       a.vy = 0;
       a.grounded = true;
-    } else if (a.vy > 0 && a.y + a.height > c.minY && a.y < c.minY) {
-      a.y = c.minY - a.height;
+    } else if (a.vy > 0 && a.y < c.minY && a.y + a.height > c.minY && a.y + a.height < c.minY + 0.28) {
+      a.y = Math.max(0, c.minY - a.height);
       a.vy = 0;
     }
   }
   if (a.y <= 0) {
     a.y = 0;
-    a.vy = 0;
+    if (a.vy < 0) a.vy = 0;
     a.grounded = true;
   }
 }

@@ -379,6 +379,17 @@ export class Game {
         }
         startKick(self.world, p);
       },
+      forceJump: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        p.vy = 4.4;
+        p.grounded = false;
+        p.plantPart = -1;
+      },
       forceGrab: () => {
         const p = self.world.player();
         if (self.world.phase !== "playing") {
@@ -549,6 +560,16 @@ export class Game {
           plantDist: p.plantPart >= 0 ? Math.hypot(p.plantX - p.x, p.plantZ - p.z) : 0,
           shinLY: p.body?.parts[8] ? p.body.parts[8]!.y - p.y : 0,
           shinRY: p.body?.parts[10] ? p.body.parts[10]!.y - p.y : 0,
+          y: p.y,
+          vy: p.vy,
+          grounded: p.grounded,
+          leanFwd: p.body?.parts[1]
+            ? (p.body.parts[1]!.x - p.x) * f.x + (p.body.parts[1]!.z - p.z) * f.z
+            : 0,
+          footSpan:
+            p.body?.parts[8] && p.body?.parts[10]
+              ? Math.hypot(p.body.parts[8]!.x - p.body.parts[10]!.x, p.body.parts[8]!.z - p.body.parts[10]!.z)
+              : 0,
           weaponProp: p.weaponProp,
           wepHeldBy: p.weaponProp ? (self.world.prop(p.weaponProp)?.heldBy ?? 0) : 0,
           wepOnGround: p.weaponProp ? !self.world.prop(p.weaponProp)?.heldBy : false,
@@ -643,6 +664,7 @@ declare global {
       forceRagdoll?: () => void;
       forceStrike?: () => void;
       forceKick?: () => void;
+      forceJump?: () => void;
       forceGrab?: () => void;
       forceFlinch?: (dir?: string) => void;
       forceStruggle?: () => boolean;
