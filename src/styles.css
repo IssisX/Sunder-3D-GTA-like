@@ -90,6 +90,13 @@
   padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
 
+/* Tailwind v4's translate utilities use the independent `translate` property.
+   The stick knob also has an inline transform for dynamic throw, so retaining
+   both applies the -50% centering twice and makes neutral look offset/up-left. */
+.touch-left > div > div:last-child {
+  translate: none;
+}
+
 @media (pointer: coarse) {
   .hud-vitals {
     padding-bottom: max(11rem, calc(env(safe-area-inset-bottom) + 9.5rem));
