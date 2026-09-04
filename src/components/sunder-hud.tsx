@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { HudState, Region } from "@/game/types";
 
 const PARTS: { id: Region; d: string }[] = [
-  { id: "head", d: "M18 4.5c2.4 0 4.2 1.8 4.2 3.8S20.4 12 18 12s-4.2-1.8-4.2-3.7S15.6 4.5 18 4.5z" },
+  {
+    id: "head",
+    d: "M18 4.5c2.4 0 4.2 1.8 4.2 3.8S20.4 12 18 12s-4.2-1.8-4.2-3.7S15.6 4.5 18 4.5z",
+  },
   { id: "torso", d: "M12.5 13.2h11v9.2h-11z" },
   { id: "larm", d: "M8.2 13.4h3.8v10.2H8.2z" },
   { id: "rarm", d: "M24 13.4h3.8v10.2H24z" },
@@ -49,12 +52,23 @@ export function SunderHud({
   }, []);
 
   const hurt = Object.values(hud.injuries).some((v) => v > 0.08);
+  // A limb can be intact-looking and still not answer. That is worth its own
+  // signal, because it is the thing that decides whether you can run or hold on.
+  const crippled = Object.values(hud.motor).some((v) => v < 0.55);
   const hour =
-    hud.timeOfDay > 0.78 || hud.timeOfDay < 0.2 ? "Night" : hud.timeOfDay > 0.7 ? "Dusk" : hud.timeOfDay < 0.3 ? "Dawn" : "Day";
+    hud.timeOfDay > 0.78 || hud.timeOfDay < 0.2
+      ? "Night"
+      : hud.timeOfDay > 0.7
+        ? "Dusk"
+        : hud.timeOfDay < 0.3
+          ? "Dawn"
+          : "Day";
 
   return (
     <div className="pointer-events-none absolute inset-0 font-sans text-fg">
-      {hud.phase === "title" && <Title onStart={onStart} ready={ready} bootError={bootError} touch={touch} />}
+      {hud.phase === "title" && (
+        <Title onStart={onStart} ready={ready} bootError={bootError} touch={touch} />
+      )}
       {hud.phase === "paused" && (
         <Pane
           title="Paused"
@@ -123,7 +137,7 @@ export function SunderHud({
           </div>
 
           <div className="hud-vitals absolute bottom-0 left-0 z-20 flex items-end gap-4 p-4 sm:p-6">
-            {hurt && <BodySilhouette injuries={hud.injuries} />}
+            {(hurt || crippled) && <BodySilhouette injuries={hud.injuries} motor={hud.motor} />}
             <div className="flex min-w-[9rem] flex-col gap-1.5">
               {hud.stamina < 0.95 && <Meter label="Wind" value={hud.stamina} />}
               {hud.blood < 0.97 && <Meter label="Blood" value={hud.blood} warn />}
@@ -137,7 +151,9 @@ export function SunderHud({
 
           <div className="absolute bottom-0 left-1/2 hidden -translate-x-1/2 pb-5 text-center sm:block">
             {hud.hint && (
-              <p className="rounded-md bg-bg/50 px-3 py-1.5 text-sm text-fg/80 backdrop-blur-sm">{hud.hint}</p>
+              <p className="rounded-md bg-bg/50 px-3 py-1.5 text-sm text-fg/80 backdrop-blur-sm">
+                {hud.hint}
+              </p>
             )}
           </div>
 
@@ -180,11 +196,18 @@ function Meter({ label, value, warn }: { label: string; value: number; warn?: bo
   );
 }
 
-function BodySilhouette({ injuries }: { injuries: Record<Region, number> }) {
+function BodySilhouette({
+  injuries,
+  motor,
+}: {
+  injuries: Record<Region, number>;
+  motor: Record<Region, number>;
+}) {
   return (
     <svg viewBox="0 0 36 36" className="h-16 w-16 opacity-90" aria-hidden>
       {PARTS.map((p) => {
         const v = injuries[p.id];
+        const m = motor[p.id] ?? 1;
         const fill =
           v > 0.7
             ? "var(--color-danger)"
@@ -193,7 +216,17 @@ function BodySilhouette({ injuries }: { injuries: Record<Region, number> }) {
               : v > 0.08
                 ? "var(--color-muted)"
                 : "var(--color-raised)";
-        return <path key={p.id} d={p.d} fill={fill} />;
+        // Fill is damage; the outline is whether the limb still answers.
+        return (
+          <path
+            key={p.id}
+            d={p.d}
+            fill={fill}
+            stroke={m < 0.55 ? "var(--color-danger)" : "none"}
+            strokeWidth={m < 0.25 ? 1.1 : 0.6}
+            strokeOpacity={m < 0.55 ? 1 - m / 0.55 : 0}
+          />
+        );
       })}
     </svg>
   );
@@ -215,9 +248,12 @@ function Title({
       <div className="bg-gradient-to-t from-bg via-bg/80 to-transparent pt-24">
         <div className="mx-auto w-full max-w-xl px-6 pb-10 sm:pb-14">
           <p className="mb-3 text-xs tracking-[0.28em] text-muted uppercase">Harrow's Ford</p>
-          <h1 className="font-display text-6xl leading-none tracking-tight text-fg sm:text-8xl">Sunder</h1>
+          <h1 className="font-display text-6xl leading-none tracking-tight text-fg sm:text-8xl">
+            Sunder
+          </h1>
           <p className="mt-4 max-w-md text-base leading-relaxed text-muted">
-            A body in a town that burns, panics, and remembers. Shove a man into a stall. Watch the lamp fall.
+            A body in a town that burns, panics, and remembers. Shove a man into a stall. Watch the
+            lamp fall.
           </p>
           {bootError && <p className="mt-3 text-sm text-danger">{bootError}</p>}
           <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">

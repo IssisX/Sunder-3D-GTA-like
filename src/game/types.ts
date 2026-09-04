@@ -111,7 +111,25 @@ export function emptyInjury(): Injury {
 }
 
 export function injuryTotal(i: Injury): number {
-  return i.bruise + i.cut * 1.4 + i.puncture * 1.6 + i.burn * 1.3 + i.fracture * 2.2 + i.sprain * 1.1;
+  return (
+    i.bruise + i.cut * 1.4 + i.puncture * 1.6 + i.burn * 1.3 + i.fracture * 2.2 + i.sprain * 1.1
+  );
+}
+
+/**
+ * Functional impairment weighting: how much this injury costs the limb, as
+ * distinct from how life-threatening it is. This is the quantity motor
+ * authority is derived from.
+ */
+export function injurySum(i: Injury): number {
+  return (
+    i.bruise * 0.4 +
+    i.cut * 0.8 +
+    i.puncture * 0.9 +
+    i.burn * 0.7 +
+    i.fracture * 1.4 +
+    i.sprain * 0.7
+  );
 }
 
 export interface Memory {
@@ -216,6 +234,44 @@ export interface Actor {
   lastHitBy: number;
   lastHitT: number;
   pinnedId: number;
+
+  /* --- articulated body substrate (see body.ts) --- */
+  /** Slot in World.bodies, or -1 when this actor has no physical body. */
+  body: number;
+  /**
+   * Deliberate stance authority in [0,1]: how much the character is *trying* to
+   * hold its pose. 1 standing, 0 limp, ramping while getting up. Multiplied by
+   * physiological state to give `authority`.
+   */
+  stanceAuth: number;
+  /** Global motor authority in [0,1], derived each tick. */
+  authority: number;
+  /** Per-limb motor authority in [0,1], gated by that limb's own damage. */
+  motor: Record<Region, number>;
+  /** Support-polygon margin at the capture point, m. Negative means falling. */
+  support: number;
+  /** Mass of other bodies resting on this one, kg. */
+  pileLoad: number;
+  /** Impulse currently transmitted through a grab, N*s. */
+  dragLoad: number;
+  /** Smoothed crouch amount in [0,1]; the raw input is a boolean. */
+  crouchAmt: number;
+  /** Catch-step timer, s. */
+  catchT: number;
+  /** Which leg is swinging for the catch step: 0 left, 1 right. */
+  catchLeg: number;
+  /** Trip recovery timer, s. */
+  tripT: number;
+  /** Strongest node closing speed this tick, m/s. Read-only expression input. */
+  lastImpact: number;
+  /** Region that took `lastImpact`. */
+  impactRegion: Region;
+  /** Grabber-side attachment node index. */
+  grabNodeA: number;
+  /** Target-side attachment node index (ignored for props). */
+  grabNodeB: number;
+  /** Attachment rest length, m. */
+  grabRest: number;
 }
 
 export interface Prop {
@@ -326,6 +382,9 @@ export interface HudState {
   crouch: boolean;
   whispers: Whisper[];
   hunted: boolean;
+  motor: Record<Region, number>;
+  support: number;
+  pileLoad: number;
   timeOfDay: number;
   rain: number;
   wind: number;
@@ -354,6 +413,9 @@ export function defaultHud(): HudState {
     crouch: false,
     whispers: [],
     hunted: false,
+    motor: { head: 1, torso: 1, larm: 1, rarm: 1, lleg: 1, rleg: 1 },
+    support: 1,
+    pileLoad: 0,
     timeOfDay: 0.7,
     rain: 0,
     wind: 0,
@@ -367,7 +429,15 @@ export function defaultHud(): HudState {
 
 export const WEAPON_STATS: Record<
   WeaponKind,
-  { mass: number; reach: number; speed: number; blunt: number; cut: number; pierce: number; fire: number }
+  {
+    mass: number;
+    reach: number;
+    speed: number;
+    blunt: number;
+    cut: number;
+    pierce: number;
+    fire: number;
+  }
 > = {
   fist: { mass: 0.4, reach: 0.85, speed: 1.35, blunt: 0.55, cut: 0, pierce: 0, fire: 0 },
   knife: { mass: 0.5, reach: 0.95, speed: 1.4, blunt: 0.1, cut: 1.1, pierce: 0.7, fire: 0 },

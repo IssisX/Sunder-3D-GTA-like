@@ -15,8 +15,9 @@
     "preview:restart": "node scripts/preview.mjs restart",
     "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",
+    "test:substrate": "node scripts/substrate-falsifiers.mjs",
     "check:auth": "node scripts/check-auth-invariant.mjs",
-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts",
+    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/auth/gate-identity.test.ts src/lib/auth/sign-in-gate.test.ts && npm run test:substrate",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

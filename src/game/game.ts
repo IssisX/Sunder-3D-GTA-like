@@ -1,10 +1,11 @@
-import { STEP, defaultHud, type HudState, type Region, REGIONS } from "./types";
-import { World, injurySum, clamp } from "./world";
+import { STEP, defaultHud, injurySum, type HudState, type Region, REGIONS } from "./types";
+import { World, clamp } from "./world";
 import { Input, isTouchDevice } from "./input";
 import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
+import { makeBodyProbe, type BodyProbe } from "./probe";
 import { clearSave, loadSave, writeSave } from "./save";
 
 export class Game {
@@ -74,6 +75,7 @@ export class Game {
     window.visualViewport?.removeEventListener("scroll", this.resize);
     screen.orientation?.removeEventListener?.("change", this.resize);
     if (window.__controlsTest) delete window.__controlsTest;
+    if (window.__body) delete window.__body;
   }
 
   resize = () => {
@@ -145,6 +147,9 @@ export class Game {
     p.loco = "idle";
     p.alive = true;
     p.downT = 0;
+    p.stanceAuth = 1;
+    p.authority = 1;
+    if (p.body >= 0) this.world.bodies.moveTo(p.body, p.x, p.y, p.z);
     this.world.phase = "playing";
     this.hud.phase = "playing";
     this.input.enabled = true;
@@ -195,7 +200,10 @@ export class Game {
     const fires = this.world.fireCount;
     this.audio.setBeds(this.world.rain, fires, this.world.wanted, this.world.day);
     if (p && Math.hypot(p.vx, p.vz) > 1.4 && p.grounded && simPlaying) {
-      if (((this.world.time * (p.loco === "sprint" ? 5 : 3)) | 0) !== (((this.world.time - raw) * 3) | 0)) {
+      if (
+        ((this.world.time * (p.loco === "sprint" ? 5 : 3)) | 0) !==
+        (((this.world.time - raw) * 3) | 0)
+      ) {
         this.audio.play(p.loco === "sprint" ? "sprint" : "step", 0.35, 0);
       }
     }
@@ -223,7 +231,10 @@ export class Game {
       ? this.world.actor(p.grabbedId)?.name || this.world.prop(p.grabbedId)?.kind || ""
       : "";
     const hunted = this.world.actors.some(
-      (a) => a.alive && a.known.includes(p.id) && (a.ai === "pursue" || a.ai === "combat" || a.ai === "search"),
+      (a) =>
+        a.alive &&
+        a.known.includes(p.id) &&
+        (a.ai === "pursue" || a.ai === "combat" || a.ai === "search"),
     );
     this.hud = {
       phase: this.world.phase,
@@ -242,6 +253,9 @@ export class Game {
       crouch: p.crouch,
       whispers: this.world.whispers.filter((x) => this.world.time - x.t < 5).slice(-3),
       hunted,
+      motor: { ...p.motor },
+      support: p.support,
+      pileLoad: p.pileLoad,
       timeOfDay: this.world.day,
       rain: this.world.rain,
       wind: Math.hypot(this.world.windX, this.world.windZ),
@@ -295,6 +309,7 @@ export class Game {
     p.stamina = s.player.stamina;
     p.weapon = s.player.weapon;
     p.torchLit = s.player.torchLit;
+    if (p.body >= 0) this.world.bodies.moveTo(p.body, p.x, p.y, p.z);
     this.world.time = s.time;
     this.world.day = s.day;
     this.world.rain = s.rain;
@@ -332,6 +347,11 @@ export class Game {
         else self.input.setKeys(["KeyW"]);
       },
     };
+    window.__body = makeBodyProbe(self.world, () => {
+      self.world.phase = "playing";
+      self.hud.phase = "playing";
+      self.input.enabled = true;
+    });
   }
 }
 
@@ -344,5 +364,6 @@ declare global {
       setKeys?: (codes: string[]) => void;
       setSteer?: (v: number) => void;
     };
+    __body?: BodyProbe;
   }
 }
