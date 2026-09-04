@@ -259,6 +259,8 @@ export interface Actor {
   searchT: number;
   lastHitBy: number;
   lastHitT: number;
+  hitNx: number;
+  hitNz: number;
   pinnedId: number;
   body?: Physique;
 }

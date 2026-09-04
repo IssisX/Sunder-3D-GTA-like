@@ -376,8 +376,39 @@ function isThreat(a: Actor, o: Actor, w: World) {
 function stepAI(w: World, dt: number) {
   for (const a of w.actors) {
     if (a.kind === "player" || !a.alive) continue;
-    if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup" || a.grabbedBy) {
+    if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup") {
       a.intendSpeed = 0;
+      continue;
+    }
+    if (a.grabbedBy) {
+      const g = w.actor(a.grabbedBy);
+      if (!g || !g.alive) {
+        a.grabbedBy = 0;
+        a.intendSpeed = 0;
+        continue;
+      }
+      a.ai = "combat";
+      const dx = g.x - a.x;
+      const dz = g.z - a.z;
+      const d = Math.hypot(dx, dz) || 1;
+      a.intendX = dx / d;
+      a.intendZ = dz / d;
+      a.intendSpeed = 0.85 + a.strength * 0.5;
+      a.yaw = lerpAng(a.yaw, Math.atan2(-dx, -dz), Math.min(1, dt * 3.2));
+      if (a.attackCd <= 0 && a.stamina > 0.18 && a.consciousness > 0.4 && a.pain < 0.85) {
+        if (a.stamina > 0.35 && a.weapon !== "fist") {
+          a.strikeT = strikeDuration(a);
+          a.strikeCd = 0.62;
+        } else if (w.rng() > 0.45) {
+          a.strikeT = strikeDuration(a);
+          a.strikeCd = 0.5;
+        } else {
+          a.shoveT = SHOVE_DUR;
+        }
+        a.strikeHit = 0;
+        a.attackCd = 0.55 + w.rng() * 0.45;
+        a.stamina = Math.max(0, a.stamina - 0.07);
+      }
       continue;
     }
     a.aiT -= dt;
@@ -901,6 +932,21 @@ function hitActor(
   vic.pain = clamp(vic.pain + 0.2 * force, 0, 1);
   vic.lastHitBy = atk.id;
   vic.lastHitT = w.time;
+  vic.hitNx = f.x;
+  vic.hitNz = f.z;
+  if (atk.grabbedBy === vic.id) {
+    vic.stamina = Math.max(0, vic.stamina - 0.2 - force * 0.12);
+    vic.balance = Math.max(0, vic.balance - 0.08 * force);
+    if (vic.stamina < 0.14 || force > 1.35) {
+      atk.grabbedBy = 0;
+      vic.grabbedId = 0;
+      vic.carry = 0;
+      clearGrab(vic);
+      atk.vx += f.x * 1.4;
+      atk.vz += f.z * 1.4;
+      w.emitSound(vic.x, vic.z, 0.45, "grab", atk.id);
+    }
+  }
   if (!vic.known.includes(atk.id) && vic.kind !== "player") vic.known.push(atk.id);
   if (atk.kind === "player" && vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.35);
   if (atk.kind === "player" && vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.2);
@@ -955,6 +1001,45 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
       if (t.body) {
         const two = t.mass > a.mass * 0.62 || !t.alive || t.body.mode !== "stance";
         if (!a.body?.grab || (two && a.body.grab.myPart2 < 0)) setGrab(a, t);
+      }
+      if (t.alive && t.body?.mode === "stance" && t.consciousness > 0.35) {
+        const dx = t.x - a.x;
+        const dz = t.z - a.z;
+        const d = Math.hypot(dx, dz) || 1;
+        if (t.flinchT <= 0) {
+          t.hitNx = dx / d;
+          t.hitNz = dz / d;
+        }
+        if (t.kind !== "player") {
+          const fight = t.stamina > 0.22 && t.consciousness > 0.45 && t.pain < 0.72;
+          if (fight) {
+            t.intendX = -dx / d;
+            t.intendZ = -dz / d;
+            t.intendSpeed = Math.max(t.intendSpeed, 1.05 * t.strength);
+          } else {
+            t.intendX = dx / d;
+            t.intendZ = dz / d;
+            t.intendSpeed = Math.max(t.intendSpeed, 1.5 * t.strength);
+          }
+        }
+        const peel = t.strength * t.balance * (0.6 + t.stamina);
+        const hold = a.strength * (0.45 + a.stamina);
+        const fighting = t.strikeT > 0 || t.shoveT > 0 || t.kickT > 0;
+        a.stamina = Math.max(
+          0,
+          a.stamina - dt * (0.1 + 0.22 * clamp(peel / Math.max(0.25, hold), 0.3, 2.4) + (fighting ? 0.45 : 0)),
+        );
+        t.stamina = Math.max(0, t.stamina - dt * 0.05);
+        if (a.stamina < 0.05) {
+          t.vx += (dx / d) * 1.8;
+          t.vz += (dz / d) * 1.8;
+          t.grabbedBy = 0;
+          a.grabbedId = 0;
+          a.carry = 0;
+          clearGrab(a);
+          t.flinchT = Math.max(t.flinchT, 0.16);
+          w.emitSound(a.x, a.z, 0.35, "grab", a.id);
+        }
       }
     } else if (pr) {
       const hand = a.body?.parts[6];
@@ -1033,6 +1118,13 @@ function tryLockGrab(w: World, a: Actor) {
     a.grabbedId = o.id;
     o.grabbedBy = a.id;
     mark(a, o.id);
+    {
+      const dx = o.x - a.x;
+      const dz = o.z - a.z;
+      const d = Math.hypot(dx, dz) || 1;
+      o.hitNx = dx / d;
+      o.hitNz = dz / d;
+    }
     a.carry = o.mass * (o.mass > a.mass * 0.62 || !o.alive ? 0.7 : 0.42);
     setGrab(a, o);
     if (o.balance < 0.55) {
@@ -1088,7 +1180,7 @@ function stepLocomotion(w: World, dt: number) {
       a.intendSpeed *= 0.4;
       if (a.locoT <= 0) a.loco = "idle";
     }
-    if (a.grabbedBy) a.intendSpeed *= 0.35;
+    if (a.grabbedBy) a.intendSpeed *= 0.62;
     if (a.loco === "down") {
       a.intendSpeed = 0;
       continue;

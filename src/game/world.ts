@@ -254,6 +254,8 @@ export class World {
       searchT: 0,
       lastHitBy: 0,
       lastHitT: -99,
+      hitNx: 0,
+      hitNz: 0,
       pinnedId: 0,
       ...partial,
     };

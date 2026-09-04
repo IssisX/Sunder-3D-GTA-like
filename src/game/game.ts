@@ -1,12 +1,12 @@
 import { STEP, defaultHud, type HudState, type Region, REGIONS } from "./types";
-import { World, injurySum, clamp } from "./world";
+import { World, injurySum, clamp, facing, rightOf } from "./world";
 import { Input, isTouchDevice } from "./input";
 import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
-import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P } from "./physique";
+import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P, weaponEnds, setGrab } from "./physique";
 
 export class Game {
   world = new World();
@@ -398,9 +398,10 @@ export class Game {
         const p = self.world.player();
         if (kind === "fist" || kind === "knife" || kind === "club" || kind === "spear" || kind === "torch" || kind === "board" || kind === "pitchfork") {
           p.weapon = kind;
+          p.torchLit = kind === "torch";
         }
       },
-      forceFlinch: () => {
+      forceFlinch: (dir?: string) => {
         const p = self.world.player();
         if (self.world.phase !== "playing") {
           self.world.phase = "playing";
@@ -409,6 +410,60 @@ export class Game {
         }
         p.flinchT = FLINCH_DUR;
         if (p.body) p.body.lastHit = P.head;
+        if (dir === "right") {
+          const r = rightOf(p.yaw);
+          p.hitNx = r.x;
+          p.hitNz = r.z;
+        } else {
+          const f = facing(p.yaw);
+          p.hitNx = -f.x;
+          p.hitNz = -f.z;
+        }
+      },
+      forceStruggle: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        let best: typeof p | null = null;
+        let bd = 80;
+        for (const o of self.world.actors) {
+          if (o.id === p.id || !o.alive) continue;
+          if (o.kind !== "human") continue;
+          const d = Math.hypot(o.x - p.x, o.z - p.z);
+          if (d < bd) {
+            bd = d;
+            best = o;
+          }
+        }
+        if (!best) return false;
+        const f = facing(p.yaw);
+        best.x = p.x - f.x * 0.7;
+        best.z = p.z - f.z * 0.7;
+        best.y = p.y;
+        reposeActor(best);
+        reposeActor(p);
+        p.grabbedBy = best.id;
+        best.grabbedId = p.id;
+        const dx = p.x - best.x;
+        const dz = p.z - best.z;
+        const d = Math.hypot(dx, dz) || 1;
+        p.hitNx = dx / d;
+        p.hitNz = dz / d;
+        setGrab(best, p);
+        return true;
+      },
+      forceGrabbedPunch: () => {
+        const ok = window.__controlsTest?.forceStruggle?.();
+        if (ok === false) return false;
+        const p = self.world.player();
+        p.strikeT = strikeDuration(p);
+        p.strikeCd = p.strikeT;
+        p.strikeHit = 0;
+        p.stamina = Math.max(0.4, p.stamina);
+        return true;
       },
       getCombat: () => {
         const p = self.world.player();
@@ -420,26 +475,41 @@ export class Game {
         }
         const hand = p.body?.parts[6];
         const left = p.body?.parts[4];
+        const head = p.body?.parts[2];
+        const f = facing(p.yaw);
+        const r = rightOf(p.yaw);
+        const wpn = weaponEnds(p);
+        const fwd = (x: number, z: number) => (x - p.x) * f.x + (z - p.z) * f.z;
+        const side = (x: number, z: number) => (x - p.x) * r.x + (z - p.z) * r.z;
+        const hn = Math.hypot(p.hitNx, p.hitNz);
+        const peel =
+          hand && hn > 0.1 ? ((hand.x - p.x) * -p.hitNx + (hand.z - p.z) * -p.hitNz) / hn : 0;
+        const mesh = self.view.actorMap.get(p.id);
+        const wepMesh = mesh?.userData?.parts?.wep as { children?: unknown[]; userData?: { kind?: string } } | undefined;
         return {
           strikeT: p.strikeT,
           kickT: p.kickT,
           shoveT: p.shoveT,
           grabT: p.grabT,
           flinchT: p.flinchT,
+          grabbedBy: p.grabbedBy,
           grabbedId: p.grabbedId,
           weapon: p.weapon,
           twoHand: p.body?.grab?.myPart2 ?? -1,
-          handZ: hand ? hand.z - p.z : 0,
-          handFwd: hand
-            ? -(hand.x - p.x) * Math.sin(p.yaw) + -(hand.z - p.z) * Math.cos(p.yaw)
-            : 0,
+          handFwd: hand ? fwd(hand.x, hand.z) : 0,
           handY: hand ? hand.y - p.y : 0,
-          leftFwd: left
-            ? -(left.x - p.x) * Math.sin(p.yaw) + -(left.z - p.z) * Math.cos(p.yaw)
-            : 0,
+          leftFwd: left ? fwd(left.x, left.z) : 0,
+          headSide: head ? side(head.x, head.z) : 0,
+          headFwd: head ? fwd(head.x, head.z) : 0,
+          wepFwd: wpn ? fwd(wpn.bx, wpn.bz) : 0,
+          wepLen: wpn ? wpn.wepLen : 0,
+          wepKids: wepMesh?.children?.length ?? 0,
+          wepKind: wepMesh?.userData?.kind ?? p.weapon,
+          peel,
           nearest: best,
           support: p.body?.support ?? 0,
           loco: p.loco,
+          mode: p.body?.mode ?? "",
         };
       },
       setKeys: (codes: string[]) => {
@@ -480,7 +550,9 @@ declare global {
       forceStrike?: () => void;
       forceKick?: () => void;
       forceGrab?: () => void;
-      forceFlinch?: () => void;
+      forceFlinch?: (dir?: string) => void;
+      forceStruggle?: () => boolean;
+      forceGrabbedPunch?: () => boolean;
       setWeapon?: (kind: string) => void;
       getCombat?: () => unknown;
       setKeys?: (codes: string[]) => void;

@@ -1,9 +1,9 @@
 import * as THREE from "three";
-import type { Actor, Particle, Prop } from "./types";
+import type { Actor, Particle, Prop, WeaponKind } from "./types";
 import { FIRE_RES, HALF, WORLD } from "./types";
 import { World, facing, injurySum, lerpAng } from "./world";
 import type { Cam } from "./sim";
-import { P } from "./physique";
+import { P, weaponEnds } from "./physique";
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
@@ -53,7 +53,7 @@ function hash(x: number, y: number) {
 export class View {
   renderer: THREE.WebGLRenderer;
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(62, 1, 0.08, 220);
+  camera = new THREE.PerspectiveCamera(54, 1, 0.08, 220);
   sun = new THREE.DirectionalLight(0xf0d8a8, 2.1);
   hemi = new THREE.HemisphereLight(0xb8c4d0, 0x3a3024, 0.85);
   amb = new THREE.AmbientLight(0x2a241c, 0.42);
@@ -366,9 +366,8 @@ export class View {
       h.position.y = 0.35;
       head.add(h);
     }
-    const wep = new THREE.Mesh(GEO.box, mat(0x6a5a48));
+    const wep = new THREE.Group();
     wep.name = "weapon";
-    wep.castShadow = true;
     g.add(wep);
     g.userData.parts = {
       head,
@@ -393,7 +392,7 @@ export class View {
 
   private syncPhysique(a: Actor, g: THREE.Group, alpha: number) {
     const body = a.body!;
-    const parts = g.userData.parts as Record<string, THREE.Mesh | undefined>;
+    const parts = g.userData.parts as Record<string, THREE.Object3D | undefined>;
     if (!parts?.luarm || !parts.pelvis || body.parts.length < 11) {
       const x = a.px + (a.x - a.px) * alpha;
       const y = a.py + (a.y - a.py) * alpha;
@@ -424,17 +423,37 @@ export class View {
     placeSeg(parts.lshin!, A[P.thighL]!, A[P.shinL]!, 0.11);
     placeSeg(parts.rthigh!, A[P.pelvis]!, A[P.thighR]!, 0.13);
     placeSeg(parts.rshin!, A[P.thighR]!, A[P.shinR]!, 0.11);
-    const wep = parts.wep;
-    if (wep) {
-      const wepLen =
-        a.weapon === "spear" || a.weapon === "pitchfork" ? 1.6 : a.weapon === "club" || a.weapon === "board" ? 1.05 : 0.7;
-      const hand = A[P.larmR]!;
-      const el = A[P.uarmR]!;
-      wep.visible = a.weapon !== "fist";
-      placeSeg(wep, hand, { x: hand.x * 2 - el.x, y: hand.y * 2 - el.y, z: hand.z * 2 - el.z }, 0.05);
-      wep.scale.set(0.05, wepLen, 0.05);
+    let wep = parts.wep;
+    if (wep && !(wep as THREE.Group).isGroup) {
+      const g = new THREE.Group();
+      g.name = "weapon";
+      wep.parent?.add(g);
+      wep.parent?.remove(wep);
+      parts.wep = g;
+      wep = g;
     }
-    if (parts.head) parts.head.material = tintInjury(a.skin, injurySum(a.injuries.head));
+    if (wep) {
+      const hold = weaponEnds(a);
+      wep.visible = !!hold;
+      if (hold) {
+        if (wep.userData.kind !== a.weapon || wep.userData.lit !== a.torchLit) {
+          rebuildHeldWeapon(wep, a.weapon, a.torchLit, a.kind === "player");
+        }
+        placeHeldWeapon(wep, hold);
+        const flame = wep.getObjectByName("flame");
+        if (flame) {
+          const flick = 0.82 + Math.sin(performance.now() * 0.018 + a.id) * 0.2;
+          flame.scale.set(flick, flick * 1.15, flick);
+          flame.visible = a.torchLit;
+        }
+      }
+    }
+    if (parts.head) (parts.head as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.head));
+    if (parts.torso) (parts.torso as THREE.Mesh).material = tintInjury(a.cloth, injurySum(a.injuries.torso) * 0.6);
+    if (parts.llarm) (parts.llarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.larm));
+    if (parts.rlarm) (parts.rlarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.rarm));
+    if (parts.lshin) (parts.lshin as THREE.Mesh).material = tintInjury(a.accent, injurySum(a.injuries.lleg));
+    if (parts.rshin) (parts.rshin as THREE.Mesh).material = tintInjury(a.accent, injurySum(a.injuries.rleg));
   }
 
   private makeBeast(a: Actor) {
@@ -661,19 +680,24 @@ export class View {
     const y = p.py + (p.y - p.py) * alpha;
     const z = p.pz + (p.z - p.pz) * alpha;
     const f = facing(cam.yaw);
-    const dist = title ? 18 : 5.4;
-    const height = title ? 8 : 1.72;
-    const target = this.tmp.set(x, y + (title ? 1.2 : 1.35), z);
+    const dist = title ? 18 : 3.7;
+    const height = title ? 8 : 1.48;
+    const target = this.tmp.set(x, y + (title ? 1.2 : 1.18), z);
     if (title) {
       const t = w.time * 0.07;
       this.camPos.set(Math.sin(t) * 11 + 2, 5.2, Math.cos(t) * 11 + 1);
       this.look.set(0, 1.0, 0);
     } else {
       const desired = this.tmp2.set(x - f.x * dist, y + height, z - f.z * dist);
-      desired.y += Math.sin(cam.pitch) * 3.2;
-      const k = 1 - Math.exp(-10 * 0.016);
-      this.camPos.lerp(desired, k);
-      this.look.lerp(target, k);
+      desired.y += Math.sin(cam.pitch) * 2.4;
+      if (this.camPos.distanceTo(desired) > 7) {
+        this.camPos.copy(desired);
+        this.look.copy(target);
+      } else {
+        const k = 1 - Math.exp(-12 * 0.016);
+        this.camPos.lerp(desired, k);
+        this.look.lerp(target, k);
+      }
     }
     if (this.trauma > 0.01 && !this.reduced) {
       const s = this.trauma * this.trauma;
@@ -717,6 +741,76 @@ function placeSeg(
   _dir.set(dx / n, dy / n, dz / n);
   mesh.quaternion.setFromUnitVectors(_up, _dir);
   mesh.scale.set(thick, len, thick);
+}
+
+function placeHeldWeapon(
+  g: THREE.Object3D,
+  hold: { ax: number; ay: number; az: number; bx: number; by: number; bz: number },
+) {
+  const dx = hold.bx - hold.ax;
+  const dy = hold.by - hold.ay;
+  const dz = hold.bz - hold.az;
+  const n = Math.hypot(dx, dy, dz) || 1;
+  g.position.set(hold.ax, hold.ay, hold.az);
+  _dir.set(dx / n, dy / n, dz / n);
+  g.quaternion.setFromUnitVectors(_up, _dir);
+  g.scale.set(1, 1, 1);
+}
+
+function addWepMesh(g: THREE.Object3D, geo: THREE.BufferGeometry, material: THREE.Material, y: number, sx: number, sy: number, sz: number, name?: string) {
+  const m = new THREE.Mesh(geo, material);
+  m.position.y = y;
+  m.scale.set(sx, sy, sz);
+  m.castShadow = true;
+  if (name) m.name = name;
+  g.add(m);
+  return m;
+}
+
+function rebuildHeldWeapon(g: THREE.Object3D, kind: WeaponKind, lit: boolean, isPlayer: boolean) {
+  while (g.children.length) g.remove(g.children[0]!);
+  g.userData.kind = kind;
+  g.userData.lit = lit;
+  const wood = mat(0x6b4e32);
+  const dark = mat(0x3a2818);
+  const metal = mat(0x9aa0a6, { metalness: 0.72, roughness: 0.32 });
+  const wrap = mat(0x5a4030);
+  if (kind === "club") {
+    addWepMesh(g, GEO.cyl, wood, 0.36, 0.05, 0.72, 0.05);
+    addWepMesh(g, GEO.sphere, dark, 0.84, 0.16, 0.18, 0.16);
+  } else if (kind === "board") {
+    addWepMesh(g, GEO.box, wood, 0.46, 0.045, 0.92, 0.22);
+  } else if (kind === "spear") {
+    addWepMesh(g, GEO.cyl, wood, 0.62, 0.03, 1.24, 0.03);
+    addWepMesh(g, GEO.cone, metal, 1.36, 0.07, 0.24, 0.07);
+  } else if (kind === "pitchfork") {
+    addWepMesh(g, GEO.cyl, wood, 0.55, 0.032, 1.1, 0.032);
+    addWepMesh(g, GEO.box, metal, 1.18, 0.16, 0.03, 0.03);
+    addWepMesh(g, GEO.box, metal, 1.34, 0.025, 0.32, 0.025).position.x = -0.07;
+    addWepMesh(g, GEO.box, metal, 1.34, 0.025, 0.32, 0.025).position.x = 0.07;
+  } else if (kind === "knife") {
+    addWepMesh(g, GEO.box, wrap, 0.05, 0.03, 0.1, 0.03);
+    addWepMesh(g, GEO.box, metal, 0.2, 0.012, 0.22, 0.045);
+  } else if (kind === "torch") {
+    addWepMesh(g, GEO.cyl, wood, 0.24, 0.042, 0.48, 0.042);
+    addWepMesh(g, GEO.sphere, wrap, 0.5, 0.1, 0.1, 0.1);
+    const flame = addWepMesh(
+      g,
+      GEO.sphere,
+      new THREE.MeshBasicMaterial({ color: lit ? 0xffb060 : 0x4a3a28 }),
+      0.62,
+      0.11,
+      0.16,
+      0.11,
+      "flame",
+    );
+    flame.visible = lit;
+    if (lit && isPlayer) {
+      const light = new THREE.PointLight(0xffaa66, 1.15, 7, 2);
+      light.name = "torchLight";
+      flame.add(light);
+    }
+  }
 }
 
 const injuryMats = new Map<string, THREE.MeshStandardMaterial>();
