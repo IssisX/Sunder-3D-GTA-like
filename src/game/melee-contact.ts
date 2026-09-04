@@ -1,7 +1,8 @@
-import type { Actor, Prop, Region, WeaponKind } from "./types";
+import type { Actor, Prop, Region } from "./types";
 import { FIRE_CELL, WEAPON_STATS } from "./types";
 import type { World } from "./world";
 import { canSeeThrough, clamp } from "./world";
+import { impactDynamics } from "./impact-dynamics";
 
 const KICK_BLUNT = 1.15;
 const KICK_MASS = 3.2;
@@ -93,10 +94,32 @@ export function applyActorMeleeContact(
     (0.72 + mass * 0.22) *
     (0.8 + atk.strength * 0.4);
   const impulse = force * (2.0 + rel * 1.4);
+  const bodyDv = impulse * rel;
 
-  vic.vx += nx * impulse * rel;
-  vic.vz += nz * impulse * rel;
-  vic.vy += Math.max(0, ny) * impulse * rel * 0.55 + (kind === "kick" ? 0.18 : 0.05);
+  vic.vx += nx * bodyDv;
+  vic.vz += nz * bodyDv;
+  vic.vy += Math.max(0, ny) * bodyDv * 0.55 + (kind === "kick" ? 0.18 : 0.05);
+
+  // Visible contact is derived from the same impulse that drives gameplay.
+  // Local displacement, anatomical propagation and r x J torque all come
+  // from this one momentum-transfer quantity rather than a separate hit pose.
+  impactDynamics.contactRegion(
+    vic,
+    region,
+    nx * bodyDv,
+    ny * bodyDv * 0.82,
+    nz * bodyDv,
+    kind === "kick" ? 1.08 : 1,
+  );
+  const recoil = clamp((vic.mass / Math.max(1, atk.mass + vic.mass)) * 0.52, 0.16, 0.42);
+  impactDynamics.contactRegion(
+    atk,
+    kind === "kick" ? "rleg" : "torso",
+    -nx * bodyDv * recoil,
+    -ny * bodyDv * recoil * 0.55,
+    -nz * bodyDv * recoil,
+    0.72,
+  );
 
   const inj = vic.injuries[region];
   inj.bruise += blunt * 0.2 * force;
@@ -175,6 +198,17 @@ export function applyPropMeleeContact(
   p.hp -= dmg;
   p.vx += dirX * (1.4 + speed * 0.12);
   p.vz += dirZ * (1.4 + speed * 0.12);
+
+  const rigidity = clamp(p.mass / Math.max(1, p.mass + atk.mass), 0.08, 0.78);
+  const recoil = Math.min(3.2, (0.7 + speed * 0.18) * rigidity);
+  impactDynamics.contactRegion(
+    atk,
+    kind === "kick" ? "rleg" : "torso",
+    -dirX * recoil,
+    kind === "kick" ? 0.22 * recoil : 0.08 * recoil,
+    -dirZ * recoil,
+    0.9,
+  );
 
   if (p.kind === "lamp" && dmg > 6 && p.oil) {
     for (let dx = -1; dx <= 1; dx++) {
