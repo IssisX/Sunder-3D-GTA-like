@@ -317,6 +317,21 @@ export interface Prop {
   anchored: boolean;
   weapon: WeaponKind | null;
   color: number;
+  /**
+   * Slot in World.bodies holding this prop's rigid frame, or -1 when it has
+   * none. Static scenery does not need four nodes each to stand still; a prop
+   * gets a frame when it starts to move, and gives it back when it is done.
+   */
+  frame: number;
+  /**
+   * Orientation as a quaternion. A prop that has tumbled is no longer upright
+   * about an axis, so a single yaw cannot describe it; this is what the
+   * renderer draws, and it outlives the frame that produced it.
+   */
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
 }
 
 export interface Building {
@@ -332,6 +347,12 @@ export interface Building {
   minZ: number;
   maxZ: number;
   indoor: boolean;
+  /**
+   * Set once the supports have been rated against the load they carry. A
+   * standing building is by definition within capacity, so the rating is
+   * derived from its own design load rather than guessed per prop.
+   */
+  rated?: boolean;
 }
 
 export interface Collider {

@@ -329,6 +329,11 @@ export class World {
       anchored: true,
       weapon: null,
       color: 0x5a4634,
+      frame: -1,
+      qx: 0,
+      qy: 0,
+      qz: 0,
+      qw: 1,
       ...partial,
     };
     p.px = p.x;

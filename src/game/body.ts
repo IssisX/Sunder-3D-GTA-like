@@ -29,7 +29,17 @@ import {
 
 /** Largest node count over all body plans; sizes the flat node arrays. */
 export const MAX_NODES = 11;
-const MAX_BONES = 10;
+/**
+ * Slots reserved for prop frames (see frames.ts).
+ *
+ * Props share the actors' node store rather than getting one of their own,
+ * which is what makes a falling beam collide with a shoulder through the same
+ * `solvePair` that makes two bodies stack -- and injure it through the same
+ * damage law. A separate store would have meant a second contact path and two
+ * sets of physics to keep honest.
+ */
+export const MAX_FRAMES = 128;
+const MAX_BONES = 32;
 const MAX_LIMITS = 8;
 /** Colliders cached per body between broadphase gathers. */
 const MAX_NEAR = 32;
@@ -68,6 +78,8 @@ export const EDGES = {
   grabLoad: true,
   /** solved body state -> what agents perceive and decide (see tactics.ts) */
   bodyTactics: true,
+  /** structural load share -> support failure -> further load (see stepStructures) */
+  loadCascade: true,
 };
 
 /* ------------------------------------------------------------------ *
@@ -303,15 +315,31 @@ export interface ContactHit {
  * allocation: every buffer below is allocated once at construction.
  */
 export class Bodies {
-  readonly cap = MAX_ACTORS;
-  private readonly nCap = MAX_ACTORS * MAX_NODES;
+  /** Slots [0, actorCap) belong to actors; [actorCap, cap) to prop frames. */
+  readonly actorCap = MAX_ACTORS;
+  readonly cap = MAX_ACTORS + MAX_FRAMES;
+  private readonly nCap = (MAX_ACTORS + MAX_FRAMES) * MAX_NODES;
 
   /** Number of live nodes per slot; 0 means the slot is unused. */
   count = new Uint8Array(this.cap);
   planOf: PlanId[] = new Array(this.cap).fill("humanoid");
-  /** Actor id owning each slot, 0 when free. */
+  /** Actor id, or prop id for frame slots; 0 when free. */
   owner = new Int32Array(this.cap);
+  /** Free prop-frame slots, as a stack. */
+  private freeFrames: number[] = [];
+  private frameTop = MAX_ACTORS;
   scale = new Float32Array(this.cap);
+  /** Total mass of the slot, kg. */
+  bodyMass = new Float32Array(this.cap);
+  /**
+   * Fraction of `bodyMass` that stands behind any one node in a contact, [0,1].
+   *
+   * A body with both feet planted cannot get out of the way: a blow to the
+   * shoulder is met by the whole body and, through it, the earth. A body in
+   * the air meets the same blow with the limb alone. The controller writes this
+   * from the support count each tick.
+   */
+  backing = new Float32Array(this.cap);
   private used = 0;
 
   // Node state
@@ -362,6 +390,39 @@ export class Bodies {
   vmax = new Float32Array(this.nCap);
   /** Peak tangential sliding speed at this node over the tick, m/s. */
   vtan = new Float32Array(this.nCap);
+  /**
+   * Effective mass behind the contact that set `vmax`, kg.
+   *
+   * Damage is an energy question, and the energy arriving depends on what is
+   * behind the impact as much as on how fast it closes. A hand slapping a
+   * shoulder and a 90 kg beam landing on it can share a closing speed and mean
+   * completely different things. Zero means "nothing recorded": read `mass`.
+   */
+  vmass = new Float32Array(this.nCap);
+  /**
+   * Mass this node presents to a contact from another body, kg.
+   *
+   * A limb on its own is light, but a limb is not on its own -- it is joined to
+   * a body, which may be braced against the ground. `backing` per slot says how
+   * much of that is behind a node; a rigid prop frame sets this per node
+   * directly, from its own geometry. Zero means "no override": read `mass`.
+   */
+  cmass = new Float32Array(this.nCap);
+  /**
+   * Node velocity at the start of the substep, after gravity and before any
+   * constraint, m/s.
+   *
+   * Node-vs-node contact must read the speed the two nodes were TRAVELLING at
+   * when they met. Reading (p - o)/h instead bills the same substep's pose,
+   * bone and world projection as impact speed, and two men standing still can
+   * then register a 38 m/s collision because the solver moved a shoulder
+   * 15 cm to fix a joint. Verlet already carries the previous substep's
+   * constraint work into this velocity, so real swung momentum is not lost --
+   * only the circular part is.
+   */
+  vnx = new Float32Array(this.nCap);
+  vny = new Float32Array(this.nCap);
+  vnz = new Float32Array(this.nCap);
   /** Submerged fraction of the node this tick, dimensionless [0,1]. */
   wet = new Float32Array(this.nCap);
 
@@ -477,9 +538,16 @@ export class Bodies {
       this.jtan[k] = 0;
       this.vmax[k] = 0;
       this.vtan[k] = 0;
+      this.vmass[k] = 0;
+      this.cmass[k] = 0;
+      this.vnx[k] = 0;
+      this.vny[k] = 0;
+      this.vnz[k] = 0;
       this.jhard[k] = 0;
       this.wet[k] = 0;
     }
+    this.bodyMass[slot] = mass;
+    this.backing[slot] = 0;
     this.groundHard[slot] = 0.5;
     this.groundMu[slot] = 0.7;
 
@@ -500,6 +568,24 @@ export class Bodies {
     return PLANS[this.planOf[slot]!];
   }
 
+  /** Claims a prop-frame slot, or -1 when none are free. */
+  takeFrame(propId: number) {
+    const slot = this.freeFrames.length ? this.freeFrames.pop()! : this.frameTop < this.cap ? this.frameTop++ : -1;
+    if (slot < 0) return -1;
+    this.owner[slot] = propId;
+    this.count[slot] = 0;
+    this.nearAge[slot] = 0xffff;
+    return slot;
+  }
+
+  /** Returns a prop-frame slot to the pool. */
+  giveBackFrame(slot: number) {
+    if (slot < this.actorCap || slot >= this.cap) return;
+    this.owner[slot] = 0;
+    this.count[slot] = 0;
+    this.freeFrames.push(slot);
+  }
+
   /** Snapshots node positions for render interpolation. Call once per tick, before solving. */
   snapshot(slot: number) {
     const b = this.base(slot);
@@ -514,8 +600,14 @@ export class Bodies {
       this.jtan[k] = 0;
       this.vmax[k] = 0;
       this.vtan[k] = 0;
+      this.vmass[k] = 0;
       this.jhard[k] = 0;
       this.wet[k] = 0;
+      // A slot that is not integrated this tick -- a sleeping frame, a pinned
+      // body -- must present no arrival velocity, not the one it settled with.
+      this.vnx[k] = 0;
+      this.vny[k] = 0;
+      this.vnz[k] = 0;
     }
     this.hitNode[slot] = -1;
     this.hitImp[slot] = 0;
@@ -678,6 +770,44 @@ export class Bodies {
       this.ox[k] = this.ox[k]! - vx * h;
       this.oy[k] = this.oy[k]! - vy * h;
       this.oz[k] = this.oz[k]! - vz * h;
+    }
+  }
+
+  /**
+   * Adds a rigid angular velocity [rad/s] about the slot's centre of mass.
+   *
+   * Kicking one node to make a prop tumble asks the distance constraints to
+   * redistribute the whole impulse in a single substep, and they answer with a
+   * transient the speed clamp then has to catch. A rigid rotation violates no
+   * constraint at all, which is why the tumble it produces is the one intended.
+   */
+  addSpin(slot: number, wx: number, wy: number, wz: number, h: number) {
+    const b = this.base(slot);
+    const n = this.count[slot]!;
+    let mx = 0;
+    let my = 0;
+    let mz = 0;
+    let mt = 0;
+    for (let i = 0; i < n; i++) {
+      const k = b + i;
+      const m = this.mass[k]!;
+      mx += this.px[k]! * m;
+      my += this.py[k]! * m;
+      mz += this.pz[k]! * m;
+      mt += m;
+    }
+    if (mt <= 0) return;
+    mx /= mt;
+    my /= mt;
+    mz /= mt;
+    for (let i = 0; i < n; i++) {
+      const k = b + i;
+      const rx = this.px[k]! - mx;
+      const ry = this.py[k]! - my;
+      const rz = this.pz[k]! - mz;
+      this.ox[k] = this.ox[k]! - (wy * rz - wz * ry) * h;
+      this.oy[k] = this.oy[k]! - (wz * rx - wx * rz) * h;
+      this.oz[k] = this.oz[k]! - (wx * ry - wy * rx) * h;
     }
   }
 
@@ -1097,6 +1227,9 @@ export function predict(B: Bodies, slot: number, h: number, gravity: number) {
     B.px[k] = B.px[k]! + vx * h;
     B.py[k] = B.py[k]! + vy * h;
     B.pz[k] = B.pz[k]! + vz * h;
+    B.vnx[k] = vx;
+    B.vny[k] = vy;
+    B.vnz[k] = vz;
   }
 }
 
@@ -1507,6 +1640,16 @@ export function poseError(B: Bodies, slot: number) {
  * Records the normal and tangential impulses, which are what damage is made of.
  */
 const SUPPORT_EPS = 0.02;
+/**
+ * Rate at which an embedded overlap is allowed to unwind, m/s.
+ *
+ * Resolving a 30 cm overlap in one substep is not a push-out, it is an
+ * explosion: on a rigid frame the distance constraints immediately yank the
+ * displaced node back, and that yank IS velocity. Spread over a quarter of a
+ * second the same body squeezes out of the chest that appeared around it.
+ */
+const MAX_DEPEN = 1.2;
+
 
 function contact(
   B: Bodies,
@@ -1543,13 +1686,17 @@ function contact(
     B.oy[k] = B.oy[k]! + ny * on;
     B.oz[k] = B.oz[k]! + nz * on;
   }
-  // depenetrate p and o together so no velocity is created by the correction
-  B.px[k] = B.px[k]! + nx * pen;
-  B.ox[k] = B.ox[k]! + nx * pen;
-  B.py[k] = B.py[k]! + ny * pen;
-  B.oy[k] = B.oy[k]! + ny * pen;
-  B.pz[k] = B.pz[k]! + nz * pen;
-  B.oz[k] = B.oz[k]! + nz * pen;
+  // depenetrate p and o together so no velocity is created by the correction,
+  // and unwind an embedded overlap at a bounded rate for the same reason a
+  // pair does: a rigid frame answers a big one-substep correction with a big
+  // constraint force.
+  const out = artefact ? Math.min(pen, MAX_DEPEN * h) : pen;
+  B.px[k] = B.px[k]! + nx * out;
+  B.ox[k] = B.ox[k]! + nx * out;
+  B.py[k] = B.py[k]! + ny * out;
+  B.oy[k] = B.oy[k]! + ny * out;
+  B.pz[k] = B.pz[k]! + nz * out;
+  B.oz[k] = B.oz[k]! + nz * out;
   B.touched[k] = 1;
 
   // Coulomb friction, position form: remove tangential motion up to mu * pen
@@ -1580,7 +1727,27 @@ function contact(
  * Returns the mass of B transferred onto A through downward contacts, kg,
  * which is the load that shows up in A's balance.
  */
-export function solvePair(B: Bodies, sa: number, sb: number, h: number) {
+/**
+ * Mass a node presents to a contact from another body, kg.
+ *
+ * Three cases, one expression. A prop frame sets `cmass` per node from its own
+ * geometry, because a rigid beam struck near its middle has nearly all of its
+ * mass behind the blow and struck at the tip has a quarter of it. A body with
+ * its feet planted has `backing` near 1, and meets a blow with itself rather
+ * than with the limb; that is why a beam dropped on a standing man breaks
+ * something and the same beam nudging a man in mid-air just spins him. A body
+ * in the air has `backing` 0 and falls back to the node's own mass.
+ */
+function contactMass(B: Bodies, slot: number, k: number) {
+  const c = B.cmass[k]!;
+  if (c > 0) return c;
+  const m = B.mass[k]!;
+  const back = B.backing[slot]!;
+  if (back <= 0) return m;
+  return m + back * (B.bodyMass[slot]! - m);
+}
+
+export function solvePair(B: Bodies, sa: number, sb: number, h: number, hardness = hardnessOf("flesh")) {
   const ba = B.base(sa);
   const bb = B.base(sb);
   const na = B.count[sa]!;
@@ -1607,37 +1774,65 @@ export function solvePair(B: Bodies, sa: number, sb: number, h: number) {
       const wSum = wa + wb;
       if (wSum <= 0) continue;
 
-      // closing speed along the normal, for the impulse readout
-      const van =
-        ((B.px[ka]! - B.ox[ka]!) * nx +
-          (B.py[ka]! - B.oy[ka]!) * ny +
-          (B.pz[ka]! - B.oz[ka]!) * nz) /
-        h;
-      const vbn =
-        ((B.px[kb]! - B.ox[kb]!) * nx +
-          (B.py[kb]! - B.oy[kb]!) * ny +
-          (B.pz[kb]! - B.oz[kb]!) * nz) /
-        h;
+      // Closing speed along the normal, for the impulse readout. Read from the
+      // velocity the nodes arrived with, never from (p - o) this substep: see
+      // `vnx`. An immovable node (a sleeping frame, a pinned body) has no
+      // predicted velocity and correctly contributes none.
+      const van = B.vnx[ka]! * nx + B.vny[ka]! * ny + B.vnz[ka]! * nz;
+      const vbn = B.vnx[kb]! * nx + B.vny[kb]! * ny + B.vnz[kb]! * nz;
+      // An overlap deeper than a node is not a collision, it is geometry that
+      // appeared around a body -- a chest given a frame while someone stands on
+      // it, collapse debris spawning around a corpse. Billing it as an impact
+      // maims whoever was standing there; resolving p alone turns the
+      // correction into velocity and fires them across the market at solver
+      // speed. Push both p and o, and charge nothing.
+      const artefact = pen > Math.min(ra, B.rad[kb]!);
       const closing = vbn - van;
-      if (closing > 0) {
-        const mEff = 1 / wSum; // reduced mass, kg
-        const j = mEff * closing; // N*s
+      if (closing > 0 && !artefact) {
+        // The reduced mass of the two NODES is what the projection moves, but
+        // it is not what the collision means. A node is joined to a body, and
+        // that body may be braced against the ground; a rigid frame has its
+        // whole length behind every node. `contactMass` is that, and the energy
+        // it carries is what the tissue has to absorb.
+        const ma = contactMass(B, sa, ka);
+        const mb = contactMass(B, sb, kb);
+        const mEff = (ma * mb) / (ma + mb); // reduced mass, kg
+        const j = (1 / wSum) * closing; // N*s, what the projection actually moves
         B.jimp[ka] = B.jimp[ka]! + j;
         B.jimp[kb] = B.jimp[kb]! + j;
-        if (closing > B.vmax[ka]!) B.vmax[ka] = closing;
-        if (closing > B.vmax[kb]!) B.vmax[kb] = closing;
-        const fh = hardnessOf("flesh");
-        if (fh > B.jhard[ka]!) B.jhard[ka] = fh;
-        if (fh > B.jhard[kb]!) B.jhard[kb] = fh;
+        if (closing > B.vmax[ka]!) {
+          B.vmax[ka] = closing;
+          B.vmass[ka] = mEff;
+        }
+        if (closing > B.vmax[kb]!) {
+          B.vmax[kb] = closing;
+          B.vmass[kb] = mEff;
+        }
+        if (hardness > B.jhard[ka]!) B.jhard[ka] = hardness;
+        if (hardness > B.jhard[kb]!) B.jhard[kb] = hardness;
       }
 
-      const s = pen / wSum;
-      B.px[ka] = B.px[ka]! + nx * s * wa;
-      B.py[ka] = B.py[ka]! + ny * s * wa;
-      B.pz[ka] = B.pz[ka]! + nz * s * wa;
-      B.px[kb] = B.px[kb]! - nx * s * wb;
-      B.py[kb] = B.py[kb]! - ny * s * wb;
-      B.pz[kb] = B.pz[kb]! - nz * s * wb;
+      const s = (artefact ? Math.min(pen, MAX_DEPEN * h) : pen) / wSum;
+      const ax = nx * s * wa;
+      const ay = ny * s * wa;
+      const az = nz * s * wa;
+      const bx = nx * s * wb;
+      const by = ny * s * wb;
+      const bz = nz * s * wb;
+      B.px[ka] = B.px[ka]! + ax;
+      B.py[ka] = B.py[ka]! + ay;
+      B.pz[ka] = B.pz[ka]! + az;
+      B.px[kb] = B.px[kb]! - bx;
+      B.py[kb] = B.py[kb]! - by;
+      B.pz[kb] = B.pz[kb]! - bz;
+      if (artefact) {
+        B.ox[ka] = B.ox[ka]! + ax;
+        B.oy[ka] = B.oy[ka]! + ay;
+        B.oz[ka] = B.oz[ka]! + az;
+        B.ox[kb] = B.ox[kb]! - bx;
+        B.oy[kb] = B.oy[kb]! - by;
+        B.oz[kb] = B.oz[kb]! - bz;
+      }
       B.touched[ka] = 1;
       B.touched[kb] = 1;
       // B's node sits above A's: its weight is bearing down on A

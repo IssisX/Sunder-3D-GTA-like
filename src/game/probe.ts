@@ -19,6 +19,7 @@
 
 import type { Actions } from "./input";
 import { EDGES, SUBSTEPS } from "./body";
+import { makeFrame } from "./frames";
 import { buildLevel } from "./level";
 import { stepWorld, type Cam } from "./sim";
 import { REGIONS, STEP, injurySum, type Actor } from "./types";
@@ -153,9 +154,56 @@ function place(w: World, a: Actor, x: number, z: number) {
 }
 
 /** Lifts one actor to `height` and drops it, limp or braced. */
+/**
+ * Stops every other actor thinking, so a scenario measures the one thing it
+ * names. A body dropped into the middle of the market is otherwise measured
+ * partly on the brawl that starts when the neighbours notice it.
+ */
+function quiet(w: World) {
+  let n = 0;
+  for (const o of w.actors) {
+    if (o.kind === "player") continue;
+    // Idling them is not enough: perception puts them straight back into combat
+    // the moment they notice the player, and then the fall is being measured
+    // partly on a brawl. Move them off the field instead.
+    place(w, o, 260 + (n % 20) * 3, 260 + Math.floor(n / 20) * 3);
+    o.alert = 0;
+    o.known.length = 0;
+    n++;
+  }
+  w.wanted = 0;
+}
+
+/**
+ * Nearest point to (x, z) on the same ground with no prop within `clear`
+ * metres. A body dropped onto a chest is measuring the chest.
+ */
+function clearSpot(w: World, x: number, z: number, clear: number) {
+  for (let ring = 0; ring < 12; ring++) {
+    for (let step = 0; step < (ring === 0 ? 1 : ring * 8); step++) {
+      const ang = (step / (ring * 8 || 1)) * Math.PI * 2;
+      const px = x + Math.cos(ang) * ring * 0.8;
+      const pz = z + Math.sin(ang) * ring * 0.8;
+      let ok = true;
+      for (const p of w.props) {
+        if (Math.hypot(p.x - px, p.z - pz) < clear + Math.max(p.sx, p.sz) * 0.5) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return { x: px, z: pz };
+    }
+  }
+  return { x, z };
+}
+
 function dropScenario(seed: number, height: number, limp: boolean, ticks = 90) {
   const w = freshWorld(seed);
-  const a = stage(w, 0, 0); // market cobble: the hardest surface in the level
+  quiet(w);
+  // Market cobble: the hardest surface in the level, but clear of the stalls
+  // and chests, so what is measured is the ground and the body.
+  const spot = clearSpot(w, 0, 0, 2.2);
+  const a = stage(w, spot.x, spot.z);
   a.y = height;
   a.vx = a.vy = a.vz = 0;
   if (limp) {
@@ -164,7 +212,7 @@ function dropScenario(seed: number, height: number, limp: boolean, ticks = 90) {
     a.loco = "ragdoll";
     a.locoT = 999;
   }
-  if (a.body >= 0) w.bodies.moveTo(a.body, 0, height, 0);
+  if (a.body >= 0) w.bodies.moveTo(a.body, spot.x, height, spot.z);
   run(w, ticks);
   return { w, a };
 }
@@ -795,6 +843,84 @@ function measurePressingTheInjury() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Props as physical objects
+ * ------------------------------------------------------------------ */
+
+/**
+ * Drops a beam onto a standing actor and reports which region took the damage,
+ * plus how much. A prop with a frame lands through the same node contact and
+ * the same damage law as everything else, so the shoulder it lands on is the
+ * shoulder that breaks.
+ */
+function measureFallingTimber() {
+  const w = freshWorld(7711);
+  const a = stage(w, -32, 6);
+  run(w, 30);
+  const beam = w.addProp({
+    kind: "beam",
+    material: "wood",
+    x: a.x,
+    y: 3.4,
+    z: a.z,
+    sx: 0.3,
+    sy: 0.3,
+    sz: 2.6,
+    mass: 90,
+    hp: 60,
+  });
+  const slot = makeFrame(w.bodies, beam);
+  if (slot < 0) return -1;
+  const before = REGIONS.map((r) => injurySum(a.injuries[r]));
+  for (let i = 0; i < 200; i++) {
+    a.consciousness = Math.max(a.consciousness, 0.4);
+    run(w, 1);
+  }
+  const after = REGIONS.map((r) => injurySum(a.injuries[r]));
+  let worst = 0;
+  for (let i = 0; i < REGIONS.length; i++) worst = Math.max(worst, after[i]! - before[i]!);
+  return worst;
+}
+
+/**
+ * Cuts supports out from under a building one at a time.
+ *
+ * With load sharing live, losing one of four posts is survivable and losing two
+ * puts more on the rest than they can hold, so the remainder groan and go in
+ * turn. With the edge severed a building stands until every post is destroyed
+ * individually, because nothing carries what the missing ones were carrying.
+ *
+ * Returns the number of supports that had to be cut by hand before it fell.
+ */
+function measureCollapseCascade() {
+  const w = freshWorld(8811);
+  stage(w, 30, 30);
+  const b = w.buildings.find((x) => x.supports.length >= 4 && !x.collapsed)!;
+  const sup = b.supports.map((id) => w.prop(id)).filter((p): p is NonNullable<typeof p> => !!p);
+  run(w, 30);
+  for (let cut = 1; cut <= sup.length; cut++) {
+    sup[cut - 1]!.hp = 0;
+    for (let i = 0; i < 600 && !b.collapsed; i++) run(w, 1);
+    if (b.collapsed) return cut;
+  }
+  return sup.length + 1;
+}
+
+/**
+ * A beam dropped on someone has to hurt, and hurt one place.
+ */
+function checkFallingTimber(): CheckResult {
+  const worst = measureFallingTimber();
+  return {
+    name: "falling-timber",
+    pass: worst > 0.15,
+    detail:
+      worst < 0
+        ? "no frame slot available"
+        : `a 90 kg beam dropped from 3.4 m did ${worst.toFixed(3)} to the worst-hit region, through the same node contact and damage law as a fall or a club; need > 0.15`,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Suite
  * ------------------------------------------------------------------ */
 
@@ -815,6 +941,8 @@ export function runFalsifiers(): CheckResult[] {
     severance("bodyTactics", "bodies->routing", measureGuardDetour, 0.15),
     severance("bodyTactics", "downed target->secured and dragged", measureSecure, 0.5),
     severance("bodyTactics", "damaged limb->aim low", measurePressingTheInjury, 0.2),
+    severance("loadCascade", "lost support->load on the rest", measureCollapseCascade, 0.5),
+    checkFallingTimber(),
     checkAblation(),
     checkCoactivity(),
   ];

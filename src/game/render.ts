@@ -124,6 +124,7 @@ export class View {
   tmp = new THREE.Vector3();
   tmp2 = new THREE.Vector3();
   private dir = new THREE.Vector3();
+  private tmpQuat = new THREE.Quaternion();
   camPos = new THREE.Vector3();
   look = new THREE.Vector3();
   trauma = 0;
@@ -568,8 +569,19 @@ export class View {
       const y = p.py + (p.y - p.py) * alpha;
       const z = p.pz + (p.z - p.pz) * alpha;
       m.position.set(x, y, z);
-      m.rotation.y = p.yaw;
-      m.rotation.z = p.collapsed ? 0.8 : 0;
+      // A prop that has been through the solver carries a full orientation; one
+      // that has never moved is still upright about its yaw. There is no
+      // hardcoded lean for "collapsed" any more -- a fallen beam lies the way it
+      // actually landed.
+      if (p.frame >= 0 || p.qw !== 1) {
+        this.tmpQuat.set(p.qx, p.qy, p.qz, p.qw);
+        // Slerp rather than snap: the solver runs at a fixed 60 Hz and the
+        // display may not, and a tumbling beam should not step between frames.
+        m.quaternion.slerp(this.tmpQuat, 1 - Math.exp(-25 * dt));
+      } else {
+        m.quaternion.identity();
+        m.rotation.y = p.yaw;
+      }
       m.visible = !p.heldBy;
       if (p.kind === "lamp") {
         const fl = m.getObjectByName("flame");

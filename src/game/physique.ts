@@ -20,6 +20,7 @@ import {
   type BodyPlan,
   Bodies,
   EDGES,
+  MAX_FRAMES,
   MAX_NODES,
   boneTolOf,
   concussion,
@@ -51,6 +52,19 @@ import {
   injurySum,
 } from "./types";
 import { World, clamp, facing } from "./world";
+import {
+  beginFrames,
+  endFrames,
+  finishFrames,
+  framePropId,
+  predictFrames,
+  solveFrames,
+  wakeFrame,
+} from "./frames";
+
+/** Live prop-frame slots this tick. Sized by the frame pool, never grown. */
+const liveFrames = new Int32Array(MAX_FRAMES);
+let liveFrameCount = 0;
 
 /** Pose stiffness of a fully authoritative limb, s^-1. */
 const POSE_RATE = 62;
@@ -71,6 +85,18 @@ const POSE_LOST = 0.34;
 const KNOCK_V = 3.4;
 /** Landing speed a fully able pair of legs can absorb without going down, m/s. */
 const LAND_LIMIT = 9.5;
+/**
+ * Fraction of arriving energy that fully-braced muscle takes, dimensionless.
+ * Calibrated against the falls the budget falsifier fixes: a braced 1.5 m drop
+ * has to be nearly free and a 6 m one has to be grave.
+ */
+const ABSORB_MAX = 0.856;
+/**
+ * Ceiling on the mass ratio in `heft`, dimensionless. Past roughly three times
+ * the equivalent impact speed the tissue is destroyed and a larger number is
+ * not saying anything the injury model can express.
+ */
+const HEFT_MAX = 9;
 /** Hard ceiling on node speed, m/s. Only ever engages after a solver blow-up. */
 const MAX_NODE_SPEED = 34;
 /** Node contact pairs considered per tick. */
@@ -655,17 +681,25 @@ export function stepBodies(w: World, dt: number) {
     B.groundHard[a.body] = hardnessOf(mat);
     B.groundMu[a.body] = frictionOf(mat);
     B.refreshNear(a.body, w.colliders, a.x, a.z, bodyReach(a));
+    // How much of the body stands behind any one node in a contact with
+    // another body. Feet planted: the blow is met by the whole man and, past
+    // him, the ground. Airborne: it is met by the limb alone.
+    B.backing[a.body] = Math.min(1, B.supportCount[a.body]! * 0.5);
     a.dragLoad = 0;
     writePose(w, a, dt);
   }
   gatherPairs(w);
   gatherAttachments(w);
+  // Props are solved in the same loop as bodies, not after it: they are the
+  // same substrate, and a contact between them has to land before `consume`.
+  liveFrameCount = beginFrames(B, w.props, w.colliders, liveFrames);
 
   for (let step = 0; step < SUBSTEPS; step++) {
     for (const a of w.actors) {
       if (a.body < 0) continue;
       predict(B, a.body, h, GRAVITY);
     }
+    predictFrames(B, h);
     for (const a of w.actors) {
       if (a.body < 0) continue;
       for (let r = 0; r < 6; r++) B.gain[r] = poseGain(a.motor[REGIONS[r]!]!, h, POSE_RATE);
@@ -680,16 +714,20 @@ export function stepBodies(w: World, dt: number) {
       if (a.body < 0) continue;
       solveWorld(B, a.body, w.colliders, h, 0);
     }
+    solveFrames(B, liveFrames, liveFrameCount, w.colliders, h);
     for (let i = 0; i < pairCount; i++) {
       const load = solvePair(B, pairA[i]!, pairB[i]!, h);
       B.pileLoad[pairA[i]!] = B.pileLoad[pairA[i]!]! + load;
     }
+    solveActorFrames(w, h);
     for (const a of w.actors) {
       if (a.body < 0) continue;
       finish(B, a.body, h, MAX_NODE_SPEED);
     }
+    finishFrames(B, h);
   }
 
+  endFrames(B, w.props, dt, SUBSTEPS);
   for (const a of w.actors) {
     if (a.body < 0) continue;
     B.updateCom(a.body, h);
@@ -755,11 +793,31 @@ function consume(w: World, a: Actor, dt: number) {
     // a controlled fall from a roof is not.
     const m = a.motor[REGIONS[B.region[k]!]!]!;
     const raw = B.vmax[k]!;
-    const capacity = raw > LAND_LIMIT ? LAND_LIMIT / raw : 1;
-    const absorb = 1 - 0.62 * m * capacity;
-    const v = B.vmax[k]! * absorb;
+    const mLimb = B.mass[k]!;
+    // Everything below is an energy ratio under a square root, because that is
+    // what the damage law is: it is calibrated on a limb meeting the ground
+    // with its own mass behind it, and 2*E = m*v^2.
+    const mEff = B.vmass[k]! > 0 ? B.vmass[k]! : mLimb;
+    // What muscle can absorb is an energy budget, not a speed one: a limb can
+    // arrest about its own mass at LAND_LIMIT. For a fall the arriving energy
+    // uses that same mass and this reduces to (LAND_LIMIT/v)^2 -- which is why
+    // bracing a hop is free and bracing a roof is not. Against 90 kg of beam
+    // the budget is spent in the first millisecond and bracing barely helps.
+    const eHit = mEff * raw * raw;
+    const eCap = mLimb * LAND_LIMIT * LAND_LIMIT;
+    const capacity = eHit > eCap ? eCap / eHit : 1;
+    const absorbed = ABSORB_MAX * m * capacity;
+    // Heft: how much more energy this blow carries than the same speed would
+    // carry in a fall. It enters as the square root of the mass ratio, exactly
+    // as contact concentration does, and is 1 for every contact with the world
+    // -- which is why falls are untouched by it. Without it a dropped beam and
+    // a slap were the same event to the tissue, and the substrate could injure
+    // you with your own weight but never with anything else's.
+    const heft = Math.min(HEFT_MAX, mEff / mLimb);
+    const scale = Math.sqrt(heft * (1 - absorbed));
+    const v = raw * scale;
     if (v > regionV[ri]!) regionV[ri] = v;
-    const vt = B.vtan[k]! * absorb;
+    const vt = B.vtan[k]! * scale;
     if (vt > regionVt[ri]!) regionVt[ri] = vt;
     if (B.jhard[k]! > regionHard[ri]!) regionHard[ri] = B.jhard[k]!;
     if (i === plan.head) headDv = Math.max(headDv, jn / B.mass[k]!);
@@ -1014,6 +1072,49 @@ export function activeNodes(w: World) {
 /** Number of body-body node contact pairs solved this tick. */
 export function lastPairCount() {
   return pairCount;
+}
+
+/**
+ * Contact between actor bodies and prop frames.
+ *
+ * This is the edge that makes a falling beam a physical event rather than a
+ * scripted one: it goes through the same node-vs-node solver as body-against-
+ * body, so the beam lands on whichever limb was under it and that limb takes
+ * the damage, with the prop's own material deciding how hard the blow is.
+ */
+/**
+ * Actor against prop frame, for one substep.
+ *
+ * This runs inside the substep loop, not after it. A beam falling at 8 m/s
+ * covers 13 cm in a tick and only 3 cm in a substep, so resolving it once per
+ * tick both tunnels and, worse, lands the impulse after `consume` has already
+ * turned the tick's contacts into injury -- the next tick's `snapshot` then
+ * wipes it. Interleaved, a dropped beam breaks a shoulder through exactly the
+ * same node contact and damage law as a fall or a club.
+ */
+function solveActorFrames(w: World, h: number) {
+  const B = w.bodies;
+  for (let i = 0; i < liveFrameCount; i++) {
+    const slot = liveFrames[i]!;
+    const prop = w.prop(framePropId(B, slot));
+    const hard = prop ? hardnessOf(prop.material) : 0.7;
+    const b = B.base(slot);
+    const fx = B.px[b]!;
+    const fz = B.pz[b]!;
+    for (const a of w.actors) {
+      if (a.body < 0) continue;
+      // Held props ride with the holder; contact with them would fight the grab.
+      if (prop && prop.heldBy === a.id) continue;
+      const dx = a.x - fx;
+      const dz = a.z - fz;
+      if (dx * dx + dz * dz > 16) continue;
+      const load = solvePair(B, a.body, slot, h, hard);
+      if (load > 0) {
+        B.pileLoad[a.body] = B.pileLoad[a.body]! + load;
+        wakeFrame(B, slot);
+      }
+    }
+  }
 }
 
 export { Bodies };

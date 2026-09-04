@@ -2,6 +2,7 @@ import type { Actions } from "./input";
 import {
   type Actor,
   type Collider,
+  type Building,
   type Prop,
   type Region,
   type WeaponKind,
@@ -24,7 +25,15 @@ import {
   locoSpeed,
   rightOf,
 } from "./world";
-import { boneTolOf, concussion, contactFocus, hardnessOf, impulseDamage } from "./body";
+import {
+  EDGES,
+  boneTolOf,
+  concussion,
+  contactFocus,
+  hardnessOf,
+  impulseDamage,
+} from "./body";
+import { dropFrame, makeFrame, wakeFrame } from "./frames";
 import {
   armMotor,
   checkTrips,
@@ -45,6 +54,8 @@ import {
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
+/** Fastest a prop may be moving at the moment it becomes a physical body, m/s. */
+const PROP_BIRTH_SPEED = 10;
 
 export interface Cam {
   yaw: number;
@@ -103,6 +114,7 @@ export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playin
   stepGrab(w, dt, playing ? input : null);
   stepLocomotion(w, dt);
   stepPhysics(w, dt);
+  // Bodies and prop frames are solved together: `stepBodies` interleaves them.
   stepBodies(w, dt);
   checkTrips(w, dt);
   stepDragTracks(w);
@@ -316,6 +328,14 @@ function dropHeld(w: World, p: Actor, throwMul: number) {
     pr.vx += f.x * dv + p.vx;
     pr.vz += f.z * dv + p.vz;
     pr.vy += dv * 0.5;
+    // Thrown, so it becomes a physical object again: it tumbles, it lands on
+    // whatever is under it, and what it lands on is hurt where it was hit.
+    const slot = makeFrame(w.bodies, pr);
+    if (slot >= 0) {
+      w.bodies.addVelocity(slot, pr.vx, pr.vy, pr.vz, STEP);
+      // Thrown flat spins about the vertical, so it turns as it flies.
+      w.bodies.addSpin(slot, 0, (f.z * pr.vx - f.x * pr.vz) * 0.5, 0, STEP);
+    }
   }
   releaseGrab(w, p);
   w.emitSound(p.x, p.z, 0.5, "whoosh", p.id);
@@ -1280,6 +1300,9 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
           pr.heldBy = p.id;
           pr.dynamic = true;
           pr.anchored = false;
+          // While held, the grab constraint moves it; a frame would fight that.
+          dropFrame(w.bodies, pr);
+          for (const c of w.colliders) if (c.propId === pr.id) c.solid = false;
           p.grabbedId = pr.id;
           p.grabNodeA = p.body >= 0 ? B.plan(p.body).grabHand : -1;
           p.grabNodeB = -1;
@@ -1461,6 +1484,8 @@ function stepPhysics(w: World, dt: number) {
   }
   for (const p of w.props) {
     if (p.heldBy || (!p.dynamic && p.anchored)) continue;
+    // Props with a frame are integrated by the solver, not here.
+    if (p.frame >= 0) continue;
     p.vy -= GRAVITY * dt;
     p.vx *= Math.exp(-dt * 1.8);
     p.vz *= Math.exp(-dt * 1.8);
@@ -1800,6 +1825,9 @@ function kill(w: World, a: Actor, cause: string) {
       dynamic: false,
     });
     carcass.yaw = a.yaw;
+    carcass.dynamic = true;
+    carcass.anchored = false;
+    makeFrame(w.bodies, carcass);
   }
 }
 
@@ -1917,6 +1945,18 @@ function damageProp(w: World, p: Prop, dmg: number, vx: number, vz: number, by?:
   p.hp -= dmg;
   p.vx += vx * 0.3;
   p.vz += vz * 0.3;
+  // A hard enough knock takes a prop off its footing whether or not it breaks.
+  if (!p.collapsed && !p.heldBy && dmg > 10 && p.mass < 120 && p.kind !== "wall" && p.kind !== "roof") {
+    const slot = makeFrame(w.bodies, p);
+    if (slot >= 0) {
+      p.dynamic = true;
+      p.anchored = false;
+      for (const c of w.colliders) if (c.propId === p.id) c.solid = false;
+      w.bodies.addVelocity(slot, vx * 0.25, dmg * 0.6 / Math.max(1, p.mass), vz * 0.25, STEP);
+      w.bodies.addSpin(slot, vz * 0.4, 0, -vx * 0.4, STEP);
+      wakeFrame(w.bodies, slot);
+    }
+  }
   if (p.kind === "lamp" && dmg > 6) {
     spillOil(w, p);
     igniteAt(w, p.x, p.z, 0.7);
@@ -1935,6 +1975,25 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
   p.vy = 1.2;
   p.vx += vx * 0.4 + (w.rng() - 0.5);
   p.vz += vz * 0.4 + (w.rng() - 0.5);
+  // A prop that has started to move gets a body. It can tumble, rest on things,
+  // and land on people from here on, and it stops being a solid piece of the
+  // world the moment it stops holding still.
+  // Velocity accumulated while it was still a static box is bookkeeping, not
+  // momentum: nothing was integrating it and nothing was damping it either.
+  // Bounded here so a prop that took three knocks is not born at solver speed.
+  const birth = Math.hypot(p.vx, p.vy, p.vz);
+  if (birth > PROP_BIRTH_SPEED) {
+    const k = PROP_BIRTH_SPEED / birth;
+    p.vx *= k;
+    p.vy *= k;
+    p.vz *= k;
+  }
+  const slot = makeFrame(w.bodies, p);
+  if (slot >= 0) {
+    w.bodies.addVelocity(slot, p.vx, p.vy, p.vz, STEP);
+    // A little spin, so falling timber turns rather than sliding down flat.
+    w.bodies.addSpin(slot, (w.rng() - 0.5) * 2.4, 0, (w.rng() - 0.5) * 2.4, STEP);
+  }
   w.emitSound(p.x, p.z, p.sy > 1.5 ? 1.1 : 0.55, p.sy > 1.5 ? "collapse" : "break", 0);
   w.shake = Math.max(w.shake, p.sy > 1.5 ? 0.55 : 0.2);
   for (const c of w.colliders) {
@@ -1946,15 +2005,95 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
   }
 }
 
-function stepStructures(w: World, _dt: number) {
+/**
+ * Rates a building's supports against the load they were built to carry.
+ *
+ * A building that is standing is, by definition, within capacity, so the rating
+ * comes from its own design load rather than from the mass of a post -- which
+ * describes how hard the post is to throw, not what it can hold up. The margin
+ * is what decides how many you have to take out: at 1.9, losing one of four is
+ * survivable and losing two starts the cascade.
+ */
+const SUPPORT_MARGIN = 1.9;
+
+function rateSupports(w: World, b: Building) {
+  b.rated = true;
+  let carried = 0;
+  for (const id of b.parts) {
+    const p = w.prop(id);
+    if (p) carried += p.mass;
+  }
+  const live = b.supports.filter((id) => w.prop(id)).length;
+  if (!live) return;
+  const design = (carried / live) * SUPPORT_MARGIN;
+  for (const id of b.supports) {
+    const p = w.prop(id);
+    if (p) p.capacity = design;
+  }
+}
+
+/**
+ * Structural load, and what happens when it has nowhere to go.
+ *
+ * `Prop.load` and `Prop.capacity` were declared in the data model and read by
+ * nothing: a building stood until half its posts were gone and then vanished
+ * all at once. Load is now shared across the supports that are still standing,
+ * so cutting one raises the share on every other -- and if that share passes
+ * what a post can carry, it fails too, and the share rises again.
+ *
+ * That is the whole cascade: a building does not fall because a counter reached
+ * a threshold, it falls because the remaining posts could not carry what the
+ * missing ones were carrying. Which post you take first decides whether the
+ * roof comes down now, in a moment, or not at all.
+ */
+function stepStructures(w: World, dt: number) {
   for (const b of w.buildings) {
     if (b.collapsed) continue;
+    if (!b.rated) rateSupports(w, b);
     let live = 0;
+    let carried = 0;
+    for (const id of b.parts) {
+      const p = w.prop(id);
+      if (!p || p.collapsed) continue;
+      carried += p.mass;
+    }
+    // Anything heaped inside the footprint is weight the frame has to carry.
+    for (const p of w.props) {
+      if (p.collapsed || p.frame < 0) continue;
+      if (p.x > b.minX && p.x < b.maxX && p.z > b.minZ && p.z < b.maxZ) carried += p.mass * 0.5;
+    }
     for (const id of b.supports) {
       const p = w.prop(id);
       if (p && !p.collapsed && p.hp > 0) live++;
     }
-    if (live <= Math.max(1, (b.supports.length / 2) | 0) && b.supports.length) {
+    if (!b.supports.length) continue;
+
+    const share = live > 0 ? carried / live : Infinity;
+    let failed = 0;
+    for (const id of b.supports) {
+      const p = w.prop(id);
+      if (!p || p.collapsed || p.hp <= 0) continue;
+      p.load = share;
+      // Overload is not instant: timber groans, sags, and then goes. The margin
+      // above capacity sets how fast, so a post barely over holds for a while
+      // and one carrying twice its share does not.
+      if (EDGES.loadCascade && share > p.capacity) {
+        const over = share / p.capacity;
+        p.hp -= dt * 14 * over;
+        if (w.rng() < dt * 0.6 * over) w.emitSound(p.x, p.z, 0.5 + over * 0.2, "wood", 0);
+        if (p.hp <= 0) {
+          collapseProp(w, p, (w.rng() - 0.5) * 2, (w.rng() - 0.5) * 2);
+          failed++;
+        }
+      }
+    }
+    if (failed && live - failed > 0) w.whisper("Timber groans overhead.");
+
+    // Collapse when nothing is left holding it up. The old rule fired as soon
+    // as half the posts were gone, which pre-empted the cascade it was standing
+    // in for: with load doing the work, the last posts groan under the share the
+    // missing ones were carrying and go one after another.
+    if (live - failed <= 0) {
       b.collapsed = true;
       w.whisper(b.name + " gives way.");
       w.emitSound((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2, 1.4, "collapse", 0);
@@ -1963,46 +2102,14 @@ function stepStructures(w: World, _dt: number) {
         const p = w.prop(id);
         if (!p) continue;
         collapseProp(w, p, (w.rng() - 0.5) * 3, (w.rng() - 0.5) * 3);
-        p.vy += 2 + w.rng();
+        if (p.frame >= 0) w.bodies.addVelocity(p.frame, 0, 2 + w.rng(), 0, STEP);
       }
-      // Falling structure delivers a downward impulse to whichever nodes are
-      // under it. The injury it causes is whatever `impulseDamage` makes of that
-      // impulse at that node -- the same law a fall or a club goes through --
-      // so a beam that lands on a shoulder breaks a shoulder.
-      const cx = (b.minX + b.maxX) * 0.5;
-      const cz = (b.minZ + b.maxZ) * 0.5;
+      // The falling timber itself is what hurts anyone underneath now: the
+      // frames land on them, node against node, through the same contact and
+      // the same damage law as everything else. No blanket injury is applied
+      // here, because whether you are hit is a question about where you stood.
       for (const a of w.actors) {
         a.fear = Math.min(1, a.fear + 0.35);
-        if (a.x <= b.minX || a.x >= b.maxX || a.z <= b.minZ || a.z >= b.maxZ) continue;
-        if (a.body < 0) {
-          a.injuries.torso.bruise += 0.5;
-          collapse(w, a, 1.2);
-          continue;
-        }
-        const B = w.bodies;
-        const base = B.base(a.body);
-        const n = B.count[a.body]!;
-        // impulse scales with the debris mass overhead and how central the hit is
-        const centred = 1 - Math.min(1, Math.hypot(a.x - cx, a.z - cz) / 6);
-        const jTotal = a.mass * (2.4 + centred * 5.5); // N*s
-        let highest = -Infinity;
-        let hi = 0;
-        for (let i = 0; i < n; i++) {
-          if (B.py[base + i]! > highest) {
-            highest = B.py[base + i]!;
-            hi = i;
-          }
-        }
-        B.applyImpulse(
-          a.body,
-          hi,
-          (w.rng() - 0.5) * jTotal * 0.3,
-          -jTotal,
-          (w.rng() - 0.5) * jTotal * 0.3,
-          STEP,
-        );
-        B.addVelocity(a.body, 0, -2.2 * centred, 0, STEP);
-        collapse(w, a, 1.4);
       }
       w.wanted = Math.min(1, w.wanted + 0.15);
     }
