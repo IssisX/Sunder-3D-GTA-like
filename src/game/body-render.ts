@@ -87,6 +87,9 @@ export class BodyView {
   private a = new THREE.Vector3();
   private b = new THREE.Vector3();
   private d = new THREE.Vector3();
+  private p0 = new THREE.Vector3();
+  private p1 = new THREE.Vector3();
+  private p2 = new THREE.Vector3();
   private tangent = new THREE.Vector3();
   private normal = new THREE.Vector3();
   private binormal = new THREE.Vector3();
@@ -249,7 +252,7 @@ export class BodyView {
   }
 
   // One continuously curved mesh passes through start -> joint -> end.
-  // The joint is therefore a bend in one volume, never a ball between sticks.
+  // All scratch vectors are persistent: zero new THREE.* allocations in sync().
   private curvedLimb(
     mesh: THREE.Mesh,
     actor: Actor,
@@ -262,17 +265,15 @@ export class BodyView {
     endRadius: number,
     alpha: number,
   ) {
-    const p0 = new THREE.Vector3();
-    const p1 = new THREE.Vector3();
-    const p2 = new THREE.Vector3();
-    this.node(rig, startNode, alpha, p0);
-    this.node(rig, jointNode, alpha, p1);
-    this.node(rig, endNode, alpha, p2);
+    this.node(rig, startNode, alpha, this.p0);
+    this.node(rig, jointNode, alpha, this.p1);
+    this.node(rig, endNode, alpha, this.p2);
 
     const pos = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
     const nor = mesh.geometry.getAttribute("normal") as THREE.BufferAttribute;
     const scale = actor.height / 1.72;
-    const f = { x: -Math.sin(actor.yaw), z: -Math.cos(actor.yaw) };
+    const forwardX = -Math.sin(actor.yaw);
+    const forwardZ = -Math.cos(actor.yaw);
 
     for (let ring = 0; ring < LIMB_RINGS; ring++) {
       const t = ring / (LIMB_RINGS - 1);
@@ -283,17 +284,17 @@ export class BodyView {
       const dl1 = -8 * t + 4;
       const dl2 = 4 * t - 1;
 
-      const px = p0.x * l0 + p1.x * l1 + p2.x * l2;
-      const py = p0.y * l0 + p1.y * l1 + p2.y * l2;
-      const pz = p0.z * l0 + p1.z * l1 + p2.z * l2;
+      const px = this.p0.x * l0 + this.p1.x * l1 + this.p2.x * l2;
+      const py = this.p0.y * l0 + this.p1.y * l1 + this.p2.y * l2;
+      const pz = this.p0.z * l0 + this.p1.z * l1 + this.p2.z * l2;
       this.tangent.set(
-        p0.x * dl0 + p1.x * dl1 + p2.x * dl2,
-        p0.y * dl0 + p1.y * dl1 + p2.y * dl2,
-        p0.z * dl0 + p1.z * dl1 + p2.z * dl2,
+        this.p0.x * dl0 + this.p1.x * dl1 + this.p2.x * dl2,
+        this.p0.y * dl0 + this.p1.y * dl1 + this.p2.y * dl2,
+        this.p0.z * dl0 + this.p1.z * dl1 + this.p2.z * dl2,
       ).normalize();
 
       if (Math.abs(this.tangent.y) < 0.86) this.ref.set(0, 1, 0);
-      else this.ref.set(f.x, 0, f.z).normalize();
+      else this.ref.set(forwardX, 0, forwardZ).normalize();
       this.normal.crossVectors(this.tangent, this.ref).normalize();
       if (this.normal.lengthSq() < 1e-6) this.normal.set(1, 0, 0);
       this.binormal.crossVectors(this.normal, this.tangent).normalize();
@@ -412,19 +413,30 @@ export class BodyView {
       helmet.scale.set(0.34 * scale, 0.24 * scale, 0.32 * scale);
     }
 
+    // Weapon axis is derived from the live forearm/hand chain. It therefore
+    // follows the kinetic-chain strike instead of remaining rigidly yaw-locked.
     const forwardX = -Math.sin(a.yaw);
     const forwardZ = -Math.cos(a.yaw);
     const len = weaponLength(a.weapon) * scale;
-    this.node(rig, BODY.rHand, alpha, this.a);
-    this.b.set(
-      this.a.x + forwardX * len,
-      this.a.y + (a.weapon === "spear" || a.weapon === "pitchfork" ? 0.05 * scale : -0.04 * scale),
-      this.a.z + forwardZ * len,
-    );
+    this.node(rig, BODY.rElbow, alpha, this.a);
+    this.node(rig, BODY.rHand, alpha, this.b);
     this.d.subVectors(this.b, this.a);
-    const wlen = Math.max(0.001, this.d.length());
-    v.weapon.position.copy(this.a).addScaledVector(this.d, 0.5);
-    this.d.multiplyScalar(1 / wlen);
+    let armLen = this.d.length();
+    if (armLen < 1e-5) {
+      this.d.set(forwardX, 0, forwardZ);
+      armLen = 1;
+    } else {
+      this.d.multiplyScalar(1 / armLen);
+      const follow = a.weapon === "spear" || a.weapon === "pitchfork" ? 0.82 : 0.93;
+      this.d.x = this.d.x * follow + forwardX * (1 - follow);
+      this.d.z = this.d.z * follow + forwardZ * (1 - follow);
+      const dm = this.d.length() || 1;
+      this.d.multiplyScalar(1 / dm);
+    }
+    this.a.copy(this.b);
+    this.b.copy(this.a).addScaledVector(this.d, len);
+    const wlen = Math.max(0.001, len);
+    v.weapon.position.copy(this.a).addScaledVector(this.d, wlen * 0.5);
     this.q.setFromUnitVectors(this.up, this.d);
     v.weapon.quaternion.copy(this.q);
     v.weapon.scale.set(0.045 * scale, wlen, 0.045 * scale);
