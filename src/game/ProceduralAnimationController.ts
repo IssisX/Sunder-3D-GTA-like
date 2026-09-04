@@ -5,20 +5,24 @@ import { AnimationController } from "./AnimationController";
 import { MeleeKinematics } from "./melee-kinematics";
 import { SocialAwarenessController } from "./social-awareness";
 import { impactDynamics } from "./impact-dynamics";
+import { BodyCausality } from "./body-causality";
 
 /**
- * Canonical runtime animation orchestrator.
+ * Canonical runtime body/action orchestrator.
  *
- * AnimationController owns phase-matched locomotion/root motion.
- * MeleeKinematics owns contact-authoritative kinetic-chain Punch/Kick and
- * weapon melee. impactDynamics owns anatomical impulse/torque propagation
- * after contact. AnimatedPhysicalBodies underneath still owns Grab while
- * INTERACTION remains the next migration slice. Every system projects into
- * the same authoritative BodyRig.
+ * The fixed-step causal order is intentional:
+ *   base articulated solve / locomotion
+ *   -> action geometry and physical contact
+ *   -> anatomical/root impulse propagation
+ *   -> support/COM stability decision
+ *
+ * No action system is allowed to independently choose a hit reaction or fall
+ * state when the common body substrate can derive it from contact mechanics.
  */
 export class ProceduralAnimationController extends AnimationController {
   private readonly melee = new MeleeKinematics(this);
   private readonly social = new SocialAwarenessController();
+  private readonly causality = new BodyCausality(this);
 
   override bootstrap(w: World) {
     super.bootstrap(w);
@@ -59,8 +63,20 @@ export class ProceduralAnimationController extends AnimationController {
 
   override step(w: World, dt: number) {
     this.social.endStep(w);
+
+    // Establish the current articulated body and locomotion state first.
     super.step(w, dt);
+
+    // The action solver moves the real effectors and detects contact from their
+    // swept geometry. Contact writes injury plus one shared impulse field.
     this.melee.step(w, dt);
+
+    // The same field now drives both visible anatomical recoil and coarse root
+    // momentum. No separate melee knockback path exists.
     impactDynamics.step(w, dt);
+
+    // Finally derive absorb/recoil/stumble/collapse from actual support geometry,
+    // COM projection, posture, injury and the impulse that just occurred.
+    this.causality.step(w, dt);
   }
 }
