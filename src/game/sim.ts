@@ -28,9 +28,14 @@ import {
   clearGrab,
   ensureBodies,
   isDynamicBody,
+  KICK_DUR,
+  meleeTip,
   regionOfPart,
   setGrab,
+  SHOVE_DUR,
   stepBodies,
+  strikeDuration,
+  actionUnit,
 } from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
@@ -146,6 +151,7 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   max *= leg * load * mud * (0.55 + p.consciousness * 0.45) * (1 - p.fatigue * 0.35);
   if (p.grabbedId) max *= 0.72;
   p.intendSpeed = wishMag * max;
+  if (p.strikeT > 0 || p.kickT > 0 || p.shoveT > 0) p.intendSpeed *= 0.32;
 
   if (wishMag > 0.08) {
     const ty = Math.atan2(-p.intendX, -p.intendZ);
@@ -467,17 +473,18 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     if (seesPlayer) {
       a.ai = "combat";
       const d = Math.hypot(player.x - a.x, player.z - a.z);
-      if (d > 1.5) seek(a, player.x, player.z, 5.2);
-      else a.intendSpeed = 0.4;
+      if (d > 1.15) seek(a, player.x, player.z, 5.2);
+      else a.intendSpeed = 0.35;
       a.targetId = player.id;
       if (a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 1.0, "shout", a.id);
         a.shoutCd = 3;
         callAllies(w, a, player);
       }
-      if (d < WEAPON_STATS[a.weapon].reach + 0.4 && a.attackCd <= 0) {
-        a.strikeT = 0.32;
-        a.strikeCd = 0.7 / (0.7 + a.competence);
+      const want = 0.62 + WEAPON_STATS[a.weapon].reach;
+      if (d < want && a.attackCd <= 0) {
+        a.strikeT = strikeDuration(a);
+        a.strikeCd = 0.72 / (0.7 + a.competence);
         a.strikeHit = 0;
         a.attackCd = a.strikeCd;
       }
@@ -639,8 +646,8 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.ai = "hunt";
       a.targetId = prey.id;
       const d = seek(a, prey.x, prey.z, 6.4);
-      if (d < 1.3 && a.attackCd <= 0) {
-        a.strikeT = 0.28;
+      if (d < 0.85 && a.attackCd <= 0) {
+        a.strikeT = strikeDuration(a);
         a.strikeHit = 0;
         a.attackCd = 0.8;
       }
@@ -664,8 +671,8 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.ai = "hunt";
       a.targetId = close.id;
       const d = seek(a, close.x, close.z, 5.6);
-      if (d < 2 && a.attackCd <= 0) {
-        a.strikeT = 0.4;
+      if (d < 1.05 && a.attackCd <= 0) {
+        a.strikeT = 0.42;
         a.strikeHit = 0;
         a.attackCd = 1.1;
         w.emitSound(a.x, a.z, 1.1, "animal", a.id);
@@ -693,83 +700,142 @@ function breakFence(w: World, a: Actor) {
 function stepCombat(w: World, dt: number, input: Actions | null) {
   const p = w.player();
   if (input && p.alive && p.consciousness > 0.4) {
-    if (input.attackPressed && p.strikeCd <= 0 && p.loco !== "ragdoll") {
-      p.strikeT = 0.3 / WEAPON_STATS[p.weapon].speed;
-      p.strikeCd = 0.42 / WEAPON_STATS[p.weapon].speed;
+    if (input.attackPressed && p.strikeCd <= 0 && p.loco !== "ragdoll" && p.loco !== "down" && p.loco !== "getup") {
+      p.strikeT = strikeDuration(p);
+      p.strikeCd = p.strikeT + 0.16;
       p.strikeHit = 0;
       p.stamina = Math.max(0, p.stamina - 0.06);
       w.emitSound(p.x, p.z, 0.35, "weapon", p.id);
     }
-    if (input.kickPressed && p.kickT <= 0 && p.grounded) {
-      p.kickT = 0.28;
+    if (input.kickPressed && p.kickT <= 0 && p.grounded && p.loco !== "ragdoll") {
+      p.kickT = KICK_DUR;
+      p.strikeHit = 0;
       w.emitSound(p.x, p.z, 0.3, "whoosh", p.id);
     }
-    if (input.shovePressed) {
-      p.shoveT = 0.22;
+    if (input.shovePressed && p.shoveT <= 0 && p.loco !== "ragdoll") {
+      p.shoveT = SHOVE_DUR;
+      p.strikeHit = 0;
     }
   }
   for (const a of w.actors) {
     a.strikeCd = Math.max(0, a.strikeCd - dt);
     a.attackCd = Math.max(0, a.attackCd - dt);
     if (a.strikeT > 0) {
-      a.strikeT -= dt;
+      const dur =
+        a.species === "human" || a.kind === "player" ? strikeDuration(a) : a.species === "bear" ? 0.42 : 0.34;
+      a.strikeT = Math.max(0, a.strikeT - dt);
+      const u = actionUnit(Math.max(0, a.strikeT), dur);
       const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
-      const active = a.strikeT < 0.18 && a.strikeT > 0.04;
-      if (active) {
-        const f = facing(a.yaw);
-        const reach = st.reach * (a.species === "bear" ? 1.6 : 1);
-        for (const o of w.nearby(a.x, a.z, reach + 0.6)) {
-          if (o.id === a.id || !o.alive) continue;
-          if (a.strikeHit & (1 << (o.id % 30))) continue;
-          const dx = o.x - a.x;
-          const dz = o.z - a.z;
-          const d = Math.hypot(dx, dz);
-          if (d > reach + o.radius) continue;
-          const dot = d > 0 ? (dx * f.x + dz * f.z) / d : 1;
-          if (dot < 0.25) continue;
-          a.strikeHit |= 1 << (o.id % 30);
-          const speed = Math.hypot(a.vx, a.vz) + 2.2;
-          hitActor(w, a, o, st, speed, "strike");
-        }
-        for (const pr of w.props) {
-          if (pr.collapsed || pr.heldBy) continue;
-          if (dist2(a.x + f.x * 0.8, a.z + f.z * 0.8, pr.x, pr.z) > 1.6) continue;
-          damageProp(w, pr, 8 + st.blunt * 14, a.vx + f.x * 3, a.vz + f.z * 3, a);
-        }
+      if (u >= 0.3 && u <= 0.54) {
+        resolveMelee(w, a, "strike", st);
       }
     }
     if (a.kickT > 0) {
-      a.kickT -= dt;
-      if (a.kickT < 0.16 && a.kickT > 0.08) {
-        const f = facing(a.yaw);
-        for (const o of w.nearby(a.x, a.z, 1.4)) {
-          if (o.id === a.id) continue;
-          const dx = o.x - a.x;
-          const dz = o.z - a.z;
-          if (dx * f.x + dz * f.z < 0) continue;
-          hitActor(w, a, o, { ...WEAPON_STATS.fist, blunt: 1.1, reach: 1.1 }, 3, "kick");
-          o.injuries.lleg.sprain += 0.15;
-          o.vy += 0.6;
-        }
+      const prev = a.kickT;
+      a.kickT = Math.max(0, a.kickT - dt);
+      if (prev > KICK_DUR * 0.52 && a.kickT <= KICK_DUR * 0.52) {
+        resolveMelee(w, a, "kick", { ...WEAPON_STATS.fist, blunt: 1.15, reach: 0.08 });
       }
     }
     if (a.shoveT > 0) {
-      a.shoveT -= dt;
-      if (a.shoveT < 0.16) {
-        const f = facing(a.yaw);
-        for (const o of w.nearby(a.x, a.z, 1.25)) {
-          if (o.id === a.id) continue;
-          const rel = a.mass / (a.mass + o.mass);
-          o.vx += f.x * 5.5 * rel;
-          o.vz += f.z * 5.5 * rel;
-          o.balance -= 0.45 * rel;
-          applyImpulseToNearest(o, o.x, o.y + 1.1, o.z, f.x * 14 * rel, 3 * rel, f.z * 14 * rel);
-          if (o.balance < 0.25) {
-            o.loco = "stumble";
-            o.locoT = 0.4;
-          }
+      const prev = a.shoveT;
+      a.shoveT = Math.max(0, a.shoveT - dt);
+      if (prev > SHOVE_DUR * 0.48 && a.shoveT <= SHOVE_DUR * 0.48) {
+        resolveShove(w, a);
+      }
+    }
+  }
+}
+
+function marked(a: Actor, id: number) {
+  return (a.strikeHit & (1 << (id % 30))) !== 0;
+}
+
+function mark(a: Actor, id: number) {
+  a.strikeHit |= 1 << (id % 30);
+}
+
+function resolveMelee(
+  w: World,
+  a: Actor,
+  how: "strike" | "kick",
+  st: (typeof WEAPON_STATS)[WeaponKind],
+) {
+  const tip = meleeTip(a, how);
+  const pad = how === "kick" ? 0.55 : 0.5;
+  for (const o of w.nearby(tip.x, tip.z, pad + 0.35)) {
+    if (o.id === a.id || !o.alive) continue;
+    if (marked(a, o.id)) continue;
+    let hx = o.x;
+    let hy = o.y + (how === "kick" ? 0.32 : o.height * 0.62);
+    let hz = o.z;
+    let hit = false;
+    if (o.body) {
+      let best = 1e9;
+      let bi = 0;
+      for (let i = 0; i < o.body.parts.length; i++) {
+        const p = o.body.parts[i]!;
+        const d = (p.x - tip.x) ** 2 + (p.y - tip.y) ** 2 + (p.z - tip.z) ** 2;
+        if (d < best) {
+          best = d;
+          bi = i;
         }
       }
+      const p = o.body.parts[bi]!;
+      const allow = tip.r + p.r + 0.05;
+      if (best <= allow * allow) {
+        hit = true;
+        hx = p.x;
+        hy = p.y;
+        hz = p.z;
+      }
+    } else {
+      const cy = o.y + o.height * (how === "kick" ? 0.28 : 0.55);
+      const d = Math.hypot(o.x - tip.x, cy - tip.y, o.z - tip.z);
+      if (d < tip.r + o.radius + 0.06) hit = true;
+    }
+    if (!hit) continue;
+    mark(a, o.id);
+    const speed = Math.hypot(a.vx, a.vz) + (how === "kick" ? 3.1 : 2.0);
+    hitActor(w, a, o, st, speed, how, hx, hy, hz);
+    if (how === "kick") {
+      o.injuries.lleg.sprain += 0.12;
+      o.vy += 0.45;
+    }
+  }
+  if (how !== "strike") return;
+  const f = facing(a.yaw);
+  for (const pr of w.props) {
+    if (pr.collapsed || pr.heldBy) continue;
+    if (dist2(tip.x, tip.z, pr.x, pr.z) > (0.35 + tip.r) * (0.35 + tip.r)) continue;
+    if (Math.abs(pr.y + pr.sy * 0.5 - tip.y) > 0.7) continue;
+    damageProp(w, pr, 8 + st.blunt * 14, a.vx + f.x * 3, a.vz + f.z * 3, a);
+  }
+}
+
+function resolveShove(w: World, a: Actor) {
+  const tip = meleeTip(a, "shove");
+  const f = facing(a.yaw);
+  for (const o of w.nearby(tip.x, tip.z, 0.7)) {
+    if (o.id === a.id || !o.alive) continue;
+    if (marked(a, o.id)) continue;
+    let close = false;
+    if (o.body) {
+      const p = o.body.parts[1] ?? o.body.parts[0]!;
+      close = Math.hypot(p.x - tip.x, p.y - tip.y, p.z - tip.z) < 0.38;
+    } else {
+      close = Math.hypot(o.x - tip.x, o.z - tip.z) < 0.45 + o.radius;
+    }
+    if (!close) continue;
+    mark(a, o.id);
+    const rel = a.mass / (a.mass + o.mass);
+    o.vx += f.x * 4.2 * rel;
+    o.vz += f.z * 4.2 * rel;
+    o.balance -= 0.32 * rel;
+    applyImpulseToNearest(o, o.x, o.y + 1.05, o.z, f.x * 8 * rel, 1.6 * rel, f.z * 8 * rel);
+    if (o.balance < 0.22) {
+      o.loco = "stumble";
+      o.locoT = 0.4;
     }
   }
 }
@@ -781,25 +847,29 @@ function hitActor(
   st: (typeof WEAPON_STATS)[WeaponKind],
   speed: number,
   how: "strike" | "kick" | "throw",
+  hx?: number,
+  hy?: number,
+  hz?: number,
 ) {
   const f = facing(atk.yaw);
   const rel = atk.mass / (atk.mass + vic.mass);
   const force = (0.6 + speed * 0.25) * (0.7 + st.mass * 0.25) * (0.8 + atk.strength * 0.4);
-  vic.vx += f.x * force * 3.2 * rel;
-  vic.vz += f.z * force * 3.2 * rel;
-  vic.balance -= 0.35 + st.blunt * 0.35 * rel;
+  vic.vx += f.x * force * 2.4 * rel;
+  vic.vz += f.z * force * 2.4 * rel;
+  vic.balance -= 0.22 + st.blunt * 0.28 * rel;
   const side = rightOf(atk.yaw).x * (vic.x - atk.x) + rightOf(atk.yaw).z * (vic.z - atk.z);
-  const hitY = how === "kick" ? vic.y + 0.32 : vic.y + 1.05 + Math.random() * 0.45;
-  const hx = vic.x + f.x * 0.15;
-  const hz = vic.z + f.z * 0.15;
+  const hitX = hx ?? vic.x + f.x * 0.12;
+  const hitY = hy ?? (how === "kick" ? vic.y + 0.32 : vic.y + 1.05);
+  const hitZ = hz ?? vic.z + f.z * 0.12;
+  const jScale = vic.body?.mode === "stance" ? 5 : 12;
   const part = applyImpulseToNearest(
     vic,
-    hx,
+    hitX,
     hitY,
-    hz,
-    f.x * force * 18 * rel,
-    (how === "kick" ? 4 : 8) * rel,
-    f.z * force * 18 * rel,
+    hitZ,
+    f.x * force * jScale * rel,
+    (how === "kick" ? 2.2 : 4.5) * rel,
+    f.z * force * jScale * rel,
   );
   const region =
     part >= 0
@@ -830,14 +900,14 @@ function hitActor(
   if (atk.kind === "player" && vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.35);
   if (atk.kind === "player" && vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.2);
   vic.alert = 1;
-  if (vic.balance < 0.15 || force > 1.6) {
+  if (vic.balance < 0.12 || force > 2.35) {
     vic.loco = "ragdoll";
     vic.locoT = 0.7 + (1 - vic.balance);
-    vic.vy += 1.2 * rel;
+    vic.vy += 0.9 * rel;
     if (vic.body) vic.body.mode = "ragdoll";
-  } else if (vic.balance < 0.45) {
+  } else if (vic.balance < 0.4) {
     vic.loco = "stumble";
-    vic.locoT = 0.45;
+    vic.locoT = 0.4;
   }
   w.emitSound(vic.x, vic.z, 0.55 + force * 0.2, "impact", atk.id);
   if (vic.kind === "human" || vic.kind === "player") {
@@ -855,14 +925,14 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
     if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll") {
       const f = facing(p.yaw);
       let best: Actor | Prop | null = null;
-      let bd = 1.7;
-      for (const o of w.nearby(p.x, p.z, 1.8)) {
+      let bd = 1.12;
+      for (const o of w.nearby(p.x, p.z, 1.25)) {
         if (o.id === p.id) continue;
         const dx = o.x - p.x;
         const dz = o.z - p.z;
         const d = Math.hypot(dx, dz);
         const dot = (dx * f.x + dz * f.z) / (d || 1);
-        if (dot < 0.1) continue;
+        if (dot < 0.35) continue;
         if (d < bd) {
           bd = d;
           best = o;
@@ -875,7 +945,7 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
         const dx = pr.x - p.x;
         const dz = pr.z - p.z;
         const dot = (dx * f.x + dz * f.z) / (d || 1);
-        if (dot < 0.05 || d > 1.7) continue;
+        if (dot < 0.3 || d > 1.15) continue;
         if (d < bd) {
           bd = d;
           best = pr;
@@ -969,7 +1039,7 @@ function stepLocomotion(w: World, dt: number) {
     if (a.loco === "getup") {
       a.getupT -= dt;
       a.intendSpeed = 0;
-      if (a.getupT <= 0) {
+      if (!a.body && a.getupT <= 0) {
         a.loco = "idle";
         a.balance = 0.6;
       }
@@ -977,7 +1047,7 @@ function stepLocomotion(w: World, dt: number) {
     }
     if (a.loco === "ragdoll") {
       a.locoT -= dt;
-      if (a.grounded && Math.hypot(a.vx, a.vz) < 1.8 && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
+      if (!a.body && a.grounded && Math.hypot(a.vx, a.vz) < 1.8 && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
         a.loco = "getup";
         a.getupT = 0.7 + (1 - a.consciousness) * 0.6;
       }
@@ -1334,7 +1404,7 @@ function stepInjury(w: World, dt: number) {
       a.intendSpeed = 0;
       a.downT += dt;
       if (a.body) a.body.mode = "ragdoll";
-      if (a.kind === "player") {
+      if (a.kind === "player" && w.phase !== "title") {
         w.phase = "down";
         const guards = w.nearby(a.x, a.z, 4).filter((g) => g.faction === "guard" && g.alive);
         if (guards.length && a.downT > 1.6) {
@@ -1356,6 +1426,7 @@ function kill(w: World, a: Actor, cause: string) {
   if (a.body) a.body.mode = "ragdoll";
   w.emitSound(a.x, a.z, 0.6, "impact", a.id);
   if (a.kind === "player") {
+    if (w.phase === "title") return;
     w.phase = "dead";
     w.deadCause = cause;
   } else {

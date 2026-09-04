@@ -361,7 +361,7 @@ function ActionBtn({
     <button
       type="button"
       aria-label={label}
-      className={`pointer-events-auto rounded-md border border-border bg-surface/80 text-xs tracking-wide text-fg uppercase backdrop-blur-sm select-none ${
+      className={`pointer-events-auto rounded-md border border-border bg-surface/80 text-xs tracking-wide text-fg uppercase backdrop-blur-sm select-none transition-transform duration-75 active:scale-95 active:bg-raised ${
         large ? "h-16 min-h-16 min-w-16 px-4" : "h-12 min-h-12 min-w-12 px-3"
       }`}
       style={{ touchAction: "none" }}

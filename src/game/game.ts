@@ -6,7 +6,7 @@ import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
-import { ensureBodies, reposeActor, applyImpulseToNearest } from "./physique";
+import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR } from "./physique";
 
 export class Game {
   world = new World();
@@ -124,6 +124,7 @@ export class Game {
     this.world = new World();
     this.world.seed = (Date.now() % 2147483646) + 1;
     buildLevel(this.world);
+    ensureBodies(this.world);
     this.view = new View(this.canvas);
     this.view.bootstrap(this.world);
     this.cam = { yaw: this.world.player().yaw, pitch: 0.18 };
@@ -147,6 +148,10 @@ export class Game {
     p.loco = "idle";
     p.alive = true;
     p.downT = 0;
+    if (p.body) {
+      p.body.mode = "stance";
+      reposeActor(p);
+    }
     this.world.phase = "playing";
     this.hud.phase = "playing";
     this.input.enabled = true;
@@ -290,13 +295,18 @@ export class Game {
     if (!s) return;
     const p = this.world.player();
     p.x = s.player.x;
-    p.y = s.player.y;
+    p.y = Math.max(0, s.player.y);
     p.z = s.player.z;
     p.yaw = s.player.yaw;
-    p.blood = s.player.blood;
+    p.blood = Math.max(0.35, s.player.blood);
     p.stamina = s.player.stamina;
     p.weapon = s.player.weapon;
     p.torchLit = s.player.torchLit;
+    p.loco = "idle";
+    p.consciousness = Math.max(p.consciousness, 0.85);
+    p.balance = 1;
+    p.alive = true;
+    if (p.body) p.body.mode = "stance";
     reposeActor(p);
     this.world.time = s.time;
     this.world.day = s.day;
@@ -339,11 +349,60 @@ export class Game {
       },
       forceRagdoll: () => {
         const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
         p.loco = "ragdoll";
-        p.locoT = 0.28;
+        p.locoT = 0.55;
         p.balance = 0;
         if (p.body) p.body.mode = "ragdoll";
-        applyImpulseToNearest(p, p.x, p.y + 1.2, p.z, 6.5, 4.2, -3.5);
+        applyImpulseToNearest(p, p.x, p.y + 1.2, p.z, 8.5, 2.2, -5.5);
+        applyImpulseToNearest(p, p.x, p.y + 0.4, p.z, 3.2, -1.5, -2.0);
+      },
+      forceStrike: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        p.strikeT = strikeDuration(p);
+        p.strikeCd = p.strikeT + 0.16;
+        p.strikeHit = 0;
+      },
+      forceKick: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        p.kickT = KICK_DUR;
+        p.strikeHit = 0;
+      },
+      getCombat: () => {
+        const p = self.world.player();
+        let best: { d: number; loco: string; pain: number; id: number; balance: number } | null = null;
+        for (const o of self.world.actors) {
+          if (o.id === p.id) continue;
+          const d = Math.hypot(o.x - p.x, o.z - p.z);
+          if (!best || d < best.d) best = { d, loco: o.loco, pain: o.pain, id: o.id, balance: o.balance };
+        }
+        const hand = p.body?.parts[6];
+        return {
+          strikeT: p.strikeT,
+          kickT: p.kickT,
+          shoveT: p.shoveT,
+          handZ: hand ? hand.z - p.z : 0,
+          handFwd: hand
+            ? -(hand.x - p.x) * Math.sin(p.yaw) + -(hand.z - p.z) * Math.cos(p.yaw)
+            : 0,
+          nearest: best,
+          support: p.body?.support ?? 0,
+          loco: p.loco,
+        };
       },
       setKeys: (codes: string[]) => {
         if (self.world.phase !== "playing") {
@@ -380,6 +439,9 @@ declare global {
         spd?: number;
       } | null;
       forceRagdoll?: () => void;
+      forceStrike?: () => void;
+      forceKick?: () => void;
+      getCombat?: () => unknown;
       setKeys?: (codes: string[]) => void;
       setSteer?: (v: number) => void;
     };

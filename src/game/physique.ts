@@ -1,5 +1,5 @@
 import type { Actor, Collider, Joint, Particle, Physique, Region } from "./types";
-import { GRAVITY } from "./types";
+import { GRAVITY, WEAPON_STATS } from "./types";
 import { World, clamp, facing, injurySum, rightOf } from "./world";
 
 export const P = {
@@ -67,10 +67,45 @@ const BONES: [number, number, number][] = [
   [0, 5, 0.000045],
 ];
 
+/** Hinge spans (a-b-c). Min cosine keeps the joint from folding flat; max keeps it from going the wrong way past straight. */
+const HINGES: [number, number, number, number, number][] = [
+  [P.spine, P.uarmL, P.larmL, -0.72, 0.92],
+  [P.spine, P.uarmR, P.larmR, -0.72, 0.92],
+  [P.pelvis, P.thighL, P.shinL, -0.88, 0.78],
+  [P.pelvis, P.thighR, P.shinR, -0.88, 0.78],
+  [P.pelvis, P.spine, P.head, -0.55, 0.85],
+];
+
+const BONE_SKIP = new Set(BONES.map(([a, b]) => (a < b ? a * 16 + b : b * 16 + a)));
+const CORE_PARTS = [P.pelvis, P.spine, P.head];
+const ALL_PARTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+
 const SUB = 4;
 const ITERS = 2;
 const IMPACT_VN = 2.45;
 const PELVIS_H = 0.9;
+export const STRIKE_DUR = 0.46;
+export const KICK_DUR = 0.48;
+export const SHOVE_DUR = 0.4;
+
+function smooth01(t: number) {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+}
+
+function lerp3(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
+export function strikeDuration(a: Actor) {
+  return STRIKE_DUR / (WEAPON_STATS[a.weapon]?.speed ?? 1);
+}
+
+export function actionUnit(remain: number, dur: number) {
+  if (remain <= 0 || dur <= 0) return 0;
+  return clamp(1 - remain / dur, 0, 1);
+}
 
 function hasHumanBody(a: Actor) {
   return a.kind === "player" || a.species === "human";
@@ -142,6 +177,9 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
   let lx = base[0];
   let ly = base[1];
   let lz = base[2];
+  const punching = a.strikeT > 0;
+  const kicking = a.kickT > 0;
+  const shoving = a.shoveT > 0;
   const spd = Math.hypot(a.vx, a.vz);
   const amp = Math.min(0.34, spd * 0.075 + (a.loco === "walk" || a.loco === "run" || a.loco === "sprint" ? 0.08 : 0));
   const s = Math.sin(a.walkPhase);
@@ -149,18 +187,81 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     ly *= 0.72;
     lz += 0.08;
   }
-  if (i === P.shinL || i === P.thighL) lz += s * amp * (i === P.shinL ? 1 : 0.45);
-  if (i === P.shinR || i === P.thighR) lz -= s * amp * (i === P.shinR ? 1 : 0.45);
-  if (i === P.larmL || i === P.uarmL) lz -= s * amp * (i === P.larmL ? 0.85 : 0.4);
-  if (i === P.larmR || i === P.uarmR) lz += s * amp * (i === P.larmR ? 0.85 : 0.4);
-  if (a.strikeT > 0 && (i === P.larmR || i === P.uarmR)) {
-    lz += 0.42;
-    ly += 0.08;
+  if (!kicking) {
+    if (i === P.shinL || i === P.thighL) lz += s * amp * (i === P.shinL ? 1 : 0.45);
+    if (i === P.shinR || i === P.thighR) lz -= s * amp * (i === P.shinR ? 1 : 0.45);
   }
-  if (a.kickT > 0 && (i === P.shinR || i === P.thighR)) lz += 0.45;
+  if (!punching && !shoving) {
+    if (i === P.larmL || i === P.uarmL) lz -= s * amp * (i === P.larmL ? 0.85 : 0.4);
+    if (i === P.larmR || i === P.uarmR) lz += s * amp * (i === P.larmR ? 0.85 : 0.4);
+  }
+
+  if (punching) {
+    const u = actionUnit(a.strikeT, strikeDuration(a));
+    const wind: [number, number, number] = [0.11, 0.18, -0.3];
+    const hit: [number, number, number] = [-0.05, 0.05, 0.64];
+    let off: [number, number, number];
+    if (u < 0.3) off = lerp3([0, 0, 0], wind, smooth01(u / 0.3));
+    else if (u < 0.52) off = lerp3(wind, hit, smooth01((u - 0.3) / 0.22));
+    else off = lerp3(hit, [0, 0, 0], smooth01((u - 0.52) / 0.48));
+    const k = i === P.larmR ? 1 : i === P.uarmR ? 0.48 : 0;
+    if (k) {
+      lx += off[0] * k;
+      ly += off[1] * k;
+      lz += off[2] * k;
+    }
+    if (i === P.larmL || i === P.uarmL) {
+      const g = i === P.larmL ? 1 : 0.4;
+      lz += (u < 0.52 ? 0.14 : 0.14 * (1 - (u - 0.52) / 0.48)) * g;
+    }
+    if (i === P.spine) lz += off[2] * 0.12;
+    if (i === P.head) lz += off[2] * 0.06;
+  }
+
+  if (kicking) {
+    const u = actionUnit(a.kickT, KICK_DUR);
+    const chamber: [number, number, number] = [0.02, 0.28, -0.08];
+    const snap: [number, number, number] = [0.02, 0.1, 0.72];
+    let off: [number, number, number];
+    if (u < 0.32) off = lerp3([0, 0, 0], chamber, smooth01(u / 0.32));
+    else if (u < 0.5) off = lerp3(chamber, snap, smooth01((u - 0.32) / 0.18));
+    else off = lerp3(snap, [0, 0, 0], smooth01((u - 0.5) / 0.5));
+    if (i === P.shinR) {
+      lx += off[0];
+      ly += off[1];
+      lz += off[2];
+    } else if (i === P.thighR) {
+      lx += off[0] * 0.4;
+      ly += off[1] * 0.7;
+      lz += off[2] * 0.4;
+    } else if (i === P.shinL || i === P.thighL) {
+      lz -= 0.06;
+    } else if (i === P.spine) lz += off[2] * 0.08;
+  }
+
+  if (shoving) {
+    const u = actionUnit(a.shoveT, SHOVE_DUR);
+    const gather: [number, number, number] = [0, 0.06, -0.08];
+    const push: [number, number, number] = [0, 0.02, 0.5];
+    let off: [number, number, number];
+    if (u < 0.34) off = lerp3([0, 0, 0], gather, smooth01(u / 0.34));
+    else if (u < 0.55) off = lerp3(gather, push, smooth01((u - 0.34) / 0.21));
+    else off = lerp3(push, [0, 0, 0], smooth01((u - 0.55) / 0.45));
+    if (i === P.larmR || i === P.larmL) {
+      const side = i === P.larmL ? -1 : 1;
+      lx += off[0] + side * 0.04;
+      ly += off[1];
+      lz += off[2];
+    } else if (i === P.uarmR || i === P.uarmL) {
+      lz += off[2] * 0.45;
+      ly += off[1] * 0.5;
+    } else if (i === P.spine) lz += off[2] * 0.2;
+    else if (i === P.head) lz += off[2] * 0.1;
+  }
+
   if (a.loco === "stumble") {
     const n = spd > 0.05 ? spd : 1;
-    lz += (a.vx * facing(a.yaw).x + a.vz * facing(a.yaw).z) / n * 0.12;
+    lz += ((a.vx * facing(a.yaw).x + a.vz * facing(a.yaw).z) / n) * 0.12;
     ly -= 0.08;
   }
   if (a.loco === "getup" || (a.body && a.body.mode === "getup")) {
@@ -206,6 +307,39 @@ export function reposeActor(a: Actor) {
   if (a.body) snapToPose(a.body, a);
 }
 
+export function meleeTip(a: Actor, kind: "strike" | "kick" | "shove") {
+  const f = facing(a.yaw);
+  if (!a.body) {
+    if (kind === "kick") return { x: a.x + f.x * 0.5, y: a.y + 0.26, z: a.z + f.z * 0.5, r: 0.12 };
+    if (kind === "shove") return { x: a.x + f.x * 0.42, y: a.y + 1.12, z: a.z + f.z * 0.42, r: 0.16 };
+    return { x: a.x + f.x * 0.58, y: a.y + 1.12, z: a.z + f.z * 0.58, r: 0.11 };
+  }
+  if (kind === "kick") {
+    const p = a.body.parts[P.shinR]!;
+    return { x: p.x + f.x * 0.06, y: p.y, z: p.z + f.z * 0.06, r: p.r + 0.03 };
+  }
+  if (kind === "shove") {
+    const p = a.body.parts[P.spine]!;
+    return { x: p.x + f.x * 0.16, y: p.y, z: p.z + f.z * 0.16, r: 0.15 };
+  }
+  const hand = a.body.parts[P.larmR]!;
+  const el = a.body.parts[P.uarmR]!;
+  let dx = hand.x - el.x;
+  let dy = hand.y - el.y;
+  let dz = hand.z - el.z;
+  const len = Math.hypot(dx, dy, dz) || 1;
+  const extra = WEAPON_STATS[a.weapon]?.reach ?? 0.1;
+  dx /= len;
+  dy /= len;
+  dz /= len;
+  return {
+    x: hand.x + dx * extra,
+    y: hand.y + dy * extra,
+    z: hand.z + dz * extra,
+    r: 0.1 + extra * 0.08,
+  };
+}
+
 export function nearestPart(body: Physique, x: number, y: number, z: number) {
   let best = 0;
   let bd = 1e9;
@@ -232,9 +366,10 @@ export function applyImpulseToNearest(
   if (!a.body) return -1;
   const i = nearestPart(a.body, x, y, z);
   const p = a.body.parts[i]!;
-  p.vx += ix * p.invM;
-  p.vy += iy * p.invM;
-  p.vz += iz * p.invM;
+  const scale = a.body.mode === "stance" ? 0.32 : 1;
+  p.vx += ix * p.invM * scale;
+  p.vy += iy * p.invM * scale;
+  p.vz += iz * p.invM * scale;
   a.body.lastHit = i;
   return i;
 }
@@ -282,6 +417,49 @@ function solveDist(pa: Particle, pb: Particle, rest: number, compliance: number,
   return C;
 }
 
+function solveHinge(pa: Particle, pb: Particle, pc: Particle, minCos: number, maxCos: number, compliance: number, h: number) {
+  const ux = pa.x - pb.x;
+  const uy = pa.y - pb.y;
+  const uz = pa.z - pb.z;
+  const vx = pc.x - pb.x;
+  const vy = pc.y - pb.y;
+  const vz = pc.z - pb.z;
+  const ul = Math.hypot(ux, uy, uz);
+  const vl = Math.hypot(vx, vy, vz);
+  if (ul < 1e-5 || vl < 1e-5) return;
+  const c = (ux * vx + uy * vy + uz * vz) / (ul * vl);
+  let target = c;
+  if (c < minCos) target = minCos;
+  else if (c > maxCos) target = maxCos;
+  else return;
+  const nx = uy * vz - uz * vy;
+  const ny = uz * vx - ux * vz;
+  const nz = ux * vy - uy * vx;
+  const nl = Math.hypot(nx, ny, nz);
+  if (nl < 1e-8) return;
+  const invN = 1 / nl;
+  const px = (ny * vz - nz * vy) * invN;
+  const py = (nz * vx - nx * vz) * invN;
+  const pz = (nx * vy - ny * vx) * invN;
+  const qx = (ny * uz - nz * uy) * invN;
+  const qy = (nz * ux - nx * uz) * invN;
+  const qz = (nx * uy - ny * ux) * invN;
+  const C = c - target;
+  const alpha = compliance / (h * h);
+  const w = pa.invM + pc.invM + pb.invM * 0.35;
+  if (w <= 0) return;
+  const dl = -C / (w + alpha);
+  pa.x += qx * pa.invM * dl;
+  pa.y += qy * pa.invM * dl;
+  pa.z += qz * pa.invM * dl;
+  pc.x -= px * pc.invM * dl;
+  pc.y -= py * pc.invM * dl;
+  pc.z -= pz * pc.invM * dl;
+  pb.x -= (qx * pa.invM - px * pc.invM) * dl * 0.35;
+  pb.y -= (qy * pa.invM - py * pc.invM) * dl * 0.35;
+  pb.z -= (qz * pa.invM - pz * pc.invM) * dl * 0.35;
+}
+
 function solveContact(pa: Particle, pb: Particle, h: number) {
   const min = pa.r + pb.r;
   const dx = pa.x - pb.x;
@@ -324,11 +502,20 @@ function poseCompliance(a: Actor, i: number) {
     if (i === P.pelvis) return 0.00005 * (1 + inj);
     return 0.00012 * (1 + inj * 2);
   }
-  if (i === P.pelvis) return 0.0000003;
-  if (i === P.shinL || i === P.shinR) return 0.00003 * (1 + inj * 3 + frac * 12);
-  if (i === P.head) return 0.00006 * (1 + inj * 2);
-  let c = 0.00009 * (1 + inj * 3 + frac * 14);
-  if (a.loco === "stumble") c *= 5;
+  if (a.strikeT > 0 && (i === P.larmR || i === P.uarmR || i === P.spine)) return 0.0000035 * (1 + frac * 8);
+  if (a.kickT > 0 && (i === P.shinR || i === P.thighR || i === P.pelvis)) return 0.0000035 * (1 + frac * 8);
+  if (a.shoveT > 0 && (i === P.larmL || i === P.larmR || i === P.uarmL || i === P.uarmR || i === P.spine)) {
+    return 0.0000045 * (1 + frac * 8);
+  }
+  if (i === P.pelvis) return 0.00000022;
+  if (i === P.spine) return 0.000018 * (1 + inj);
+  if (i === P.shinL || i === P.shinR) return 0.000012 * (1 + inj * 3 + frac * 12);
+  if (i === P.head) return 0.000028 * (1 + inj * 2);
+  if (i === P.thighL || i === P.thighR) return 0.000022 * (1 + inj * 3 + frac * 12);
+  let c = 0.00004 * (1 + inj * 3 + frac * 14);
+  if (a.loco === "stumble") c *= 2.6;
+  if (a.grabbedBy) c *= 3.5;
+  if (a.body?.grab && (i === P.larmR || i === P.uarmR)) c *= 5;
   return c;
 }
 
@@ -353,13 +540,13 @@ function injureImpact(w: World, a: Actor, i: number, vn: number, h: number) {
     a.body.lastVn = Math.max(a.body.lastVn, vn);
     a.body.lastHit = i;
   }
-  if (a.body?.mode === "stance" && vn > 4.8) {
-    a.balance = Math.max(0, a.balance - extra * 0.12);
-    if (a.balance < 0.22) {
+  if (a.body?.mode === "stance" && vn > 5.4) {
+    a.balance = Math.max(0, a.balance - extra * 0.1);
+    if (a.balance < 0.18) {
       a.loco = "ragdoll";
       a.locoT = 0.7 + extra * 0.08;
       a.body.mode = "ragdoll";
-    } else if (a.balance < 0.5) {
+    } else if (a.balance < 0.48) {
       a.loco = "stumble";
       a.locoT = 0.4;
     }
@@ -502,20 +689,104 @@ function nearbyCols(w: World, a: Actor): Collider[] {
 
 function solvePiles(w: World, a: Actor, h: number) {
   if (!a.body) return;
+  const parts = a.body.parts;
+  const stanceA = a.body.mode === "stance";
+  if (!stanceA) {
+    for (let i = 0; i < NPART; i++) {
+      const pa = parts[i]!;
+      for (let j = i + 2; j < NPART; j++) {
+        if (BONE_SKIP.has(i * 16 + j) || BONE_SKIP.has(j * 16 + i)) continue;
+        if (j - i === 1 && (i === P.uarmL || i === P.uarmR || i === P.thighL || i === P.thighR)) continue;
+        solveContact(pa, parts[j]!, h);
+      }
+    }
+  }
+  const core = CORE_PARTS;
   for (const o of w.nearby(a.x, a.z, 2.2)) {
     if (o.id <= a.id || !o.body) continue;
-    for (let i = 0; i < NPART; i++) {
+    const stanceB = o.body.mode === "stance";
+    const listA = stanceA ? core : ALL_PARTS;
+    const listB = stanceB ? core : ALL_PARTS;
+    for (const i of listA) {
       const pa = a.body.parts[i]!;
-      for (let j = 0; j < NPART; j++) {
+      for (const j of listB) {
         const pb = o.body.parts[j]!;
         const vn = solveContact(pa, pb, h);
+        if (vn === 0) continue;
+        if (stanceA && stanceB) {
+          if (vn < -6) {
+            injureImpact(w, a, i, -vn, h);
+            injureImpact(w, o, j, -vn, h);
+          }
+          continue;
+        }
         if (vn < -IMPACT_VN) {
           injureImpact(w, a, i, -vn, h);
           injureImpact(w, o, j, -vn, h);
-        } else if (vn !== 0 && pa.y > pb.y && PART_REGION[j] === "torso") {
+        } else if (pa.y > pb.y && PART_REGION[j] === "torso") {
           const crush = Math.max(0, -pa.vy) * h * 0.15;
           if (crush > 0.002) o.injuries.torso.bruise += crush;
         }
+      }
+    }
+  }
+}
+
+function solveProps(w: World, a: Actor, h: number) {
+  const body = a.body;
+  if (!body) return;
+  for (const pr of w.props) {
+    if (pr.heldBy || pr.kind === "wall" || pr.kind === "roof") continue;
+    if (Math.abs(pr.x - a.x) > 2.4 || Math.abs(pr.z - a.z) > 2.4) continue;
+    const hx = Math.max(0.12, pr.sx * 0.5);
+    const hy = Math.max(0.12, pr.sy);
+    const hz = Math.max(0.12, pr.sz * 0.5);
+    const minX = pr.x - hx;
+    const maxX = pr.x + hx;
+    const minY = pr.y;
+    const maxY = pr.y + hy;
+    const minZ = pr.z - hz;
+    const maxZ = pr.z + hz;
+    const stance = body.mode === "stance";
+    for (let i = 0; i < NPART; i++) {
+      if (stance && i !== P.pelvis && i !== P.spine && i !== P.head) continue;
+      const p = body.parts[i]!;
+      if (p.x < minX - p.r || p.x > maxX + p.r || p.z < minZ - p.r || p.z > maxZ + p.r) continue;
+      if (p.y < minY - p.r || p.y > maxY + p.r) continue;
+      const cx = clamp(p.x, minX, maxX);
+      const cy = clamp(p.y, minY, maxY);
+      const cz = clamp(p.z, minZ, maxZ);
+      let dx = p.x - cx;
+      let dy = p.y - cy;
+      let dz = p.z - cz;
+      let d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > p.r * p.r) continue;
+      let nx: number;
+      let ny: number;
+      let nz: number;
+      let pen: number;
+      if (d2 < 1e-8) {
+        ny = 1;
+        nx = 0;
+        nz = 0;
+        pen = p.r;
+      } else {
+        const d = Math.sqrt(d2);
+        nx = dx / d;
+        ny = dy / d;
+        nz = dz / d;
+        pen = p.r - d;
+      }
+      p.x += nx * pen;
+      p.y += ny * pen;
+      p.z += nz * pen;
+      const vn = -(p.vx * nx + p.vy * ny + p.vz * nz);
+      if (vn > IMPACT_VN) injureImpact(w, a, i, vn, h);
+      if (pr.dynamic && !pr.anchored) {
+        const rel = 1 / (1 / Math.max(0.5, 1 / p.invM) + pr.mass);
+        pr.vx -= nx * vn * rel * 0.8;
+        pr.vy -= ny * vn * rel * 0.5;
+        pr.vz -= nz * vn * rel * 0.8;
       }
     }
   }
@@ -592,14 +863,24 @@ function writeback(a: Actor) {
     const dz = pel.z - t.z;
     const push = Math.hypot(dx, dz);
     if (push > 0.02) {
-      a.x += dx * 0.55;
-      a.z += dz * 0.55;
-      a.vx += dx * 4;
-      a.vz += dz * 4;
+      a.x += dx * 0.35;
+      a.z += dz * 0.35;
+      a.vx += dx * 1.4;
+      a.vz += dz * 1.4;
     }
     return;
   }
   const pel = body.parts[P.pelvis]!;
+  if (body.mode === "getup") {
+    a.x = pel.x;
+    a.z = pel.z;
+    a.y = Math.max(0, pel.y - PELVIS_H * (a.height / 1.7) * 0.92);
+    a.vx = pel.vx * 0.22;
+    a.vy = pel.vy * 0.35;
+    a.vz = pel.vz * 0.22;
+    a.grounded = body.parts[P.shinL]!.y < 0.32 || body.parts[P.shinR]!.y < 0.32;
+    return;
+  }
   a.x = pel.x;
   a.z = pel.z;
   a.y = Math.max(0, pel.y - PELVIS_H * (a.height / 1.7) * 0.92);
@@ -650,6 +931,10 @@ export function stepBodies(w: World, dt: number) {
           const pb = a.body.parts[j.b]!;
           solveDist(pa, pb, j.rest, jointCompliance(a, j), h);
         }
+        const hingeC = a.body.mode === "ragdoll" ? 0.00008 : 0.00002;
+        for (const [ia, ib, ic, lo, hi] of HINGES) {
+          solveHinge(a.body.parts[ia]!, a.body.parts[ib]!, a.body.parts[ic]!, lo, hi, hingeC, h);
+        }
         if (a.body.mode !== "ragdoll") {
           const t = poseTargets(a);
           for (let i = 0; i < NPART; i++) {
@@ -669,17 +954,18 @@ export function stepBodies(w: World, dt: number) {
         solveGround(w, a, h);
         solveAABB(w, a, cols, h);
         solvePiles(w, a, h);
+        solveProps(w, a, h);
       }
     }
     for (const a of w.actors) {
       if (!a.body) continue;
       updateVel(a.body, h);
       for (const p of a.body.parts) {
-        if (p.y <= p.r + 0.01) {
-          if (p.vy > 0) p.vy *= 0.15;
+        if (p.y <= p.r + 0.02) {
+          if (p.vy > 0) p.vy *= 0.12;
           else p.vy = 0;
-          p.vx *= 0.72;
-          p.vz *= 0.72;
+          p.vx *= 0.48;
+          p.vz *= 0.48;
           p.y = Math.max(p.y, p.r);
         }
       }
@@ -711,8 +997,8 @@ export function stepBodies(w: World, dt: number) {
     }
     if (a.body.mode === "ragdoll" && a.alive && a.consciousness > 0.25) {
       const pel = a.body.parts[P.pelvis]!;
-      const down = pel.y < 0.55;
-      const slow = Math.hypot(a.vx, a.vz) < 2.4;
+      const down = pel.y < 0.4;
+      const slow = Math.hypot(pel.vx, pel.vz) < 1.45;
       if (a.grounded && down && slow && a.locoT <= 0) {
         a.loco = "getup";
         a.getupT = 0.85 + (1 - a.consciousness) * 0.55;
@@ -720,7 +1006,7 @@ export function stepBodies(w: World, dt: number) {
       }
     }
     if (a.body.mode === "getup") {
-      if (a.getupT <= 0 && stance > 0.45) {
+      if ((a.getupT <= 0 && stance > 0.42) || a.getupT < -1.35) {
         a.loco = "idle";
         a.balance = 0.62;
         a.body.mode = "stance";

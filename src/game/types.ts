@@ -410,11 +410,11 @@ export const WEAPON_STATS: Record<
   WeaponKind,
   { mass: number; reach: number; speed: number; blunt: number; cut: number; pierce: number; fire: number }
 > = {
-  fist: { mass: 0.4, reach: 0.85, speed: 1.35, blunt: 0.55, cut: 0, pierce: 0, fire: 0 },
-  knife: { mass: 0.5, reach: 0.95, speed: 1.4, blunt: 0.1, cut: 1.1, pierce: 0.7, fire: 0 },
-  club: { mass: 2.4, reach: 1.15, speed: 0.75, blunt: 1.4, cut: 0, pierce: 0, fire: 0 },
-  spear: { mass: 1.8, reach: 1.85, speed: 0.95, blunt: 0.25, cut: 0.2, pierce: 1.3, fire: 0 },
-  torch: { mass: 1.1, reach: 1.05, speed: 1.0, blunt: 0.5, cut: 0, pierce: 0, fire: 1 },
-  board: { mass: 2.0, reach: 1.2, speed: 0.8, blunt: 1.05, cut: 0.15, pierce: 0, fire: 0 },
-  pitchfork: { mass: 2.2, reach: 1.7, speed: 0.85, blunt: 0.3, cut: 0.1, pierce: 1.15, fire: 0 },
+  fist: { mass: 0.4, reach: 0.1, speed: 1.35, blunt: 0.55, cut: 0, pierce: 0, fire: 0 },
+  knife: { mass: 0.5, reach: 0.2, speed: 1.4, blunt: 0.1, cut: 1.1, pierce: 0.7, fire: 0 },
+  club: { mass: 2.4, reach: 0.34, speed: 0.75, blunt: 1.4, cut: 0, pierce: 0, fire: 0 },
+  spear: { mass: 1.8, reach: 0.72, speed: 0.95, blunt: 0.25, cut: 0.2, pierce: 1.3, fire: 0 },
+  torch: { mass: 1.1, reach: 0.24, speed: 1.0, blunt: 0.5, cut: 0, pierce: 0, fire: 1 },
+  board: { mass: 2.0, reach: 0.32, speed: 0.8, blunt: 1.05, cut: 0.15, pierce: 0, fire: 0 },
+  pitchfork: { mass: 2.2, reach: 0.62, speed: 0.85, blunt: 0.3, cut: 0.1, pierce: 1.15, fire: 0 },
 };
