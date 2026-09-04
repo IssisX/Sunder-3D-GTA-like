@@ -151,7 +151,14 @@ export class ActiveBodyControl {
 
       let frequencyGain = 1;
       let maxDv = baseMaxDv;
-      if (taskPriority >= TASK_PRIORITY.ACTION) {
+      if (taskPriority >= TASK_PRIORITY.CONTACT_CRITICAL) {
+        // A support foot/knee/hip is the physical foundation of the action. Give
+        // it more bandwidth than the moving effector without making it rigid or
+        // bypassing contact; world collision is still solved afterward.
+        frequencyGain = 2.28;
+        authority *= 1.42;
+        maxDv *= 2.15;
+      } else if (taskPriority >= TASK_PRIORITY.ACTION) {
         frequencyGain = 1.9 + taskWeight * 0.34;
         authority *= 1.24 + taskWeight * 0.24;
         maxDv *= 1.95;
@@ -165,7 +172,7 @@ export class ActiveBodyControl {
         maxDv *= 1.38;
       }
 
-      authority = Math.min(1.35, authority);
+      authority = Math.min(1.42, authority);
       if (authority < 0.015) continue;
 
       const ex = bodyTaskTargets.targetXFor(a, node) - rig.x[node]!;
