@@ -1,4 +1,3 @@
-import * as THREE from "three";
 import type { Actions } from "./input";
 import type { Actor } from "./types";
 import { WEAPON_STATS } from "./types";
@@ -10,7 +9,7 @@ import { applyActorMeleeContact, applyPropMeleeContact } from "./melee-contact";
 const ENTITY_ID_CAP = 8192;
 const ACTION_CAP = 128;
 const NONE = 0;
-const STRIKE = 1;
+const PUNCH = 1;
 const KICK = 2;
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
@@ -97,16 +96,11 @@ export class MeleeKinematics {
   private readonly supportX = new Float32Array(ACTION_CAP);
   private readonly supportY = new Float32Array(ACTION_CAP);
   private readonly supportZ = new Float32Array(ACTION_CAP);
+  private readonly punchRight = new Uint8Array(ACTION_CAP);
+  private readonly nextPunchRight = new Uint8Array(ACTION_CAP);
   private slotCount = 0;
-  private playerStrikeQueued = false;
+  private playerPunchQueued = false;
   private playerKickQueued = false;
-
-  private readonly v0 = new THREE.Vector3();
-  private readonly v1 = new THREE.Vector3();
-  private readonly v2 = new THREE.Vector3();
-  private readonly v3 = new THREE.Vector3();
-  private readonly q0 = new THREE.Quaternion();
-  private readonly e0 = new THREE.Euler(0, 0, 0, "XYZ");
 
   constructor(private readonly bodies: PhysicalBodies) {
     this.slotById.fill(-1);
@@ -129,8 +123,10 @@ export class MeleeKinematics {
     this.duration.fill(0);
     this.hitId.fill(-1);
     this.hasPrev.fill(0);
+    this.punchRight.fill(0);
+    this.nextPunchRight.fill(0);
     this.slotCount = 0;
-    this.playerStrikeQueued = false;
+    this.playerPunchQueued = false;
     this.playerKickQueued = false;
   }
 
@@ -147,7 +143,7 @@ export class MeleeKinematics {
   captureInput(input: Actions) {
     let captured = false;
     if (input.attackPressed) {
-      this.playerStrikeQueued = true;
+      this.playerPunchQueued = true;
       input.attackPressed = false;
       captured = true;
     }
@@ -169,16 +165,16 @@ export class MeleeKinematics {
     if (slot >= 0 && this.kind[slot] === NONE && canAct(p)) {
       if (this.playerKickQueued && p.grounded) {
         this.begin(p, slot, KICK);
-      } else if (this.playerStrikeQueued && p.strikeCd <= 0) {
-        this.begin(p, slot, STRIKE);
+      } else if (this.playerPunchQueued && p.strikeCd <= 0) {
+        this.begin(p, slot, PUNCH);
       }
     }
-    this.playerStrikeQueued = false;
+    this.playerPunchQueued = false;
     this.playerKickQueued = false;
 
     if (slot >= 0 && this.kind[slot] !== NONE) {
       const u = this.time[slot]! / Math.max(1e-5, this.duration[slot]!);
-      const move = this.kind[slot] === KICK ? 0.22 : 0.48 + pulse(u, 0.2, 0.45, 0.72) * 0.18;
+      const move = this.kind[slot] === KICK ? 0.2 : 0.42 + pulse(u, 0.18, 0.5, 0.76) * 0.18;
       input.moveX *= move;
       input.moveY *= move;
       input.sprint = false;
@@ -208,7 +204,7 @@ export class MeleeKinematics {
         const dz = player.z - a.z;
         const reach = WEAPON_STATS[a.weapon].reach + player.radius + 0.35;
         if (dx * dx + dz * dz <= reach * reach) {
-          this.begin(a, slot, STRIKE);
+          this.begin(a, slot, PUNCH);
           a.attackCd = 0.7 / (0.7 + a.competence);
           a.targetId = player.id;
         }
@@ -223,18 +219,23 @@ export class MeleeKinematics {
       const u = this.time[slot]! / Math.max(1e-5, this.duration[slot]!);
       const fx = -Math.sin(a.yaw);
       const fz = -Math.cos(a.yaw);
-      if (this.kind[slot] === STRIKE) {
-        const drive = pulse(u, 0.16, 0.48, 0.72);
-        a.intendSpeed = Math.min(a.intendSpeed, 0.55 + drive * 0.8);
-        a.vx += fx * drive * h * 3.8;
-        a.vz += fz * drive * h * 3.8;
+      if (this.kind[slot] === PUNCH) {
+        const fist = a.weapon === "fist";
+        const right = this.punchRight[slot] !== 0;
+        const drive = fist
+          ? pulse(u, right ? 0.16 : 0.12, right ? 0.52 : 0.46, right ? 0.72 : 0.68)
+          : pulse(u, 0.16, 0.48, 0.72);
+        a.intendSpeed = Math.min(a.intendSpeed, fist ? 0.42 + drive * 0.72 : 0.55 + drive * 0.8);
+        const rootDrive = fist ? (right ? 3.2 : 2.2) : 3.8;
+        a.vx += fx * drive * h * rootDrive;
+        a.vz += fz * drive * h * rootDrive;
       } else {
-        const drive = pulse(u, 0.26, 0.58, 0.74);
-        a.intendSpeed = Math.min(a.intendSpeed, 0.2);
-        a.vx *= 1 - Math.min(0.5, h * 7);
-        a.vz *= 1 - Math.min(0.5, h * 7);
-        a.vx += fx * drive * h * 1.5;
-        a.vz += fz * drive * h * 1.5;
+        const drive = pulse(u, 0.38, 0.64, 0.8);
+        a.intendSpeed = Math.min(a.intendSpeed, 0.18);
+        a.vx *= 1 - Math.min(0.55, h * 8);
+        a.vz *= 1 - Math.min(0.55, h * 8);
+        a.vx += fx * drive * h * 1.35;
+        a.vz += fz * drive * h * 1.35;
       }
     }
   }
@@ -254,8 +255,12 @@ export class MeleeKinematics {
 
       this.time[slot] += h;
       const u = clamp01(this.time[slot]! / Math.max(1e-5, this.duration[slot]!));
-      if (this.kind[slot] === STRIKE) this.applyStrikePose(a, rig, u);
-      else this.applyKickPose(a, rig, slot, u);
+      if (this.kind[slot] === PUNCH) {
+        if (a.weapon === "fist") this.applyBoxingPunchPose(a, rig, slot, u);
+        else this.applyWeaponPose(a, rig, u);
+      } else {
+        this.applyKickPose(a, rig, slot, u);
+      }
 
       this.resolveContact(w, a, rig, slot, h, u);
       if (u >= 1) this.end(slot);
@@ -274,6 +279,7 @@ export class MeleeKinematics {
     const slot = this.slotCount++;
     this.slotById[a.id] = slot;
     this.actorId[slot] = a.id;
+    this.nextPunchRight[slot] = 0;
     return slot;
   }
 
@@ -288,15 +294,23 @@ export class MeleeKinematics {
     this.hitId[slot] = -1;
     this.hasPrev[slot] = 0;
 
-    if (kind === STRIKE) {
+    if (kind === PUNCH) {
       const speed = WEAPON_STATS[a.weapon].speed;
-      const thrust = a.weapon === "spear" || a.weapon === "pitchfork" || a.weapon === "knife";
-      this.duration[slot] = Math.max(0.28, Math.min(0.58, (thrust ? 0.39 : 0.44) / Math.sqrt(speed)));
-      a.strikeCd = Math.max(a.strikeCd, 0.42 / speed);
-      a.stamina = Math.max(0, a.stamina - 0.055);
+      if (a.weapon === "fist") {
+        const right = this.nextPunchRight[slot]!;
+        this.punchRight[slot] = right;
+        this.nextPunchRight[slot] = right ? 0 : 1;
+        this.duration[slot] = right ? 0.4 : 0.33;
+      } else {
+        this.punchRight[slot] = 1;
+        const thrust = a.weapon === "spear" || a.weapon === "pitchfork" || a.weapon === "knife";
+        this.duration[slot] = Math.max(0.28, Math.min(0.58, (thrust ? 0.39 : 0.44) / Math.sqrt(speed)));
+      }
+      a.strikeCd = Math.max(a.strikeCd, 0.4 / speed);
+      a.stamina = Math.max(0, a.stamina - 0.05);
       if (a.kind === "player") a.alert = Math.max(a.alert, 0.1);
     } else {
-      this.duration[slot] = 0.52;
+      this.duration[slot] = 0.58;
       a.stamina = Math.max(0, a.stamina - 0.075);
       const rig = this.bodies.get(a);
       if (rig?.initialized) {
@@ -338,20 +352,34 @@ export class MeleeKinematics {
     rig.z[node] += (tz - rig.z[node]!) * strength;
   }
 
-  private localToWorld(a: Actor, lx: number, ly: number, lz: number, out: THREE.Vector3) {
+  private localToWorld(
+    a: Actor,
+    lx: number,
+    ly: number,
+    lz: number,
+  ) {
     const scale = bodyScale(a);
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
     const rx = Math.cos(a.yaw);
     const rz = -Math.sin(a.yaw);
-    out.set(
+    return [
       a.x + rx * lx * scale + fx * lz * scale,
       a.y + ly * scale,
       a.z + rz * lx * scale + fz * lz * scale,
-    );
+    ] as const;
   }
 
-  private solveArmIK(a: Actor, rig: BodyRig, right: boolean, tx: number, ty: number, tz: number, strength: number) {
+  private solveArmIK(
+    a: Actor,
+    rig: BodyRig,
+    right: boolean,
+    tx: number,
+    ty: number,
+    tz: number,
+    strength: number,
+    tuck: number,
+  ) {
     const rootNode = right ? BODY.rShoulder : BODY.lShoulder;
     const jointNode = right ? BODY.rElbow : BODY.lElbow;
     const endNode = right ? BODY.rHand : BODY.lHand;
@@ -370,17 +398,20 @@ export class MeleeKinematics {
     dy /= d;
     dz /= d;
     const minReach = Math.abs(upper - lower) + 0.018 * scale;
-    const maxReach = (upper + lower) * 0.985;
+    const maxReach = (upper + lower) * 0.988;
     const reach = d < minReach ? minReach : d > maxReach ? maxReach : d;
     const along = (upper * upper - lower * lower + reach * reach) / (2 * reach);
     const bend = Math.sqrt(Math.max(0, upper * upper - along * along));
 
     const sign = right ? 1 : -1;
-    const rx = Math.cos(a.yaw) * sign;
-    const rz = -Math.sin(a.yaw) * sign;
-    let px = rx * 0.92 + Math.sin(a.yaw) * 0.12;
-    let py = -0.3;
-    let pz = rz + Math.cos(a.yaw) * 0.12;
+    const sideX = Math.cos(a.yaw) * sign;
+    const sideZ = -Math.sin(a.yaw) * sign;
+    const fx = -Math.sin(a.yaw);
+    const fz = -Math.cos(a.yaw);
+    const lateral = 0.2 + (1 - clamp01(tuck)) * 0.64;
+    let px = sideX * lateral - fx * 0.08;
+    let py = -0.24;
+    let pz = sideZ * lateral - fz * 0.08;
     const proj = px * dx + py * dy + pz * dz;
     px -= dx * proj;
     py -= dy * proj;
@@ -403,6 +434,20 @@ export class MeleeKinematics {
     rig.x[endNode] += (ex - rig.x[endNode]!) * strength;
     rig.y[endNode] += (ey - rig.y[endNode]!) * strength;
     rig.z[endNode] += (ez - rig.z[endNode]!) * strength;
+  }
+
+  private solveArmIKLocal(
+    a: Actor,
+    rig: BodyRig,
+    right: boolean,
+    lx: number,
+    ly: number,
+    lz: number,
+    strength: number,
+    tuck: number,
+  ) {
+    const p = this.localToWorld(a, lx, ly, lz);
+    this.solveArmIK(a, rig, right, p[0], p[1], p[2], strength, tuck);
   }
 
   private solveLegIK(
@@ -470,7 +515,74 @@ export class MeleeKinematics {
     rig.z[endNode] += (ez - rig.z[endNode]!) * strength;
   }
 
-  private applyStrikePose(a: Actor, rig: BodyRig, u: number) {
+  private solveLegIKLocal(
+    a: Actor,
+    rig: BodyRig,
+    left: boolean,
+    lx: number,
+    ly: number,
+    lz: number,
+    strength: number,
+    poleForward: number,
+  ) {
+    const p = this.localToWorld(a, lx, ly, lz);
+    this.solveLegIK(a, rig, left, p[0], p[1], p[2], strength, poleForward);
+  }
+
+  private applyBoxingPunchPose(a: Actor, rig: BodyRig, slot: number, u: number) {
+    const right = this.punchRight[slot] !== 0;
+    const sign = right ? 1 : -1;
+    const jab = !right;
+
+    const root = pulse(u, 0.0, jab ? 0.2 : 0.24, 0.78);
+    const pelvis = pulse(u, 0.025, jab ? 0.25 : 0.31, 0.8);
+    const spine = pulse(u, 0.065, jab ? 0.32 : 0.38, 0.82);
+    const shoulder = pulse(u, 0.105, jab ? 0.4 : 0.46, 0.84);
+    const elbow = pulse(u, 0.135, jab ? 0.47 : 0.52, 0.86);
+    const fistWave = pulse(u, 0.16, jab ? 0.53 : 0.58, 0.88);
+    const compression = pulse(u, 0.0, 0.18, 0.5);
+
+    const hipTurn = pelvis * (jab ? 0.065 : 0.14);
+    const chestTurn = spine * (jab ? 0.08 : 0.17);
+    const forwardLean = root * (jab ? 0.035 : 0.055);
+    const weightX = sign * pelvis * (jab ? 0.012 : 0.035);
+
+    this.setLocal(a, rig, BODY.pelvis, weightX, 0.82 - 0.025 * compression, -0.015 * compression, 0.76);
+    this.setLocal(a, rig, BODY.lHip, -0.14, 0.755 - 0.018 * compression, right ? -hipTurn : hipTurn, 0.68);
+    this.setLocal(a, rig, BODY.rHip, 0.14, 0.755 - 0.018 * compression, right ? hipTurn : -hipTurn, 0.72);
+    this.setLocal(a, rig, BODY.chest, -weightX * 0.45, 1.19 - 0.022 * compression, forwardLean + chestTurn * 0.32, 0.82);
+    this.setLocal(a, rig, BODY.head, -sign * 0.018 * spine, 1.565 - 0.012 * compression, 0.006 + forwardLean * 0.35, 0.56);
+
+    const punchShoulder = right ? BODY.rShoulder : BODY.lShoulder;
+    const guardShoulder = right ? BODY.lShoulder : BODY.rShoulder;
+    this.setLocal(a, rig, punchShoulder, sign * 0.245, 1.305 - 0.012 * compression, 0.08 + shoulder * (jab ? 0.1 : 0.17), 0.9);
+    this.setLocal(a, rig, guardShoulder, -sign * 0.255, 1.315, 0.065 - shoulder * 0.025, 0.76);
+
+    let extension: number;
+    if (u < 0.12) extension = smoother01(u / 0.12) * 0.08;
+    else if (u < (jab ? 0.52 : 0.57)) {
+      extension = 0.08 + 0.92 * smoother01((u - 0.12) / ((jab ? 0.52 : 0.57) - 0.12));
+    } else if (u < (jab ? 0.64 : 0.69)) extension = 1;
+    else if (u < 0.9) extension = 1 - smoother01((u - (jab ? 0.64 : 0.69)) / (0.9 - (jab ? 0.64 : 0.69)));
+    else extension = 0;
+
+    const fistX = sign * (0.19 - 0.105 * extension);
+    const fistY = 1.265 - 0.025 * extension;
+    const fistZ = 0.18 + extension * (jab ? 0.66 : 0.75);
+    const punchStrength = 0.7 + Math.max(elbow, fistWave) * 0.29;
+    this.solveArmIKLocal(a, rig, right, fistX, fistY, fistZ, punchStrength, 0.9);
+
+    const guardX = -sign * 0.175;
+    const guardY = 1.285;
+    const guardZ = 0.205 + 0.035 * shoulder;
+    this.solveArmIKLocal(a, rig, !right, guardX, guardY, guardZ, 0.9, 0.94);
+
+    const supportCompression = compression * (jab ? 0.025 : 0.045);
+    this.setLocal(a, rig, BODY.lKnee, -0.13, 0.42 - supportCompression, 0.04 * root, 0.42);
+    this.setLocal(a, rig, BODY.rKnee, 0.13, 0.42 - supportCompression, right ? 0.055 * pelvis : 0.025 * pelvis, 0.46);
+  }
+
+  private applyWeaponPose(a: Actor, rig: BodyRig, u: number) {
     const root = pulse(u, 0.0, 0.24, 0.74);
     const pelvis = pulse(u, 0.035, 0.29, 0.77);
     const spine = pulse(u, 0.075, 0.35, 0.8);
@@ -528,36 +640,39 @@ export class MeleeKinematics {
       hz = 0.45 * (1 - q);
     }
 
-    this.localToWorld(a, hx, hy, hz, this.v0);
-    this.solveArmIK(a, rig, true, this.v0.x, this.v0.y, this.v0.z, 0.72 + handWave * 0.26);
+    this.solveArmIKLocal(a, rig, true, hx, hy, hz, 0.72 + handWave * 0.26, 0.25);
 
     if (thrust) {
-      this.localToWorld(a, -0.12, 1.02, 0.34 + shoulder * 0.12, this.v1);
-      this.solveArmIK(a, rig, false, this.v1.x, this.v1.y, this.v1.z, 0.78 * shoulder);
+      this.solveArmIKLocal(a, rig, false, -0.12, 1.02, 0.34 + shoulder * 0.12, 0.78 * shoulder, 0.45);
     } else {
       const counter = heavy ? 0.22 : 0.13;
-      this.localToWorld(a, -0.29, 0.92 + shoulder * 0.08, -counter * shoulder, this.v1);
-      this.solveArmIK(a, rig, false, this.v1.x, this.v1.y, this.v1.z, 0.58 * shoulder);
+      this.solveArmIKLocal(a, rig, false, -0.29, 0.92 + shoulder * 0.08, -counter * shoulder, 0.58 * shoulder, 0.35);
     }
-
-    void root;
   }
 
   private applyKickPose(a: Actor, rig: BodyRig, slot: number, u: number) {
-    const root = pulse(u, 0.0, 0.23, 0.78);
-    const pelvis = pulse(u, 0.035, 0.29, 0.8);
-    const spine = pulse(u, 0.08, 0.35, 0.82);
-    const hip = pulse(u, 0.13, 0.43, 0.84);
-    const knee = pulse(u, 0.18, 0.52, 0.86);
-    const foot = pulse(u, 0.22, 0.6, 0.88);
+    let lean: number;
+    if (u < 0.2) lean = smoother01(u / 0.2);
+    else if (u < 0.42) lean = 1;
+    else if (u < 0.78) lean = 1 - smoother01((u - 0.42) / 0.36);
+    else lean = 0;
 
-    this.setLocal(a, rig, BODY.pelvis, -0.075 * pelvis, 0.82 - 0.055 * pelvis, -0.025 * root, 0.9);
-    this.setLocal(a, rig, BODY.chest, 0.055 * spine, 1.2 - 0.025 * spine, -0.08 * spine, 0.82);
-    this.setLocal(a, rig, BODY.head, 0.018 * spine, 1.58, -0.035 * spine, 0.48);
-    this.setLocal(a, rig, BODY.lShoulder, -0.27, 1.31, 0.13 * spine, 0.72);
-    this.setLocal(a, rig, BODY.rShoulder, 0.27, 1.31, -0.16 * spine, 0.78);
-    this.setLocal(a, rig, BODY.rHip, 0.13, 0.755, 0.14 * hip, 0.9);
-    this.setLocal(a, rig, BODY.lHip, -0.15, 0.755, -0.025 * pelvis, 0.78);
+    const root = pulse(u, 0.0, 0.24, 0.82);
+    const pelvis = pulse(u, 0.055, 0.34, 0.84);
+    const spine = pulse(u, 0.11, 0.4, 0.86);
+    const hip = pulse(u, 0.24, 0.52, 0.88);
+    const knee = pulse(u, 0.33, 0.6, 0.9);
+    const foot = pulse(u, 0.42, 0.67, 0.91);
+    const compression = pulse(u, 0.0, 0.22, 0.5);
+    const counter = pulse(u, 0.52, 0.73, 0.94);
+
+    this.setLocal(a, rig, BODY.pelvis, -0.065 * pelvis, 0.82 - 0.06 * compression, -0.055 * lean + 0.025 * hip, 0.92);
+    this.setLocal(a, rig, BODY.chest, 0.035 * spine, 1.2 - 0.045 * compression, 0.16 * lean - 0.025 * counter, 0.9);
+    this.setLocal(a, rig, BODY.head, 0.014 * spine, 1.575 - 0.02 * compression, 0.075 * lean - 0.008 * counter, 0.62);
+    this.setLocal(a, rig, BODY.lShoulder, -0.27, 1.31 - 0.02 * compression, 0.13 * lean + 0.085 * counter, 0.78);
+    this.setLocal(a, rig, BODY.rShoulder, 0.27, 1.31 - 0.02 * compression, 0.13 * lean - 0.12 * counter, 0.82);
+    this.setLocal(a, rig, BODY.rHip, 0.13, 0.755 - 0.025 * compression, 0.16 * hip, 0.94);
+    this.setLocal(a, rig, BODY.lHip, -0.15, 0.755 - 0.025 * compression, -0.03 * pelvis, 0.82);
 
     this.solveLegIK(
       a,
@@ -566,52 +681,60 @@ export class MeleeKinematics {
       this.supportX[slot]!,
       this.supportY[slot]!,
       this.supportZ[slot]!,
-      0.95,
-      0.52,
+      0.97,
+      0.56,
     );
 
     let lx: number;
     let ly: number;
     let lz: number;
-    if (u < 0.25) {
-      const q = smoother01(u / 0.25);
-      lx = 0.13 + 0.03 * q;
-      ly = 0.08 + 0.46 * q;
-      lz = -0.03 + 0.16 * q;
-    } else if (u < 0.57) {
-      const q = smoother01((u - 0.25) / 0.32);
-      lx = 0.16 - 0.055 * q;
+    if (u < 0.18) {
+      const q = smoother01(u / 0.18);
+      lx = 0.13 + 0.008 * q;
+      ly = 0.08 + 0.04 * q;
+      lz = -0.03 + 0.025 * q;
+    } else if (u < 0.4) {
+      const q = smoother01((u - 0.18) / 0.22);
+      lx = 0.138 + 0.025 * q;
+      ly = 0.12 + 0.42 * q;
+      lz = -0.005 + 0.15 * q;
+    } else if (u < 0.64) {
+      const q = smoother01((u - 0.4) / 0.24);
+      lx = 0.163 - 0.06 * q;
       ly = 0.54 + 0.035 * q;
-      lz = 0.13 + 0.72 * q;
-    } else if (u < 0.7) {
-      const q = smooth01((u - 0.57) / 0.13);
-      lx = 0.105 - 0.035 * q;
-      ly = 0.575 - 0.015 * q;
-      lz = 0.85 + 0.1 * q;
-    } else if (u < 0.84) {
-      const q = smoother01((u - 0.7) / 0.14);
-      lx = 0.07 + 0.08 * q;
-      ly = 0.56 - 0.16 * q;
-      lz = 0.95 - 0.72 * q;
+      lz = 0.145 + 0.72 * q;
+    } else if (u < 0.74) {
+      const q = smooth01((u - 0.64) / 0.1);
+      lx = 0.103 - 0.03 * q;
+      ly = 0.575 - 0.012 * q;
+      lz = 0.865 + 0.095 * q;
+    } else if (u < 0.88) {
+      const q = smoother01((u - 0.74) / 0.14);
+      lx = 0.073 + 0.075 * q;
+      ly = 0.563 - 0.17 * q;
+      lz = 0.96 - 0.73 * q;
     } else {
-      const q = smoother01((u - 0.84) / 0.16);
-      lx = 0.15 - 0.02 * q;
-      ly = 0.4 - 0.32 * q;
+      const q = smoother01((u - 0.88) / 0.12);
+      lx = 0.148 - 0.018 * q;
+      ly = 0.393 - 0.313 * q;
       lz = 0.23 - 0.26 * q;
     }
 
-    this.localToWorld(a, lx, ly, lz, this.v0);
-    this.solveLegIK(a, rig, false, this.v0.x, this.v0.y, this.v0.z, 0.98, 0.94);
+    this.solveLegIKLocal(a, rig, false, lx, ly, lz, 0.99, 0.98);
 
-    this.localToWorld(a, -0.3, 0.92 + 0.12 * knee, -0.18 * foot, this.v1);
-    this.solveArmIK(a, rig, false, this.v1.x, this.v1.y, this.v1.z, 0.66 * root);
-    this.localToWorld(a, 0.3, 0.92 + 0.08 * knee, 0.1 * foot, this.v1);
-    this.solveArmIK(a, rig, true, this.v1.x, this.v1.y, this.v1.z, 0.58 * root);
+    this.solveArmIKLocal(a, rig, false, -0.2, 1.08 + 0.08 * knee, 0.16 - 0.14 * foot, 0.78 * root, 0.84);
+    this.solveArmIKLocal(a, rig, true, 0.2, 1.08 + 0.06 * knee, 0.2 + 0.08 * foot, 0.74 * root, 0.84);
   }
 
   private resolveContact(w: World, a: Actor, rig: BodyRig, slot: number, dt: number, u: number) {
     const kind = this.kind[slot]!;
-    const active = kind === STRIKE ? u >= 0.36 && u <= 0.72 : u >= 0.47 && u <= 0.73;
+    const fist = kind === PUNCH && a.weapon === "fist";
+    const right = this.punchRight[slot] !== 0;
+    const active = kind === KICK
+      ? u >= 0.52 && u <= 0.76
+      : fist
+        ? u >= (right ? 0.38 : 0.34) && u <= (right ? 0.71 : 0.67)
+        : u >= 0.36 && u <= 0.72;
 
     let cx: number;
     let cy: number;
@@ -623,12 +746,14 @@ export class MeleeKinematics {
       cz = rig.z[BODY.rFoot]!;
       radius = nodeRadius(a, BODY.rFoot) * 1.08;
     } else {
-      const hx = rig.x[BODY.rHand]!;
-      const hy = rig.y[BODY.rHand]!;
-      const hz = rig.z[BODY.rHand]!;
-      let dx = hx - rig.x[BODY.rElbow]!;
-      let dy = hy - rig.y[BODY.rElbow]!;
-      let dz = hz - rig.z[BODY.rElbow]!;
+      const handNode = fist && !right ? BODY.lHand : BODY.rHand;
+      const elbowNode = fist && !right ? BODY.lElbow : BODY.rElbow;
+      const hx = rig.x[handNode]!;
+      const hy = rig.y[handNode]!;
+      const hz = rig.z[handNode]!;
+      let dx = hx - rig.x[elbowNode]!;
+      let dy = hy - rig.y[elbowNode]!;
+      let dz = hz - rig.z[elbowNode]!;
       let m = Math.hypot(dx, dy, dz);
       if (m < 1e-6) {
         dx = -Math.sin(a.yaw);
@@ -640,11 +765,11 @@ export class MeleeKinematics {
       dy /= m;
       dz /= m;
       const scale = bodyScale(a);
-      const extra = a.weapon === "fist" ? 0 : Math.max(0.1, WEAPON_STATS[a.weapon].reach - 0.68) * scale;
+      const extra = fist ? 0 : Math.max(0.1, WEAPON_STATS[a.weapon].reach - 0.68) * scale;
       cx = hx + dx * extra;
       cy = hy + dy * extra;
       cz = hz + dz * extra;
-      radius = (a.weapon === "fist" ? 0.105 : 0.075) * scale;
+      radius = (fist ? 0.11 : 0.075) * scale;
     }
 
     if (!this.hasPrev[slot]) {
@@ -704,7 +829,7 @@ export class MeleeKinematics {
         vy,
         vz,
       );
-      const transfer = kind === KICK ? 0.3 : 0.22;
+      const transfer = kind === KICK ? 0.3 : fist ? 0.2 : 0.22;
       bestRig.px[bestNode] -= vx * dt * transfer;
       bestRig.py[bestNode] -= vy * dt * transfer;
       bestRig.pz[bestNode] -= vz * dt * transfer;
