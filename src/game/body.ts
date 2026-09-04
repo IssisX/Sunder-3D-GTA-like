@@ -1,5 +1,5 @@
 import type { Actor, Collider, Region } from "./types";
-import { GRAVITY } from "./types";
+import { GRAVITY, HALF } from "./types";
 import type { World } from "./world";
 import { clamp, facing, injurySum, rightOf } from "./world";
 
@@ -167,30 +167,34 @@ function baseDistance(a: number, b: number) {
   return Math.hypot(pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
 }
 
-const LINK_DEFS: [number, number, number][] = [
-  [BODY.pelvis, BODY.chest, 1],
-  [BODY.chest, BODY.head, 1],
-  [BODY.chest, BODY.lShoulder, 1],
-  [BODY.chest, BODY.rShoulder, 1],
-  [BODY.lShoulder, BODY.rShoulder, 1],
-  [BODY.lShoulder, BODY.lElbow, 1],
-  [BODY.lElbow, BODY.lHand, 1],
-  [BODY.rShoulder, BODY.rElbow, 1],
-  [BODY.rElbow, BODY.rHand, 1],
-  [BODY.pelvis, BODY.lHip, 1],
-  [BODY.pelvis, BODY.rHip, 1],
-  [BODY.lHip, BODY.rHip, 1],
-  [BODY.lHip, BODY.lKnee, 1],
-  [BODY.lKnee, BODY.lFoot, 1],
-  [BODY.rHip, BODY.rKnee, 1],
-  [BODY.rKnee, BODY.rFoot, 1],
-  [BODY.chest, BODY.lHip, 0.9],
-  [BODY.chest, BODY.rHip, 0.9],
-  [BODY.pelvis, BODY.lShoulder, 0.9],
-  [BODY.pelvis, BODY.rShoulder, 0.9],
-  [BODY.head, BODY.lShoulder, 0.82],
-  [BODY.head, BODY.rShoulder, 0.82],
-].map(([a, b, stiffness]) => [a, b, baseDistance(a, b) * stiffness / stiffness]);
+const LINK_PAIRS: [number, number][] = [
+  [BODY.pelvis, BODY.chest],
+  [BODY.chest, BODY.head],
+  [BODY.chest, BODY.lShoulder],
+  [BODY.chest, BODY.rShoulder],
+  [BODY.lShoulder, BODY.rShoulder],
+  [BODY.lShoulder, BODY.lElbow],
+  [BODY.lElbow, BODY.lHand],
+  [BODY.rShoulder, BODY.rElbow],
+  [BODY.rElbow, BODY.rHand],
+  [BODY.pelvis, BODY.lHip],
+  [BODY.pelvis, BODY.rHip],
+  [BODY.lHip, BODY.rHip],
+  [BODY.lHip, BODY.lKnee],
+  [BODY.lKnee, BODY.lFoot],
+  [BODY.rHip, BODY.rKnee],
+  [BODY.rKnee, BODY.rFoot],
+  [BODY.chest, BODY.lHip],
+  [BODY.chest, BODY.rHip],
+  [BODY.pelvis, BODY.lShoulder],
+  [BODY.pelvis, BODY.rShoulder],
+  [BODY.head, BODY.lShoulder],
+  [BODY.head, BODY.rShoulder],
+];
+
+const LINK_DEFS: [number, number, number][] = LINK_PAIRS.map(
+  ([a, b]) => [a, b, baseDistance(a, b)] as [number, number, number],
+);
 
 const LINK_STIFFNESS = [
   1,
@@ -249,20 +253,18 @@ function bodyScale(a: Actor) {
 }
 
 function bodyMode(a: Actor): BodyMode {
-  if (a.grabbedBy || a.loco === "ragdoll" || a.loco === "down" || !a.alive) {
-    return "dynamic";
-  }
+  if (a.grabbedBy || a.loco === "ragdoll" || a.loco === "down" || !a.alive) return "dynamic";
   if (a.loco === "getup") return "recover";
   if (a.loco === "stumble") return "stumble";
   return "follow";
 }
 
-function injuryScore(a: Actor, r: Region) {
-  return injurySum(a.injuries[r]);
+function injuryScore(a: Actor, region: Region) {
+  return injurySum(a.injuries[region]);
 }
 
-function representativeNode(r: Region) {
-  switch (r) {
+function representativeNode(region: Region) {
+  switch (region) {
     case "head":
       return BODY.head;
     case "larm":
@@ -283,19 +285,17 @@ function computeTarget(a: Actor, rig: BodyRig, floorY = a.y) {
   const f = facing(a.yaw);
   const r = rightOf(a.yaw);
   const speed = Math.hypot(a.vx, a.vz);
-  const phase = a.walkPhase;
   const stride = Math.min(0.34, speed * 0.055) * scale;
-  const legSwing = Math.sin(phase) * stride;
-  const armSwing = Math.sin(phase + Math.PI) * stride * 0.75;
-  const crouch = a.crouch ? 1 : 0;
+  const legSwing = Math.sin(a.walkPhase) * stride;
+  const armSwing = Math.sin(a.walkPhase + Math.PI) * stride * 0.75;
 
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
     const o = i * 3;
-    let lx = BASE[o]! * scale;
+    const lx = BASE[o]! * scale;
     let ly = BASE[o + 1]! * scale;
     let lz = BASE[o + 2]! * scale;
 
-    if (crouch) {
+    if (a.crouch) {
       if (i === BODY.pelvis || i === BODY.lHip || i === BODY.rHip) ly -= 0.18 * scale;
       if (i === BODY.chest || i === BODY.head || i === BODY.lShoulder || i === BODY.rShoulder) {
         ly -= 0.28 * scale;
@@ -308,13 +308,13 @@ function computeTarget(a: Actor, rig: BodyRig, floorY = a.y) {
     }
 
     if (i === BODY.lKnee) lz += legSwing * 0.5;
-    if (i === BODY.lFoot) lz += legSwing;
-    if (i === BODY.rKnee) lz -= legSwing * 0.5;
-    if (i === BODY.rFoot) lz -= legSwing;
-    if (i === BODY.lElbow) lz += armSwing * 0.45;
-    if (i === BODY.lHand) lz += armSwing;
-    if (i === BODY.rElbow) lz -= armSwing * 0.45;
-    if (i === BODY.rHand) lz -= armSwing;
+    else if (i === BODY.lFoot) lz += legSwing;
+    else if (i === BODY.rKnee) lz -= legSwing * 0.5;
+    else if (i === BODY.rFoot) lz -= legSwing;
+    else if (i === BODY.lElbow) lz += armSwing * 0.45;
+    else if (i === BODY.lHand) lz += armSwing;
+    else if (i === BODY.rElbow) lz -= armSwing * 0.45;
+    else if (i === BODY.rHand) lz -= armSwing;
 
     if (a.strikeT > 0 && (i === BODY.rElbow || i === BODY.rHand)) {
       lz += (i === BODY.rHand ? 0.48 : 0.24) * scale;
@@ -334,17 +334,12 @@ function computeTarget(a: Actor, rig: BodyRig, floorY = a.y) {
 function resetRig(a: Actor, rig: BodyRig) {
   computeTarget(a, rig, a.y);
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
-    const x = rig.tx[i]!;
-    const y = rig.ty[i]!;
-    const z = rig.tz[i]!;
-    rig.x[i] = rig.px[i] = x;
-    rig.y[i] = rig.py[i] = y;
-    rig.z[i] = rig.pz[i] = z;
+    rig.x[i] = rig.px[i] = rig.tx[i]!;
+    rig.y[i] = rig.py[i] = rig.ty[i]!;
+    rig.z[i] = rig.pz[i] = rig.tz[i]!;
     rig.impactCd[i] = 0;
   }
-  for (let i = 0; i < REGIONS.length; i++) {
-    rig.injurySnapshot[i] = injuryScore(a, REGIONS[i]!);
-  }
+  for (let i = 0; i < REGIONS.length; i++) rig.injurySnapshot[i] = injuryScore(a, REGIONS[i]!);
   rig.initialized = true;
   rig.mode = bodyMode(a);
   rig.grabNode = -1;
@@ -358,24 +353,16 @@ function solveDistance(rig: BodyRig, ia: number, ib: number, rest: number, stiff
   const d2 = dx * dx + dy * dy + dz * dz;
   if (d2 < 1e-10) return;
   const d = Math.sqrt(d2);
-  const err = d - rest * scale;
   const wa = NODE_INV_MASS[ia]!;
   const wb = NODE_INV_MASS[ib]!;
   const sum = wa + wb;
-  if (sum <= 0) return;
-  const corr = (err / d) * stiffness;
-  const ax = dx * corr * (wa / sum);
-  const ay = dy * corr * (wa / sum);
-  const az = dz * corr * (wa / sum);
-  const bx = dx * corr * (wb / sum);
-  const by = dy * corr * (wb / sum);
-  const bz = dz * corr * (wb / sum);
-  rig.x[ia] += ax;
-  rig.y[ia] += ay;
-  rig.z[ia] += az;
-  rig.x[ib] -= bx;
-  rig.y[ib] -= by;
-  rig.z[ib] -= bz;
+  const corr = ((d - rest * scale) / d) * stiffness;
+  rig.x[ia] += dx * corr * (wa / sum);
+  rig.y[ia] += dy * corr * (wa / sum);
+  rig.z[ia] += dz * corr * (wa / sum);
+  rig.x[ib] -= dx * corr * (wb / sum);
+  rig.y[ib] -= dy * corr * (wb / sum);
+  rig.z[ib] -= dz * corr * (wb / sum);
 }
 
 function solveRange(rig: BodyRig, ia: number, ib: number, min: number, max: number, scale: number) {
@@ -401,63 +388,33 @@ function solveRange(rig: BodyRig, ia: number, ib: number, min: number, max: numb
   rig.z[ib] -= dz * corr * (wb / sum);
 }
 
+function solveLinks(a: Actor, rig: BodyRig, stiffness = 1) {
+  const scale = bodyScale(a);
+  for (let i = 0; i < LINK_DEFS.length; i++) {
+    const [ia, ib, rest] = LINK_DEFS[i]!;
+    solveDistance(rig, ia, ib, rest, LINK_STIFFNESS[i]! * stiffness, scale);
+  }
+  for (const [ia, ib, min, max] of JOINT_RANGES) solveRange(rig, ia, ib, min, max, scale);
+}
+
 function pinNode(rig: BodyRig, i: number, strength: number) {
   rig.x[i] += (rig.tx[i]! - rig.x[i]!) * strength;
   rig.y[i] += (rig.ty[i]! - rig.y[i]!) * strength;
   rig.z[i] += (rig.tz[i]! - rig.z[i]!) * strength;
 }
 
-function closestGrabNode(rig: BodyRig, x: number, y: number, z: number) {
-  let best = BODY.chest;
-  let bestD = Infinity;
-  for (const i of GRAB_NODES) {
-    const dx = rig.x[i]! - x;
-    const dy = rig.y[i]! - y;
-    const dz = rig.z[i]! - z;
-    const d = dx * dx + dy * dy + dz * dz;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  }
-  return best;
-}
-
-function supportHeight(w: World, x: number, z: number) {
-  let h = 0;
-  for (const c of w.colliders) {
-    if (!c.solid || c.water) continue;
-    if (x < c.minX - 0.2 || x > c.maxX + 0.2 || z < c.minZ - 0.2 || z > c.maxZ + 0.2) continue;
-    h = Math.max(h, c.maxY);
-  }
-  return h;
-}
-
-function modeWeight(mode: BodyMode) {
-  if (mode === "dynamic") return 1;
-  if (mode === "stumble") return 0.62;
-  if (mode === "recover") return 0.4;
-  return 0;
-}
-
 function nodeRadius(a: Actor, i: number) {
   return BASE_RADIUS[i]! * bodyScale(a);
 }
 
-function nodeVelocity(rig: BodyRig, i: number, dt: number) {
-  const invDt = 1 / Math.max(1e-5, dt);
-  return {
-    x: (rig.x[i]! - rig.px[i]!) * invDt,
-    y: (rig.y[i]! - rig.py[i]!) * invDt,
-    z: (rig.z[i]! - rig.pz[i]!) * invDt,
-  };
+function nodeVelocityComponent(current: number, previous: number, dt: number) {
+  return (current - previous) / Math.max(1e-5, dt);
 }
 
 function applyImpact(w: World, a: Actor, rig: BodyRig, node: number, speed: number) {
   if (!a.alive || speed < 3.2 || rig.impactCd[node]! > 0) return;
   const region = NODE_REGION[node]!;
-  const excess = speed - 3.2;
-  const severity = clamp(excess * excess * 0.018 * (a.mass / 78), 0, 1.4);
+  const severity = clamp((speed - 3.2) ** 2 * 0.018 * (a.mass / 78), 0, 1.4);
   if (severity < 0.025) return;
   const inj = a.injuries[region];
   inj.bruise += severity * 0.36;
@@ -478,9 +435,7 @@ function applyImpact(w: World, a: Actor, rig: BodyRig, node: number, speed: numb
   }
   rig.impactCd[node] = 0.16;
   w.emitSound(a.x, a.z, 0.3 + Math.min(0.7, severity * 0.45), "impact", a.id);
-  if (severity > 0.2 && (a.kind === "human" || a.kind === "player")) {
-    w.emitSound(a.x, a.z, 0.24 + severity * 0.2, "hurt", a.id);
-  }
+  if (severity > 0.2) w.emitSound(a.x, a.z, 0.24 + severity * 0.2, "hurt", a.id);
   w.shake = Math.max(w.shake, Math.min(0.5, severity * 0.24));
 }
 
@@ -503,9 +458,10 @@ function resolveNodeAabb(
   let nx = x - qx;
   let ny = y - qy;
   let nz = z - qz;
-  let d2 = nx * nx + ny * ny + nz * nz;
+  const d2 = nx * nx + ny * ny + nz * nz;
   if (d2 >= radius * radius) return false;
 
+  let penetration = 0;
   if (d2 < 1e-10) {
     const dl = Math.abs(x - c.minX);
     const dr = Math.abs(c.maxX - x);
@@ -513,24 +469,25 @@ function resolveNodeAabb(
     const dtp = Math.abs(c.maxY - y);
     const ds = Math.abs(z - c.minZ);
     const dn = Math.abs(c.maxZ - z);
-    const m = Math.min(dl, dr, db, dtp, ds, dn);
-    if (m === dl) {
+    const nearest = Math.min(dl, dr, db, dtp, ds, dn);
+    penetration = nearest + radius + 0.002;
+    if (nearest === dl) {
       nx = -1;
       ny = 0;
       nz = 0;
-    } else if (m === dr) {
+    } else if (nearest === dr) {
       nx = 1;
       ny = 0;
       nz = 0;
-    } else if (m === db) {
+    } else if (nearest === db) {
       nx = 0;
       ny = -1;
       nz = 0;
-    } else if (m === dtp) {
+    } else if (nearest === dtp) {
       nx = 0;
       ny = 1;
       nz = 0;
-    } else if (m === ds) {
+    } else if (nearest === ds) {
       nx = 0;
       ny = 0;
       nz = -1;
@@ -539,32 +496,33 @@ function resolveNodeAabb(
       ny = 0;
       nz = 1;
     }
-    d2 = 0;
   } else {
-    const inv = 1 / Math.sqrt(d2);
+    const d = Math.sqrt(d2);
+    const inv = 1 / d;
     nx *= inv;
     ny *= inv;
     nz *= inv;
+    penetration = radius - d + 0.002;
   }
 
-  const v = nodeVelocity(rig, node, dt);
-  const vn = v.x * nx + v.y * ny + v.z * nz;
+  const vx = nodeVelocityComponent(rig.x[node]!, rig.px[node]!, dt);
+  const vy = nodeVelocityComponent(rig.y[node]!, rig.py[node]!, dt);
+  const vz = nodeVelocityComponent(rig.z[node]!, rig.pz[node]!, dt);
+  const vn = vx * nx + vy * ny + vz * nz;
   if (registerImpact && vn < -3.2) applyImpact(w, a, rig, node, -vn);
 
-  const penetration = d2 < 1e-10 ? radius + 0.002 : radius - Math.sqrt(d2) + 0.002;
   rig.x[node] += nx * penetration;
   rig.y[node] += ny * penetration;
   rig.z[node] += nz * penetration;
 
   if (vn < 0) {
     const bounce = 0.08;
-    const rvx = v.x - nx * vn * (1 + bounce);
-    const rvy = v.y - ny * vn * (1 + bounce);
-    const rvz = v.z - nz * vn * (1 + bounce);
-    const friction = 0.78;
-    rig.px[node] = rig.x[node]! - rvx * dt * friction;
-    rig.py[node] = rig.y[node]! - rvy * dt * friction;
-    rig.pz[node] = rig.z[node]! - rvz * dt * friction;
+    const rvx = vx - nx * vn * (1 + bounce);
+    const rvy = vy - ny * vn * (1 + bounce);
+    const rvz = vz - nz * vn * (1 + bounce);
+    rig.px[node] = rig.x[node]! - rvx * dt * 0.78;
+    rig.py[node] = rig.y[node]! - rvy * dt * 0.78;
+    rig.pz[node] = rig.z[node]! - rvz * dt * 0.78;
   }
   if (ny > 0.45) rig.groundedNodes++;
   return true;
@@ -574,7 +532,7 @@ function collideRig(w: World, a: Actor, rig: BodyRig, dt: number, registerImpact
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
     const radius = nodeRadius(a, i);
     if (rig.y[i]! < radius) {
-      const vy = (rig.y[i]! - rig.py[i]!) / Math.max(dt, 1e-5);
+      const vy = nodeVelocityComponent(rig.y[i]!, rig.py[i]!, dt);
       if (registerImpact && vy < -3.2) applyImpact(w, a, rig, i, -vy);
       rig.y[i] = radius;
       if (vy < 0) {
@@ -584,6 +542,7 @@ function collideRig(w: World, a: Actor, rig: BodyRig, dt: number, registerImpact
       }
       rig.groundedNodes++;
     }
+
     for (const c of w.colliders) {
       if (!c.solid || c.water) continue;
       if (
@@ -598,6 +557,9 @@ function collideRig(w: World, a: Actor, rig: BodyRig, dt: number, registerImpact
       }
       resolveNodeAabb(w, a, rig, i, c, dt, registerImpact);
     }
+
+    rig.x[i] = clamp(rig.x[i]!, -HALF + radius, HALF - radius);
+    rig.z[i] = clamp(rig.z[i]!, -HALF + radius, HALF - radius);
   }
 }
 
@@ -611,10 +573,10 @@ function solveSelfContacts(a: Actor, rig: BodyRig) {
     const d2 = dx * dx + dy * dy + dz * dz;
     if (d2 >= min * min || d2 < 1e-10) continue;
     const d = Math.sqrt(d2);
-    const pen = min - d;
     const nx = dx / d;
     const ny = dy / d;
     const nz = dz / d;
+    const pen = min - d;
     const wa = NODE_INV_MASS[ia]!;
     const wb = NODE_INV_MASS[ib]!;
     const sum = wa + wb;
@@ -627,28 +589,37 @@ function solveSelfContacts(a: Actor, rig: BodyRig) {
   }
 }
 
-function holderHandTarget(w: World, holder: Actor, getRig: (a: Actor) => BodyRig | undefined) {
-  const rig = getRig(holder);
-  if (rig?.initialized) {
-    return {
-      x: rig.x[BODY.rHand]!,
-      y: rig.y[BODY.rHand]!,
-      z: rig.z[BODY.rHand]!,
-    };
+function supportHeight(w: World, x: number, y: number, z: number) {
+  let h = 0;
+  for (const c of w.colliders) {
+    if (!c.solid || c.water || c.maxY > y + 0.45) continue;
+    if (x < c.minX - 0.2 || x > c.maxX + 0.2 || z < c.minZ - 0.2 || z > c.maxZ + 0.2) continue;
+    h = Math.max(h, c.maxY);
   }
-  const f = facing(holder.yaw);
-  return {
-    x: holder.x + f.x * 0.5,
-    y: holder.y + holder.height * 0.65,
-    z: holder.z + f.z * 0.5,
-  };
+  return h;
+}
+
+function closestGrabNode(rig: BodyRig, x: number, y: number, z: number) {
+  let best = BODY.chest;
+  let bestD = Infinity;
+  for (const i of GRAB_NODES) {
+    const dx = rig.x[i]! - x;
+    const dy = rig.y[i]! - y;
+    const dz = rig.z[i]! - z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < bestD) {
+      bestD = d2;
+      best = i;
+    }
+  }
+  return best;
 }
 
 function solveGrab(
   w: World,
   a: Actor,
   rig: BodyRig,
-  getRig: (a: Actor) => BodyRig | undefined,
+  getRig: (actor: Actor) => BodyRig | undefined,
   strength: number,
 ) {
   if (!a.grabbedBy) {
@@ -661,67 +632,72 @@ function solveGrab(
     rig.grabNode = -1;
     return;
   }
-  const target = holderHandTarget(w, holder, getRig);
-  if (rig.grabNode < 0) {
-    rig.grabNode = closestGrabNode(rig, target.x, target.y, target.z);
+  const holderRig = getRig(holder);
+  let tx: number;
+  let ty: number;
+  let tz: number;
+  if (holderRig?.initialized) {
+    tx = holderRig.x[BODY.rHand]!;
+    ty = holderRig.y[BODY.rHand]!;
+    tz = holderRig.z[BODY.rHand]!;
+  } else {
+    const f = facing(holder.yaw);
+    tx = holder.x + f.x * 0.5;
+    ty = holder.y + holder.height * 0.65;
+    tz = holder.z + f.z * 0.5;
   }
+
+  if (rig.grabNode < 0) rig.grabNode = closestGrabNode(rig, tx, ty, tz);
   const i = rig.grabNode;
-  const dx = target.x - rig.x[i]!;
-  const dy = target.y - rig.y[i]!;
-  const dz = target.z - rig.z[i]!;
-  const d = Math.hypot(dx, dy, dz);
-  const k = d > 1.1 ? Math.min(1, strength * 1.2) : strength;
+  const dx = tx - rig.x[i]!;
+  const dy = ty - rig.y[i]!;
+  const dz = tz - rig.z[i]!;
+  const dist = Math.hypot(dx, dy, dz);
+  const k = dist > 1.1 ? Math.min(1, strength * 1.2) : strength;
   rig.x[i] += dx * k;
   rig.y[i] += dy * k;
   rig.z[i] += dz * k;
 
-  if (d > 0.5) {
+  if (dist > 0.5) {
     const load = a.mass / Math.max(1, a.mass + holder.mass);
-    holder.balance = clamp(holder.balance - Math.min(0.04, d * load * 0.012), 0, 1);
+    holder.balance = clamp(holder.balance - Math.min(0.04, dist * load * 0.012), 0, 1);
     holder.vx -= dx * load * 0.03;
     holder.vz -= dz * load * 0.03;
   }
 }
 
-function solveLinks(a: Actor, rig: BodyRig, stiffness = 1) {
-  const scale = bodyScale(a);
-  for (let i = 0; i < LINK_DEFS.length; i++) {
-    const [ia, ib, rest] = LINK_DEFS[i]!;
-    solveDistance(rig, ia, ib, rest, LINK_STIFFNESS[i]! * stiffness, scale);
-  }
-  for (const [ia, ib, min, max] of JOINT_RANGES) {
-    solveRange(rig, ia, ib, min, max, scale);
-  }
+function snapshotInjuries(a: Actor, rig: BodyRig) {
+  for (let i = 0; i < REGIONS.length; i++) rig.injurySnapshot[i] = injuryScore(a, REGIONS[i]!);
 }
 
 function injectExternalImpulse(w: World, a: Actor, rig: BodyRig, dt: number) {
   const p = BODY.pelvis;
-  const rvx = (rig.x[p]! - rig.px[p]!) / Math.max(dt, 1e-5);
-  const rvy = (rig.y[p]! - rig.py[p]!) / Math.max(dt, 1e-5);
-  const rvz = (rig.z[p]! - rig.pz[p]!) / Math.max(dt, 1e-5);
+  const rvx = nodeVelocityComponent(rig.x[p]!, rig.px[p]!, dt);
+  const rvy = nodeVelocityComponent(rig.y[p]!, rig.py[p]!, dt);
+  const rvz = nodeVelocityComponent(rig.z[p]!, rig.pz[p]!, dt);
   let dvx = a.vx - rvx;
   let dvy = a.vy - rvy;
   let dvz = a.vz - rvz;
   const mag = Math.hypot(dvx, dvy, dvz);
   if (mag < 1.15) return;
-  const cap = Math.min(18, mag);
-  const inv = cap / mag;
-  dvx *= inv;
-  dvy *= inv;
-  dvz *= inv;
+
+  const capped = Math.min(18, mag) / mag;
+  dvx *= capped;
+  dvy *= capped;
+  dvz *= capped;
 
   let bestRegion = -1;
   let bestDelta = 0;
   for (let i = 0; i < REGIONS.length; i++) {
-    const now = injuryScore(a, REGIONS[i]!);
-    const delta = now - rig.injurySnapshot[i]!;
+    const delta = injuryScore(a, REGIONS[i]!) - rig.injurySnapshot[i]!;
     if (delta > bestDelta) {
       bestDelta = delta;
       bestRegion = i;
     }
   }
 
-  if (a.lastHitBy && w.time - a.lastHitT < dt * 1.6 && bestRegion >= 0) {
+  const recentHit = a.lastHitBy && w.time - a.lastHitT < dt * 1.6;
+  if (recentHit && bestRegion >= 0) {
     const node = representativeNode(REGIONS[bestRegion]!);
     rig.px[node] -= dvx * dt * 0.85;
     rig.py[node] -= dvy * dt * 0.85;
@@ -732,43 +708,36 @@ function injectExternalImpulse(w: World, a: Actor, rig: BodyRig, dt: number) {
     return;
   }
 
-  const gain = a.grabbedBy ? 0.18 : 0.42;
+  if (a.grabbedBy) return;
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
-    rig.px[i] -= dvx * dt * gain;
-    rig.py[i] -= dvy * dt * gain;
-    rig.pz[i] -= dvz * dt * gain;
+    rig.px[i] -= dvx * dt * 0.42;
+    rig.py[i] -= dvy * dt * 0.42;
+    rig.pz[i] -= dvz * dt * 0.42;
   }
 }
 
-function snapshotInjuries(a: Actor, rig: BodyRig) {
-  for (let i = 0; i < REGIONS.length; i++) {
-    rig.injurySnapshot[i] = injuryScore(a, REGIONS[i]!);
-  }
-}
-
-function integrateDynamic(w: World, a: Actor, rig: BodyRig, dt: number, mode: BodyMode) {
+function integrateDynamic(w: World, rig: BodyRig, dt: number, mode: BodyMode) {
   const damp = mode === "dynamic" ? 0.988 : mode === "stumble" ? 0.965 : 0.955;
   const gravity = mode === "recover" ? GRAVITY * 0.55 : mode === "stumble" ? GRAVITY * 0.78 : GRAVITY;
   for (let i = 0; i < BODY_NODE_COUNT; i++) {
     const x = rig.x[i]!;
     const y = rig.y[i]!;
     const z = rig.z[i]!;
-    let vx = (x - rig.px[i]!) * damp;
-    let vy = (y - rig.py[i]!) * damp;
-    let vz = (z - rig.pz[i]!) * damp;
-    const water = w.inWater(x, z, y);
-    if (water) {
-      vx *= 0.82;
-      vy *= 0.82;
-      vz *= 0.82;
-      vy += 4.2 * dt * dt;
+    let dx = (x - rig.px[i]!) * damp;
+    let dy = (y - rig.py[i]!) * damp;
+    let dz = (z - rig.pz[i]!) * damp;
+    if (w.inWater(x, z, y)) {
+      dx *= 0.82;
+      dy *= 0.82;
+      dz *= 0.82;
+      dy += 4.2 * dt * dt;
     }
     rig.px[i] = x;
     rig.py[i] = y;
     rig.pz[i] = z;
-    rig.x[i] = x + vx;
-    rig.y[i] = y + vy - gravity * dt * dt;
-    rig.z[i] = z + vz;
+    rig.x[i] = x + dx;
+    rig.y[i] = y + dy - gravity * dt * dt;
+    rig.z[i] = z + dz;
   }
 }
 
@@ -788,43 +757,17 @@ function followPose(a: Actor, rig: BodyRig, dt: number) {
   }
 }
 
-function deriveActorFromRig(w: World, a: Actor, rig: BodyRig, dt: number) {
-  const p = BODY.pelvis;
-  const oldX = a.x;
-  const oldY = a.y;
-  const oldZ = a.z;
-  const feet = Math.min(
-    rig.y[BODY.lFoot]! - nodeRadius(a, BODY.lFoot),
-    rig.y[BODY.rFoot]! - nodeRadius(a, BODY.rFoot),
-    rig.y[BODY.pelvis]! - 0.78 * bodyScale(a),
-  );
-  a.x = rig.x[p]!;
-  a.z = rig.z[p]!;
-  a.y = Math.max(0, feet);
-  a.vx = (a.x - oldX) / Math.max(dt, 1e-5);
-  a.vy = (a.y - oldY) / Math.max(dt, 1e-5);
-  a.vz = (a.z - oldZ) / Math.max(dt, 1e-5);
-  a.grounded = rig.groundedNodes > 0;
-
-  const torsoRise = rig.y[BODY.chest]! - rig.y[BODY.pelvis]!;
-  const torsoLean = Math.hypot(
-    rig.x[BODY.chest]! - rig.x[BODY.pelvis]!,
-    rig.z[BODY.chest]! - rig.z[BODY.pelvis]!,
-  );
-  if (rig.mode === "dynamic") {
-    const posture = clamp((torsoRise - 0.05) / 0.42, 0, 1) * clamp(1 - torsoLean / 0.8, 0, 1);
-    a.balance = Math.min(a.balance, posture);
-  }
-
-  a.x = clamp(a.x, -43, 43);
-  a.z = clamp(a.z, -43, 43);
-  void w;
+function modeWeight(mode: BodyMode) {
+  if (mode === "dynamic") return 1;
+  if (mode === "stumble") return 0.62;
+  if (mode === "recover") return 0.4;
+  return 0;
 }
 
 function solveBodyPair(w: World, a: Actor, ra: BodyRig, b: Actor, rb: BodyRig, dt: number, register: boolean) {
-  const rootDx = rb.x[BODY.pelvis]! - ra.x[BODY.pelvis]!;
-  const rootDz = rb.z[BODY.pelvis]! - ra.z[BODY.pelvis]!;
-  if (rootDx * rootDx + rootDz * rootDz > 10.5) return;
+  const dxRoot = rb.x[BODY.pelvis]! - ra.x[BODY.pelvis]!;
+  const dzRoot = rb.z[BODY.pelvis]! - ra.z[BODY.pelvis]!;
+  if (dxRoot * dxRoot + dzRoot * dzRoot > 3.4 * 3.4) return;
   const modeA = modeWeight(ra.mode);
   const modeB = modeWeight(rb.mode);
   if (modeA + modeB <= 0) return;
@@ -853,16 +796,42 @@ function solveBodyPair(w: World, a: Actor, ra: BodyRig, b: Actor, rb: BodyRig, d
       rb.y[ib] += ny * pen * (wb / sum);
       rb.z[ib] += nz * pen * (wb / sum);
 
-      if (register) {
-        const va = nodeVelocity(ra, ia, dt);
-        const vb = nodeVelocity(rb, ib, dt);
-        const rel = (vb.x - va.x) * nx + (vb.y - va.y) * ny + (vb.z - va.z) * nz;
-        if (rel < -3.4) {
-          if (modeA > 0) applyImpact(w, a, ra, ia, -rel * (b.mass / (a.mass + b.mass)));
-          if (modeB > 0) applyImpact(w, b, rb, ib, -rel * (a.mass / (a.mass + b.mass)));
-        }
+      if (!register) continue;
+      const avx = nodeVelocityComponent(ra.x[ia]!, ra.px[ia]!, dt);
+      const avy = nodeVelocityComponent(ra.y[ia]!, ra.py[ia]!, dt);
+      const avz = nodeVelocityComponent(ra.z[ia]!, ra.pz[ia]!, dt);
+      const bvx = nodeVelocityComponent(rb.x[ib]!, rb.px[ib]!, dt);
+      const bvy = nodeVelocityComponent(rb.y[ib]!, rb.py[ib]!, dt);
+      const bvz = nodeVelocityComponent(rb.z[ib]!, rb.pz[ib]!, dt);
+      const rel = (bvx - avx) * nx + (bvy - avy) * ny + (bvz - avz) * nz;
+      if (rel < -3.4) {
+        if (modeA > 0) applyImpact(w, a, ra, ia, -rel * (b.mass / (a.mass + b.mass)));
+        if (modeB > 0) applyImpact(w, b, rb, ib, -rel * (a.mass / (a.mass + b.mass)));
       }
     }
+  }
+}
+
+function deriveActorFromRig(a: Actor, rig: BodyRig, dt: number) {
+  const p = BODY.pelvis;
+  const feet = Math.min(
+    rig.y[BODY.lFoot]! - nodeRadius(a, BODY.lFoot),
+    rig.y[BODY.rFoot]! - nodeRadius(a, BODY.rFoot),
+    rig.y[p]! - 0.78 * bodyScale(a),
+  );
+  a.x = clamp(rig.x[p]!, -HALF + 1, HALF - 1);
+  a.z = clamp(rig.z[p]!, -HALF + 1, HALF - 1);
+  a.y = Math.max(0, feet);
+  a.vx = nodeVelocityComponent(rig.x[p]!, rig.px[p]!, dt);
+  a.vy = nodeVelocityComponent(rig.y[p]!, rig.py[p]!, dt);
+  a.vz = nodeVelocityComponent(rig.z[p]!, rig.pz[p]!, dt);
+  a.grounded = rig.groundedNodes > 0;
+
+  if (rig.mode === "dynamic") {
+    const rise = rig.y[BODY.chest]! - rig.y[p]!;
+    const lean = Math.hypot(rig.x[BODY.chest]! - rig.x[p]!, rig.z[BODY.chest]! - rig.z[p]!);
+    const posture = clamp((rise - 0.05) / 0.42, 0, 1) * clamp(1 - lean / 0.8, 0, 1);
+    a.balance = Math.min(a.balance, posture);
   }
 }
 
@@ -871,8 +840,7 @@ export class PhysicalBodies {
 
   bootstrap(w: World) {
     for (const a of w.actors) {
-      if (a.species !== "human" && a.kind !== "player") continue;
-      this.ensure(a);
+      if (a.species === "human" || a.kind === "player") this.ensure(a);
     }
   }
 
@@ -891,8 +859,7 @@ export class PhysicalBodies {
   }
 
   reset(a: Actor) {
-    const rig = this.ensure(a);
-    resetRig(a, rig);
+    resetRig(a, this.ensure(a));
   }
 
   clear() {
@@ -905,13 +872,10 @@ export class PhysicalBodies {
       if (a.species !== "human" && a.kind !== "player") continue;
       humans.push(a);
       const rig = this.ensure(a);
-      for (let i = 0; i < BODY_NODE_COUNT; i++) {
-        rig.impactCd[i] = Math.max(0, rig.impactCd[i]! - dt);
-      }
+      for (let i = 0; i < BODY_NODE_COUNT; i++) rig.impactCd[i] = Math.max(0, rig.impactCd[i]! - dt);
+
       const mode = bodyMode(a);
-      if (mode !== rig.mode && mode === "follow") {
-        resetRig(a, rig);
-      }
+      if (mode !== rig.mode && mode === "follow") resetRig(a, rig);
       rig.mode = mode;
       rig.groundedNodes = 0;
 
@@ -922,10 +886,10 @@ export class PhysicalBodies {
       }
 
       injectExternalImpulse(w, a, rig, dt);
-      integrateDynamic(w, a, rig, dt, mode);
-
-      const floor = supportHeight(w, rig.x[BODY.pelvis]!, rig.z[BODY.pelvis]!);
+      integrateDynamic(w, rig, dt, mode);
+      const floor = supportHeight(w, rig.x[BODY.pelvis]!, rig.y[BODY.pelvis]!, rig.z[BODY.pelvis]!);
       computeTarget(a, rig, floor);
+
       const iterations = mode === "dynamic" ? 6 : 5;
       for (let iter = 0; iter < iterations; iter++) {
         solveLinks(a, rig, mode === "dynamic" ? 1 : 0.94);
@@ -945,12 +909,12 @@ export class PhysicalBodies {
       }
 
       if (mode === "stumble") {
-        const torsoRise = rig.y[BODY.chest]! - rig.y[BODY.pelvis]!;
-        const torsoLean = Math.hypot(
+        const rise = rig.y[BODY.chest]! - rig.y[BODY.pelvis]!;
+        const lean = Math.hypot(
           rig.x[BODY.chest]! - rig.x[BODY.pelvis]!,
           rig.z[BODY.chest]! - rig.z[BODY.pelvis]!,
         );
-        if (torsoRise < 0.16 || torsoLean > 0.62 * bodyScale(a) || a.balance < 0.08) {
+        if (rise < 0.16 || lean > 0.62 * bodyScale(a) || a.balance < 0.08) {
           a.loco = "ragdoll";
           a.locoT = Math.max(a.locoT, 0.65);
           rig.mode = "dynamic";
@@ -965,8 +929,7 @@ export class PhysicalBodies {
         for (let j = i + 1; j < humans.length; j++) {
           const b = humans[j]!;
           if (a.grabbedId === b.id || b.grabbedId === a.id) continue;
-          const rb = this.ensure(b);
-          solveBodyPair(w, a, ra, b, rb, dt, pass === 0);
+          solveBodyPair(w, a, ra, b, this.ensure(b), dt, pass === 0);
         }
       }
     }
@@ -975,7 +938,7 @@ export class PhysicalBodies {
       const rig = this.ensure(a);
       if (rig.mode !== "follow") {
         solveLinks(a, rig, 0.82);
-        deriveActorFromRig(w, a, rig, dt);
+        deriveActorFromRig(a, rig, dt);
       }
       if (rig.mode === "recover" && a.getupT <= 0) {
         const err = Math.hypot(
