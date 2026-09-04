@@ -1,8 +1,9 @@
 import * as THREE from "three";
-import type { Actor, Prop } from "./types";
+import type { Actor, Particle, Prop } from "./types";
 import { FIRE_RES, HALF, WORLD } from "./types";
 import { World, facing, injurySum, lerpAng } from "./world";
 import type { Cam } from "./sim";
+import { P } from "./physique";
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
@@ -340,41 +341,100 @@ export class View {
     const skin = mat(a.skin);
     const cloth = mat(a.cloth);
     const dark = mat(a.accent);
-    const head = new THREE.Mesh(GEO.box, skin);
-    head.name = "head";
-    head.scale.set(0.28, 0.3, 0.26);
-    head.position.y = 1.52;
-    head.castShadow = true;
-    const torso = new THREE.Mesh(GEO.box, cloth);
-    torso.name = "torso";
-    torso.scale.set(0.42, 0.52, 0.24);
-    torso.position.y = 1.12;
-    torso.castShadow = true;
-    const pelvis = new THREE.Mesh(GEO.box, dark);
-    pelvis.scale.set(0.38, 0.2, 0.22);
-    pelvis.position.y = 0.78;
-    const larm = arm(skin, -1);
-    const rarm = arm(skin, 1);
-    const lleg = leg(dark, -1);
-    const rleg = leg(dark, 1);
-    larm.name = "larm";
-    rarm.name = "rarm";
-    lleg.name = "lleg";
-    rleg.name = "rleg";
-    g.add(head, torso, pelvis, larm, rarm, lleg, rleg);
+    const mk = (material: THREE.Material, name: string) => {
+      const m = new THREE.Mesh(GEO.box, material);
+      m.name = name;
+      m.castShadow = true;
+      g.add(m);
+      return m;
+    };
+    const pelvis = mk(dark, "pelvis");
+    const torso = mk(cloth, "torso");
+    const head = mk(skin, "head");
+    const luarm = mk(skin, "luarm");
+    const llarm = mk(skin, "llarm");
+    const ruarm = mk(skin, "ruarm");
+    const rlarm = mk(skin, "rlarm");
+    const lthigh = mk(dark, "lthigh");
+    const lshin = mk(dark, "lshin");
+    const rthigh = mk(dark, "rthigh");
+    const rshin = mk(dark, "rshin");
     if (a.helmet) {
       const h = new THREE.Mesh(GEO.sphere, mat(0x4a4c50, { metalness: 0.5, roughness: 0.4 }));
-      h.scale.set(0.32, 0.22, 0.3);
-      h.position.y = 1.64;
-      g.add(h);
+      h.name = "helmet";
+      h.scale.set(1.15, 0.85, 1.1);
+      h.position.y = 0.35;
+      head.add(h);
     }
     const wep = new THREE.Mesh(GEO.box, mat(0x6a5a48));
     wep.name = "weapon";
-    wep.scale.set(0.06, 0.06, 0.9);
-    rarm.add(wep);
-    wep.position.set(0, -0.42, 0.2);
-    g.userData.parts = { head, torso, larm, rarm, lleg, rleg, wep };
+    wep.castShadow = true;
+    g.add(wep);
+    g.userData.parts = {
+      head,
+      torso,
+      pelvis,
+      larm: luarm,
+      rarm: ruarm,
+      lleg: lthigh,
+      rleg: rthigh,
+      luarm,
+      llarm,
+      ruarm,
+      rlarm,
+      lthigh,
+      lshin,
+      rthigh,
+      rshin,
+      wep,
+    };
     return g;
+  }
+
+  private syncPhysique(a: Actor, g: THREE.Group, alpha: number) {
+    const body = a.body!;
+    const parts = g.userData.parts as Record<string, THREE.Mesh | undefined>;
+    if (!parts?.luarm || !parts.pelvis || body.parts.length < 11) {
+      const x = a.px + (a.x - a.px) * alpha;
+      const y = a.py + (a.y - a.py) * alpha;
+      const z = a.pz + (a.z - a.pz) * alpha;
+      g.position.set(x, y, z);
+      g.rotation.y = a.yaw;
+      return;
+    }
+    g.position.set(0, 0, 0);
+    g.rotation.set(0, 0, 0);
+    const lerpP = (p: Particle) => ({
+      x: p.px + (p.x - p.px) * alpha,
+      y: p.py + (p.y - p.py) * alpha,
+      z: p.pz + (p.z - p.pz) * alpha,
+    });
+    const A = body.parts.map(lerpP);
+    placeSeg(parts.pelvis!, A[P.pelvis]!, A[P.spine]!, 0.22);
+    placeSeg(parts.torso!, A[P.spine]!, A[P.head]!, 0.28);
+    const hd = A[P.head]!;
+    parts.head!.position.set(hd.x, hd.y, hd.z);
+    parts.head!.scale.set(0.26, 0.28, 0.24);
+    parts.head!.quaternion.identity();
+    placeSeg(parts.luarm!, A[P.spine]!, A[P.uarmL]!, 0.1);
+    placeSeg(parts.llarm!, A[P.uarmL]!, A[P.larmL]!, 0.09);
+    placeSeg(parts.ruarm!, A[P.spine]!, A[P.uarmR]!, 0.1);
+    placeSeg(parts.rlarm!, A[P.uarmR]!, A[P.larmR]!, 0.09);
+    placeSeg(parts.lthigh!, A[P.pelvis]!, A[P.thighL]!, 0.13);
+    placeSeg(parts.lshin!, A[P.thighL]!, A[P.shinL]!, 0.11);
+    placeSeg(parts.rthigh!, A[P.pelvis]!, A[P.thighR]!, 0.13);
+    placeSeg(parts.rshin!, A[P.thighR]!, A[P.shinR]!, 0.11);
+    const wep = parts.wep;
+    if (wep) {
+      const wepLen =
+        a.weapon === "spear" || a.weapon === "pitchfork" ? 1.6 : a.weapon === "club" || a.weapon === "board" ? 1.05 : 0.7;
+      const hand = A[P.larmR]!;
+      const el = A[P.uarmR]!;
+      wep.visible = a.weapon !== "fist";
+      placeSeg(wep, hand, { x: hand.x * 2 - el.x, y: hand.y * 2 - el.y, z: hand.z * 2 - el.z }, 0.05);
+      wep.scale.set(0.05, wepLen, 0.05);
+    }
+    if (parts.head) parts.head.material = tintInjury(a.skin, injurySum(a.injuries.head));
   }
 
   private makeBeast(a: Actor) {
@@ -436,18 +496,22 @@ export class View {
     for (const a of w.actors) {
       this.ensureActor(a);
       const g = this.actorMap.get(a.id)!;
-      const x = a.px + (a.x - a.px) * alpha;
-      const y = a.py + (a.y - a.py) * alpha;
-      const z = a.pz + (a.z - a.pz) * alpha;
-      const yaw = lerpAng(a.pyaw, a.yaw, alpha);
-      g.position.set(x, y, z);
-      g.rotation.y = yaw;
-      g.rotation.x = a.loco === "ragdoll" || a.loco === "down" ? 1.25 : a.loco === "getup" ? 0.5 : 0;
-      g.rotation.z = a.loco === "stumble" ? Math.sin(w.time * 10) * 0.12 : 0;
-      if (a.species === "human" || a.kind === "player") this.animHuman(a, g, w);
-      else this.animBeast(a, g);
+      if (a.body && (a.species === "human" || a.kind === "player")) {
+        this.syncPhysique(a, g, alpha);
+      } else {
+        const x = a.px + (a.x - a.px) * alpha;
+        const y = a.py + (a.y - a.py) * alpha;
+        const z = a.pz + (a.z - a.pz) * alpha;
+        const yaw = lerpAng(a.pyaw, a.yaw, alpha);
+        g.position.set(x, y, z);
+        g.rotation.y = yaw;
+        g.rotation.x = a.loco === "ragdoll" || a.loco === "down" ? 1.25 : a.loco === "getup" ? 0.5 : 0;
+        g.rotation.z = a.loco === "stumble" ? Math.sin(w.time * 10) * 0.12 : 0;
+        if (a.species === "human" || a.kind === "player") this.animHuman(a, g, w);
+        else this.animBeast(a, g);
+        if (!a.alive) g.rotation.x = 1.4;
+      }
       g.visible = true;
-      if (!a.alive) g.rotation.x = 1.4;
     }
     this.updateFire(w);
     this.updateRain(w, dt);
@@ -631,26 +695,28 @@ export class View {
   }
 }
 
-function arm(matSkin: THREE.Material, side: number) {
-  const g = new THREE.Group();
-  const u = new THREE.Mesh(GEO.box, matSkin);
-  u.scale.set(0.12, 0.42, 0.12);
-  u.position.set(0, -0.2, 0);
-  u.castShadow = true;
-  g.add(u);
-  g.position.set(side * 0.28, 1.32, 0);
-  return g;
-}
+const _up = new THREE.Vector3(0, 1, 0);
+const _dir = new THREE.Vector3();
 
-function leg(matCloth: THREE.Material, side: number) {
-  const g = new THREE.Group();
-  const u = new THREE.Mesh(GEO.box, matCloth);
-  u.scale.set(0.14, 0.7, 0.14);
-  u.position.set(0, -0.35, 0);
-  u.castShadow = true;
-  g.add(u);
-  g.position.set(side * 0.12, 0.7, 0);
-  return g;
+function placeSeg(
+  mesh: THREE.Object3D,
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  thick: number,
+) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dz = b.z - a.z;
+  const n = Math.hypot(dx, dy, dz);
+  const len = n < 0.04 ? 0.04 : n;
+  mesh.position.set((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
+  if (n < 1e-5) {
+    mesh.scale.set(thick, len, thick);
+    return;
+  }
+  _dir.set(dx / n, dy / n, dz / n);
+  mesh.quaternion.setFromUnitVectors(_up, _dir);
+  mesh.scale.set(thick, len, thick);
 }
 
 const injuryMats = new Map<string, THREE.MeshStandardMaterial>();

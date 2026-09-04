@@ -6,6 +6,7 @@ import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
+import { ensureBodies, reposeActor, applyImpulseToNearest } from "./physique";
 
 export class Game {
   world = new World();
@@ -29,6 +30,7 @@ export class Game {
     this.view = new View(canvas);
     this.world.seed = (Date.now() % 2147483646) + 1;
     buildLevel(this.world);
+    ensureBodies(this.world);
     this.view.bootstrap(this.world);
     this.restore();
     this.cam.yaw = this.world.player().yaw;
@@ -295,6 +297,7 @@ export class Game {
     p.stamina = s.player.stamina;
     p.weapon = s.player.weapon;
     p.torchLit = s.player.torchLit;
+    reposeActor(p);
     this.world.time = s.time;
     this.world.day = s.day;
     this.world.rain = s.rain;
@@ -317,6 +320,30 @@ export class Game {
       getPos: () => {
         const p = self.world.player();
         return { x: p.x, y: p.y, z: p.z, loco: p.loco, grounded: p.grounded };
+      },
+      getBody: () => {
+        const p = self.world.player();
+        const b = p.body;
+        if (!b) return null;
+        return {
+          mode: b.mode,
+          support: b.support,
+          lastVn: b.lastVn,
+          lastHit: b.lastHit,
+          n: b.parts.length,
+          pelvisY: b.parts[0]?.y ?? 0,
+          locoT: p.locoT,
+          getupT: p.getupT,
+          spd: Math.hypot(p.vx, p.vz),
+        };
+      },
+      forceRagdoll: () => {
+        const p = self.world.player();
+        p.loco = "ragdoll";
+        p.locoT = 0.28;
+        p.balance = 0;
+        if (p.body) p.body.mode = "ragdoll";
+        applyImpulseToNearest(p, p.x, p.y + 1.2, p.z, 6.5, 4.2, -3.5);
       },
       setKeys: (codes: string[]) => {
         if (self.world.phase !== "playing") {
@@ -341,6 +368,18 @@ declare global {
       getYaw: () => number;
       getSpeed: () => number;
       getPos?: () => { x: number; y: number; z: number; loco: string; grounded: boolean };
+      getBody?: () => {
+        mode: string;
+        support: number;
+        lastVn: number;
+        lastHit: number;
+        n: number;
+        pelvisY: number;
+        locoT?: number;
+        getupT?: number;
+        spd?: number;
+      } | null;
+      forceRagdoll?: () => void;
       setKeys?: (codes: string[]) => void;
       setSteer?: (v: number) => void;
     };

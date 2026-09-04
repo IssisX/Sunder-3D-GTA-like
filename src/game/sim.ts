@@ -23,6 +23,15 @@ import {
   regionFromHit,
   rightOf,
 } from "./world";
+import {
+  applyImpulseToNearest,
+  clearGrab,
+  ensureBodies,
+  isDynamicBody,
+  regionOfPart,
+  setGrab,
+  stepBodies,
+} from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
@@ -61,6 +70,7 @@ function accelFor(s: string) {
 
 export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playing: boolean) {
   w.events.length = 0;
+  ensureBodies(w);
   stepClock(w, dt);
   for (const a of w.actors) {
     a.px = a.x;
@@ -81,6 +91,7 @@ export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playin
   stepGrab(w, dt, playing ? input : null);
   stepLocomotion(w, dt);
   stepPhysics(w, dt);
+  stepBodies(w, dt);
   stepInjury(w, dt);
   stepFire(w, dt);
   stepProps(w, dt);
@@ -242,6 +253,8 @@ function dropHeld(w: World, p: Actor, throwMul: number) {
         a.loco = "ragdoll";
         a.locoT = 0.8;
         a.balance = 0;
+        if (a.body) a.body.mode = "ragdoll";
+        applyImpulseToNearest(a, a.x, a.y + 0.9, a.z, f.x * spd * 12, 6 * throwMul, f.z * spd * 12);
       } else {
         const pr = t as Prop;
         pr.heldBy = 0;
@@ -254,6 +267,7 @@ function dropHeld(w: World, p: Actor, throwMul: number) {
     }
     p.grabbedId = 0;
     p.carry = 0;
+    clearGrab(p);
     w.emitSound(p.x, p.z, 0.5, "whoosh", p.id);
     return;
   }
@@ -749,6 +763,7 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
           o.vx += f.x * 5.5 * rel;
           o.vz += f.z * 5.5 * rel;
           o.balance -= 0.45 * rel;
+          applyImpulseToNearest(o, o.x, o.y + 1.1, o.z, f.x * 14 * rel, 3 * rel, f.z * 14 * rel);
           if (o.balance < 0.25) {
             o.loco = "stumble";
             o.locoT = 0.4;
@@ -774,7 +789,26 @@ function hitActor(
   vic.vz += f.z * force * 3.2 * rel;
   vic.balance -= 0.35 + st.blunt * 0.35 * rel;
   const side = rightOf(atk.yaw).x * (vic.x - atk.x) + rightOf(atk.yaw).z * (vic.z - atk.z);
-  const region = how === "kick" ? (Math.random() < 0.5 ? "lleg" : "rleg") : regionFromHit(1.1 + Math.random() * 0.5, side);
+  const hitY = how === "kick" ? vic.y + 0.32 : vic.y + 1.05 + Math.random() * 0.45;
+  const hx = vic.x + f.x * 0.15;
+  const hz = vic.z + f.z * 0.15;
+  const part = applyImpulseToNearest(
+    vic,
+    hx,
+    hitY,
+    hz,
+    f.x * force * 18 * rel,
+    (how === "kick" ? 4 : 8) * rel,
+    f.z * force * 18 * rel,
+  );
+  const region =
+    part >= 0
+      ? regionOfPart(part)
+      : how === "kick"
+        ? Math.random() < 0.5
+          ? "lleg"
+          : "rleg"
+        : regionFromHit(1.1 + Math.random() * 0.5, side);
   const inj = vic.injuries[region];
   inj.bruise += st.blunt * 0.28 * force;
   inj.cut += st.cut * 0.32 * force;
@@ -800,6 +834,7 @@ function hitActor(
     vic.loco = "ragdoll";
     vic.locoT = 0.7 + (1 - vic.balance);
     vic.vy += 1.2 * rel;
+    if (vic.body) vic.body.mode = "ragdoll";
   } else if (vic.balance < 0.45) {
     vic.loco = "stumble";
     vic.locoT = 0.45;
@@ -858,6 +893,14 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
           } else {
             a.grabbedBy = p.id;
             p.carry = a.mass * 0.45;
+            if (!setGrab(p, a)) {
+              a.x = p.x + f.x * 0.55;
+              a.z = p.z + f.z * 0.55;
+            } else if (a.balance < 0.55) {
+              a.loco = "ragdoll";
+              a.locoT = 0.6;
+              if (a.body) a.body.mode = "ragdoll";
+            }
             w.emitSound(p.x, p.z, 0.4, "grab", p.id);
           }
         } else {
@@ -884,13 +927,17 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
     const pr = t ? null : w.prop(a.grabbedId);
     const f = facing(a.yaw);
     if (t) {
-      t.x = a.x + f.x * 0.55;
-      t.z = a.z + f.z * 0.55;
-      t.y = a.y + (a.loco === "ragdoll" ? 0.2 : 0.15);
-      t.vx = a.vx;
-      t.vz = a.vz;
-      t.vy = a.vy;
-      t.yaw = a.yaw;
+      if (a.body?.grab && t.body) {
+        /* constraint in physique owns the hold */
+      } else {
+        t.x = a.x + f.x * 0.55;
+        t.z = a.z + f.z * 0.55;
+        t.y = a.y + (a.loco === "ragdoll" ? 0.2 : 0.15);
+        t.vx = a.vx;
+        t.vz = a.vz;
+        t.vy = a.vy;
+        t.yaw = a.yaw;
+      }
       if (!t.alive) {
         a.carry = t.mass * 0.7;
       }
@@ -910,7 +957,7 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
 
 function stepLocomotion(w: World, dt: number) {
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
+    if (a.grabbedBy && !a.body) continue;
     if (a.vaultT > 0) {
       a.vaultT -= dt;
       if (a.vaultT <= 0) a.loco = "idle";
@@ -930,7 +977,7 @@ function stepLocomotion(w: World, dt: number) {
     }
     if (a.loco === "ragdoll") {
       a.locoT -= dt;
-      if (a.grounded && Math.hypot(a.vx, a.vz) < 0.7 && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
+      if (a.grounded && Math.hypot(a.vx, a.vz) < 1.8 && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
         a.loco = "getup";
         a.getupT = 0.7 + (1 - a.consciousness) * 0.6;
       }
@@ -957,11 +1004,25 @@ function stepLocomotion(w: World, dt: number) {
 
 function stepPhysics(w: World, dt: number) {
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
+    if (a.grabbedBy && !a.body) continue;
     const surf = surfaceAt(w, a.x, a.z);
     const water = w.inWater(a.x, a.z, a.y + 0.5);
     const fr = frictionFor(surf, w.wet[w.cell(a.x, a.z)]);
     const acc = accelFor(surf);
+    if (isDynamicBody(a)) {
+      if (water) {
+        a.wet = Math.min(1, a.wet + dt * 1.5);
+        if (a.y < water.maxY - 0.35) {
+          a.submerged += dt;
+          a.breath = Math.max(0, a.breath - dt * 0.35);
+        }
+      } else {
+        a.submerged = 0;
+        a.breath = Math.min(1, a.breath + dt * 0.5);
+        a.wet = Math.max(0, a.wet - dt * 0.05);
+      }
+      continue;
+    }
     if (a.loco !== "ragdoll") {
       const wishX = a.intendX * a.intendSpeed;
       const wishZ = a.intendZ * a.intendSpeed;
@@ -1005,7 +1066,8 @@ function stepPhysics(w: World, dt: number) {
   }
   separateBodies(w);
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
+    if (a.grabbedBy && !a.body) continue;
+    if (isDynamicBody(a)) continue;
     collideXZ(w, a);
   }
   for (const p of w.props) {
@@ -1192,6 +1254,7 @@ function separateBodies(w: World) {
     for (let j = i + 1; j < n; j++) {
       const b = w.actors[j]!;
       if (a.grabbedId === b.id || b.grabbedId === a.id) continue;
+      if (a.body && b.body && (a.body.mode !== "stance" || b.body.mode !== "stance")) continue;
       const dx = b.x - a.x;
       const dz = b.z - a.z;
       const min = a.radius + b.radius;
@@ -1270,6 +1333,7 @@ function stepInjury(w: World, dt: number) {
       a.loco = "down";
       a.intendSpeed = 0;
       a.downT += dt;
+      if (a.body) a.body.mode = "ragdoll";
       if (a.kind === "player") {
         w.phase = "down";
         const guards = w.nearby(a.x, a.z, 4).filter((g) => g.faction === "guard" && g.alive);
@@ -1289,6 +1353,7 @@ function kill(w: World, a: Actor, cause: string) {
   a.loco = "down";
   a.consciousness = 0;
   a.intendSpeed = 0;
+  if (a.body) a.body.mode = "ragdoll";
   w.emitSound(a.x, a.z, 0.6, "impact", a.id);
   if (a.kind === "player") {
     w.phase = "dead";

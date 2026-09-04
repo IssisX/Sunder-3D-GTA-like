@@ -123,6 +123,46 @@ export interface Memory {
   certainty: number;
 }
 
+export type PhysiqueMode = "stance" | "ragdoll" | "getup";
+
+export interface Particle {
+  x: number;
+  y: number;
+  z: number;
+  px: number;
+  py: number;
+  pz: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  invM: number;
+  r: number;
+}
+
+export interface Joint {
+  a: number;
+  b: number;
+  rest: number;
+  compliance: number;
+}
+
+export interface GrabLink {
+  otherId: number;
+  myPart: number;
+  otherPart: number;
+  rest: number;
+}
+
+export interface Physique {
+  parts: Particle[];
+  joints: Joint[];
+  mode: PhysiqueMode;
+  grab: GrabLink | null;
+  support: number;
+  lastVn: number;
+  lastHit: number;
+}
+
 export interface Actor {
   id: number;
   kind: Kind;
@@ -216,6 +256,7 @@ export interface Actor {
   lastHitBy: number;
   lastHitT: number;
   pinnedId: number;
+  body?: Physique;
 }
 
 export interface Prop {
