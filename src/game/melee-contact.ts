@@ -96,13 +96,9 @@ export function applyActorMeleeContact(
   const impulse = force * (2.0 + rel * 1.4);
   const bodyDv = impulse * rel;
 
-  vic.vx += nx * bodyDv;
-  vic.vz += nz * bodyDv;
-  vic.vy += Math.max(0, ny) * bodyDv * 0.55 + (kind === "kick" ? 0.18 : 0.05);
-
-  // Visible contact is derived from the same impulse that drives gameplay.
-  // Local displacement, anatomical propagation and r x J torque all come
-  // from this one momentum-transfer quantity rather than a separate hit pose.
+  // One contact authority: this impulse field now owns both the visible
+  // articulated response and the coarse root momentum consumed by world
+  // physics. No parallel Actor-velocity kick is applied here.
   impactDynamics.contactRegion(
     vic,
     region,
@@ -111,6 +107,10 @@ export function applyActorMeleeContact(
     nz * bodyDv,
     kind === "kick" ? 1.08 : 1,
   );
+
+  // Equal-and-opposite recoil enters the attacker's same body field. Heavy
+  // targets therefore interrupt posture more than light ones without a
+  // separate recoil animation.
   const recoil = clamp((vic.mass / Math.max(1, atk.mass + vic.mass)) * 0.52, 0.16, 0.42);
   impactDynamics.contactRegion(
     atk,
@@ -141,8 +141,10 @@ export function applyActorMeleeContact(
     if (blunt > 1 && contactSpeed > 8.4) inj.fracture += 0.05 * force;
   }
 
+  // Injury changes physiology; support/balance/fall state is deliberately not
+  // chosen here. BodyCausality derives that from the resulting impulse field,
+  // actual foot support, posture, leg integrity and consciousness.
   vic.pain = clamp(vic.pain + 0.13 * force, 0, 1);
-  vic.balance -= 0.14 + Math.min(0.42, blunt * 0.1 + force * 0.1);
   vic.lastHitBy = atk.id;
   vic.lastHitT = w.time;
   vic.alert = 1;
@@ -152,23 +154,6 @@ export function applyActorMeleeContact(
     if (vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.22);
     else if (vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.12);
     registerWitnesses(w, atk, vic);
-  }
-
-  const severeHead = region === "head" && contactSpeed > 9.6;
-  const catastrophic =
-    vic.consciousness < 0.15 ||
-    vic.balance < -0.08 ||
-    force > 2.35 ||
-    severeHead;
-
-  if (catastrophic) {
-    vic.loco = "ragdoll";
-    vic.locoT = Math.max(vic.locoT, 0.68 + Math.min(0.75, force * 0.18));
-    vic.vy += 0.38 * rel;
-  } else if (force > 0.72 || vic.balance < 0.62) {
-    vic.loco = "stumble";
-    vic.locoT = Math.max(vic.locoT, 0.34 + Math.min(0.34, force * 0.1));
-    vic.balance = Math.max(vic.balance, 0.08);
   }
 
   w.emitSound(vic.x, vic.z, 0.42 + Math.min(0.6, force * 0.16), "impact", atk.id);
