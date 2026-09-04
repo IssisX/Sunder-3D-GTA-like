@@ -5,7 +5,7 @@ import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
-import { AnimationController } from "./AnimationController";
+import { ProceduralAnimationController } from "./ProceduralAnimationController";
 import { BodyView } from "./body-render";
 import { clearSave, loadSave, writeSave } from "./save";
 
@@ -14,7 +14,7 @@ export class Game {
   input: Input;
   audio = new GameAudio();
   view: View;
-  bodies = new AnimationController();
+  bodies = new ProceduralAnimationController();
   bodyView: BodyView;
   cam: Cam = { yaw: 0, pitch: 0.18 };
   hud: HudState = defaultHud();
@@ -140,7 +140,7 @@ export class Game {
 
     this.view = new View(this.canvas);
     this.view.bootstrap(this.world);
-    this.bodies = new AnimationController();
+    this.bodies = new ProceduralAnimationController();
     this.bodies.bootstrap(this.world);
     this.bodyView = new BodyView(this.view, this.bodies);
     this.bodyView.bootstrap(this.world.actors);
