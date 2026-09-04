@@ -4,7 +4,6 @@ import type { World } from "./world";
 import { clamp, facing, rightOf } from "./world";
 import {
   BODY,
-  BODY_NODE_COUNT,
   PhysicalBodies,
   type BodyRig,
 } from "./body";
@@ -268,29 +267,6 @@ function applyPose(
   }
 }
 
-function shiftRig(
-  rig: BodyRig,
-  dx: number,
-  dy: number,
-  dz: number,
-) {
-  const mag = Math.hypot(dx, dy, dz);
-  if (mag <= 1e-5) return;
-  const cap = mag > 0.48 ? 0.48 / mag : 1;
-  const sx = dx * cap;
-  const sy = dy * cap;
-  const sz = dz * cap;
-
-  for (let i = 0; i < BODY_NODE_COUNT; i++) {
-    rig.x[i] += sx;
-    rig.y[i] += sy;
-    rig.z[i] += sz;
-    rig.px[i] += sx;
-    rig.py[i] += sy;
-    rig.pz[i] += sz;
-  }
-}
-
 export class AnimatedPhysicalBodies extends PhysicalBodies {
   private motions = new Map<number, GrabMotion>();
   private playerGrabPressed = false;
@@ -414,10 +390,6 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
       const twoHand =
         Boolean(targetActor) || a.carry > 24;
 
-      const oldHandX = rig.x[BODY.rHand]!;
-      const oldHandY = rig.y[BODY.rHand]!;
-      const oldHandZ = rig.z[BODY.rHand]!;
-
       applyPose(
         a,
         rig,
@@ -426,18 +398,6 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
         twoHand,
         motion.recoverFrom,
       );
-
-      if (targetActor) {
-        const targetRig = this.get(targetActor);
-        if (targetRig?.initialized) {
-          shiftRig(
-            targetRig,
-            rig.x[BODY.rHand]! - oldHandX,
-            rig.y[BODY.rHand]! - oldHandY,
-            rig.z[BODY.rHand]! - oldHandZ,
-          );
-        }
-      }
     }
   }
 }
