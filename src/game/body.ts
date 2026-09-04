@@ -194,9 +194,6 @@ function solveGrab(
   const dist = Math.hypot(dx, dy, dz);
   const k = dist > 1.1 ? Math.min(1, strength * 1.2) : strength;
 
-  // Grab remains a closed-chain positional constraint for now. It is solved
-  // inside the same body constraint loop so environment/body contacts can still
-  // defeat it. Migrating this to load-aware bilateral actuation is a later slice.
   rig.x[i] += dx * k;
   rig.y[i] += dy * k;
   rig.z[i] += dz * k;
@@ -281,7 +278,7 @@ function integrateBody(
         ? 0.965
         : mode === "recover"
           ? 0.958
-          : 0.972;
+          : 0.992;
   const gravity =
     mode === "recover"
       ? GRAVITY * 0.72
@@ -395,8 +392,6 @@ export class PhysicalBodies {
       }
 
       const mode = bodyMode(a);
-      // Do not reset when control returns. Pose, momentum, contacts, injuries and
-      // impact history remain on the same authoritative body across regimes.
       rig.mode = mode;
       rig.groundedNodes = 0;
 
@@ -404,8 +399,6 @@ export class PhysicalBodies {
         injectExternalImpulse(w, a, rig, dt);
       }
 
-      // Every regime, including ordinary standing/walking, now advances through
-      // gravity + velocity integration. Active control must keep the body up.
       integrateBody(w, rig, dt, mode);
 
       const floor = supportHeight(
@@ -416,8 +409,6 @@ export class PhysicalBodies {
       );
       computeTarget(a, rig, floor);
 
-      // Desired pose becomes bounded actuation in velocity space. Contacts and
-      // joint constraints are solved afterward and therefore override intent.
       activeBodyControl.drive(w, a, rig, dt, mode);
 
       const iterations = mode === "dynamic" ? 6 : 5;
@@ -487,9 +478,6 @@ export class PhysicalBodies {
     for (const a of humans) {
       const rig = this.ensure(a);
 
-      // Final constraint projection keeps anatomical lengths valid after any
-      // body-body contacts. The solved pelvis is now the final root authority
-      // for the next world step in every control regime, not only ragdoll.
       solveLinks(a, rig, rig.mode === "dynamic" ? 0.82 : 0.76);
       deriveActorFromRig(a, rig, dt);
 
