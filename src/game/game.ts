@@ -500,6 +500,7 @@ export class Game {
           handY: hand ? hand.y - p.y : 0,
           leftFwd: left ? fwd(left.x, left.z) : 0,
           headSide: head ? side(head.x, head.z) : 0,
+          headY: head ? head.y - p.y : 0,
           headFwd: head ? fwd(head.x, head.z) : 0,
           wepFwd: wpn ? fwd(wpn.bx, wpn.bz) : 0,
           wepLen: wpn ? wpn.wepLen : 0,
@@ -510,7 +511,56 @@ export class Game {
           support: p.body?.support ?? 0,
           loco: p.loco,
           mode: p.body?.mode ?? "",
+          pain: p.pain,
+          rarm: injurySum(p.injuries.rarm) + p.injuries.rarm.fracture,
+          cutR: p.injuries.rarm.cut,
         };
+      },
+      forceInjure: (region?: string, kind?: string) => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        const r = (region === "head" || region === "torso" || region === "larm" || region === "rarm" || region === "lleg" || region === "rleg" ? region : "rarm") as Region;
+        const inj = p.injuries[r];
+        if (kind === "cut") inj.cut += 0.7;
+        else if (kind === "burn") inj.burn += 0.55;
+        else if (kind === "break") inj.fracture += 0.5;
+        else inj.bruise += 0.8;
+        p.pain = Math.min(1, p.pain + 0.35);
+        if (kind === "cut") p.bleed = Math.min(1, p.bleed + 0.2);
+      },
+      forceVictim: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        let best: typeof p | null = null;
+        let bd = 80;
+        for (const o of self.world.actors) {
+          if (o.id === p.id || !o.alive || o.kind !== "human") continue;
+          const d = Math.hypot(o.x - p.x, o.z - p.z);
+          if (d < bd) {
+            bd = d;
+            best = o;
+          }
+        }
+        if (!best) return false;
+        const f = facing(p.yaw);
+        best.x = p.x + f.x * 0.62;
+        best.z = p.z + f.z * 0.62;
+        best.y = p.y;
+        best.yaw = p.yaw + Math.PI;
+        best.balance = 1;
+        best.loco = "idle";
+        if (best.body) best.body.mode = "stance";
+        reposeActor(best);
+        reposeActor(p);
+        return true;
       },
       setKeys: (codes: string[]) => {
         if (self.world.phase !== "playing") {
@@ -553,6 +603,8 @@ declare global {
       forceFlinch?: (dir?: string) => void;
       forceStruggle?: () => boolean;
       forceGrabbedPunch?: () => boolean;
+      forceInjure?: (region?: string, kind?: string) => void;
+      forceVictim?: () => boolean;
       setWeapon?: (kind: string) => void;
       getCombat?: () => unknown;
       setKeys?: (codes: string[]) => void;

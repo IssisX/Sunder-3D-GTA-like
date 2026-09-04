@@ -33,13 +33,13 @@ export const PART_REGION: Region[] = [
 ];
 
 const LOCAL: [number, number, number][] = [
-  [0, 0.9, 0],
-  [0, 1.22, 0.02],
-  [0, 1.55, 0.04],
-  [-0.26, 1.34, 0],
-  [-0.28, 0.94, 0.02],
-  [0.26, 1.34, 0],
-  [0.28, 0.94, 0.02],
+  [0, 0.92, 0],
+  [0, 1.28, 0.02],
+  [0, 1.66, 0.03],
+  [-0.26, 1.38, 0],
+  [-0.28, 0.98, 0.02],
+  [0.26, 1.38, 0],
+  [0.28, 0.98, 0.02],
   [-0.11, 0.52, 0.01],
   [-0.12, 0.12, 0.05],
   [0.11, 0.52, 0.01],
@@ -51,7 +51,7 @@ const MASSW = [18, 14, 6, 4, 3, 4, 3, 8, 5, 8, 5];
 
 const BONES: [number, number, number][] = [
   [0, 1, 0.000012],
-  [1, 2, 0.000018],
+  [1, 2, 0.000014],
   [1, 3, 0.00002],
   [3, 4, 0.000022],
   [1, 5, 0.00002],
@@ -60,7 +60,6 @@ const BONES: [number, number, number][] = [
   [7, 8, 0.000018],
   [0, 9, 0.000016],
   [9, 10, 0.000018],
-  [0, 2, 0.00004],
   [3, 5, 0.00003],
   [7, 9, 0.00003],
   [0, 3, 0.000045],
@@ -73,7 +72,7 @@ const HINGES: [number, number, number, number, number][] = [
   [P.spine, P.uarmR, P.larmR, -0.72, 0.92],
   [P.pelvis, P.thighL, P.shinL, -0.88, 0.78],
   [P.pelvis, P.thighR, P.shinR, -0.88, 0.78],
-  [P.pelvis, P.spine, P.head, -0.55, 0.85],
+  [P.pelvis, P.spine, P.head, 0.42, 0.999],
 ];
 
 const BONE_SKIP = new Set(BONES.map(([a, b]) => (a < b ? a * 16 + b : b * 16 + a)));
@@ -101,7 +100,8 @@ function lerp3(a: [number, number, number], b: [number, number, number], t: numb
 }
 
 export function strikeDuration(a: Actor) {
-  return STRIKE_DUR / (WEAPON_STATS[a.weapon]?.speed ?? 1);
+  const arm = 1 + injurySum(a.injuries.rarm) * 0.55 + a.injuries.rarm.fracture * 1.6;
+  return (STRIKE_DUR * arm) / (WEAPON_STATS[a.weapon]?.speed ?? 1);
 }
 
 export function actionUnit(remain: number, dur: number) {
@@ -216,8 +216,78 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     if (i === P.larmR || i === P.uarmR) lz += s * amp * (i === P.larmR ? 0.85 : 0.4);
   }
 
+  const hHead = injurySum(a.injuries.head);
+  const hTorso = injurySum(a.injuries.torso);
+  const hLarm = injurySum(a.injuries.larm) + a.injuries.larm.fracture * 1.8;
+  const hRarm = injurySum(a.injuries.rarm) + a.injuries.rarm.fracture * 1.8;
+  const hLleg = injurySum(a.injuries.lleg) + a.injuries.lleg.fracture * 2 + a.injuries.lleg.sprain;
+  const hRleg = injurySum(a.injuries.rleg) + a.injuries.rleg.fracture * 2 + a.injuries.rleg.sprain;
+  if (hLleg > 0.18 && !kicking) {
+    if (i === P.shinL || i === P.thighL) {
+      lz *= 0.52;
+      ly -= 0.03 * clamp(hLleg, 0, 1);
+    }
+    if (i === P.pelvis) {
+      ly -= Math.max(0, s) * 0.07 * clamp(hLleg, 0, 1.2);
+      lx += 0.05 * clamp(hLleg, 0, 1);
+    }
+  }
+  if (hRleg > 0.18 && !kicking) {
+    if (i === P.shinR || i === P.thighR) {
+      lz *= 0.52;
+      ly -= 0.03 * clamp(hRleg, 0, 1);
+    }
+    if (i === P.pelvis) {
+      ly -= Math.max(0, -s) * 0.07 * clamp(hRleg, 0, 1.2);
+      lx -= 0.05 * clamp(hRleg, 0, 1);
+    }
+  }
+  if (hRarm > 0.35 && !punching && !shoving && a.grabT <= 0 && !a.grabbedId) {
+    const k = clamp(hRarm, 0, 1.3);
+    if (i === P.larmR) {
+      ly -= 0.32 * k;
+      lz -= 0.1 * k;
+    } else if (i === P.uarmR) {
+      ly -= 0.14 * k;
+      lz -= 0.04 * k;
+    }
+  }
+  if (hLarm > 0.35 && !punching && !shoving && a.grabT <= 0 && !a.grabbedId) {
+    const k = clamp(hLarm, 0, 1.3);
+    if (i === P.larmL) {
+      ly -= 0.32 * k;
+      lz -= 0.1 * k;
+    } else if (i === P.uarmL) {
+      ly -= 0.14 * k;
+      lz -= 0.04 * k;
+    }
+  }
+  if (hTorso > 0.28 && !punching && !shoving && a.grabT <= 0 && !a.grabbedBy) {
+    if (i === P.spine || i === P.pelvis) {
+      ly -= 0.05 * clamp(hTorso, 0, 1);
+      lz += 0.06 * clamp(hTorso, 0, 1);
+    }
+    if (i === P.larmL || i === P.uarmL) {
+      const k = i === P.larmL ? 1 : 0.45;
+      lz += 0.2 * k;
+      ly += 0.02 * k;
+      lx += 0.1 * k;
+    }
+  }
+  if (i === P.head) {
+    if (a.injuries.head.fracture > 0.28) {
+      ly -= 0.1;
+      lz += 0.07;
+      lx += 0.05;
+    } else if (hHead > 0.22) {
+      lx += 0.035 * clamp(hHead, 0, 1);
+      ly -= 0.02 * clamp(hHead, 0, 0.8);
+    }
+  }
+
+
   const twoHandWep = a.weapon === "spear" || a.weapon === "pitchfork";
-  if (twoHandWep && !punching && !kicking && !shoving && a.grabT <= 0 && !a.grabbedId && !a.grabbedBy) {
+  if (twoHandWep && hRarm < 0.45 && !punching && !kicking && !shoving && a.grabT <= 0 && !a.grabbedId && !a.grabbedBy) {
     if (i === P.larmR) {
       lz += 0.34;
       ly += 0.16;
@@ -236,6 +306,7 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     }
   } else if (
     (a.weapon === "club" || a.weapon === "board" || a.weapon === "torch") &&
+    hRarm < 0.45 &&
     !punching &&
     !shoving &&
     a.grabT <= 0 &&
@@ -376,10 +447,10 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     const hit = a.body?.lastHit ?? P.spine;
     const region = PART_REGION[hit] ?? "torso";
     if (i === P.spine || i === P.head || i === P.pelvis) {
-      const k = i === P.head ? 1.4 : i === P.spine ? 1 : 0.5;
+      const k = i === P.head ? 1.15 : i === P.spine ? 1 : 0.5;
       lx += recX * rec * k;
       lz += recZ * rec * k;
-      ly -= rec * (i === P.head ? 0.24 : 0.1);
+      ly -= rec * (i === P.head ? 0.05 : 0.08);
     }
     if (i === P.larmL || i === P.larmR || i === P.uarmL || i === P.uarmR) {
       const hand = i === P.larmL || i === P.larmR;
@@ -558,7 +629,7 @@ export function applyImpulseToNearest(
   if (!a.body) return -1;
   const i = nearestPart(a.body, x, y, z);
   const p = a.body.parts[i]!;
-  const scale = a.body.mode === "stance" ? 0.32 : 1;
+  const scale = a.body.mode === "stance" ? 0.18 : 1;
   p.vx += ix * p.invM * scale;
   p.vy += iy * p.invM * scale;
   p.vz += iz * p.invM * scale;
@@ -725,10 +796,10 @@ function poseCompliance(a: Actor, i: number) {
   if (i === P.pelvis) return 0.00000022;
   if (i === P.spine) return 0.000018 * (1 + inj);
   if (i === P.shinL || i === P.shinR) return 0.000012 * (1 + inj * 3 + frac * 12);
-  if (i === P.head) return 0.000028 * (1 + inj * 2);
+  if (i === P.head) return 0.000008 * (1 + inj * 4 + frac * 22);
   if (i === P.thighL || i === P.thighR) return 0.000022 * (1 + inj * 3 + frac * 12);
   let c = 0.00004 * (1 + inj * 3 + frac * 14);
-  if (a.loco === "stumble") c *= 2.6;
+  if (a.loco === "stumble") c *= 1.25;
   if (a.grabbedBy) c *= a.body?.mode === "stance" ? 0.85 : 3.5;
   if (a.body?.grab && (i === P.larmR || i === P.uarmR)) c *= 5;
   return c;
@@ -755,15 +826,16 @@ function injureImpact(w: World, a: Actor, i: number, vn: number, h: number) {
     a.body.lastVn = Math.max(a.body.lastVn, vn);
     a.body.lastHit = i;
   }
-  if (a.body?.mode === "stance" && vn > 5.4) {
-    a.balance = Math.max(0, a.balance - extra * 0.1);
-    if (a.balance < 0.18) {
+  if (a.body?.mode === "stance" && vn > 7.2) {
+    a.balance = Math.max(0, a.balance - extra * 0.06);
+    const pelY = a.body.parts[P.pelvis]?.y ?? 1;
+    if (a.balance < 0.12 && pelY < 0.55) {
       a.loco = "ragdoll";
       a.locoT = 0.7 + extra * 0.08;
       a.body.mode = "ragdoll";
-    } else if (a.balance < 0.48) {
+    } else if (a.balance < 0.35) {
       a.loco = "stumble";
-      a.locoT = 0.4;
+      a.locoT = 0.35;
     }
   }
   if (vn > 4 && w.rng() < 0.35) w.emitSound(a.x, a.z, 0.3 + Math.min(0.5, extra * 0.08), "impact", a.id);
@@ -1028,8 +1100,8 @@ function solveGrab(w: World, a: Actor, h: number) {
     other.injuries[r].sprain += tension * h * 0.35;
     a.injuries.rarm.sprain += tension * h * 0.18;
     if (g.myPart2 >= 0) a.injuries.larm.sprain += tension * h * 0.12;
-    other.balance = Math.max(0, other.balance - tension * h * 1.8);
-    if (other.body.mode === "stance" && (tension > 0.55 || other.balance < 0.28)) {
+    other.balance = Math.max(0, other.balance - tension * h * 0.35);
+    if (!other.alive && other.body.mode === "stance") {
       other.loco = "ragdoll";
       other.locoT = 0.85;
       other.body.mode = "ragdoll";
@@ -1084,10 +1156,10 @@ function writeback(a: Actor) {
     const dz = pel.z - t.z;
     const push = Math.hypot(dx, dz);
     if (push > 0.02) {
-      a.x += dx * 0.35;
-      a.z += dz * 0.35;
-      a.vx += dx * 1.4;
-      a.vz += dz * 1.4;
+      a.x += dx * 0.18;
+      a.z += dz * 0.18;
+      a.vx += dx * 0.45;
+      a.vz += dz * 0.45;
     }
     return;
   }
@@ -1204,12 +1276,20 @@ export function stepBodies(w: World, dt: number) {
     writeback(a);
     const { stance, planted } = evalSupport(a);
     if (a.body.mode === "stance" && a.alive && a.loco !== "vault" && a.loco !== "climb") {
-      if (stance < 0.2 && Math.hypot(a.vx, a.vz) > 1.6) {
+      const busy =
+        a.strikeT > 0 ||
+        a.kickT > 0 ||
+        a.shoveT > 0 ||
+        a.flinchT > 0 ||
+        a.grabT > 0 ||
+        a.grabbedBy > 0 ||
+        a.grabbedId > 0;
+      const pel = a.body.parts[P.pelvis]!;
+      if (!busy && stance < 0.14 && Math.hypot(a.vx, a.vz) > 2.6) {
         a.loco = "stumble";
-        a.locoT = 0.45;
-        a.balance = Math.min(a.balance, 0.38);
+        a.locoT = 0.32;
       }
-      if (stance < 0.08 && !planted) {
+      if (!busy && stance < 0.04 && !planted && pel.y < 0.5) {
         a.loco = "ragdoll";
         a.locoT = 0.85;
         a.body.mode = "ragdoll";

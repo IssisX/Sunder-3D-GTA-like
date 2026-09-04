@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { Actor, Particle, Prop, WeaponKind } from "./types";
+import type { Actor, Injury, Particle, Prop, WeaponKind } from "./types";
 import { FIRE_RES, HALF, WORLD } from "./types";
 import { World, facing, injurySum, lerpAng } from "./world";
 import type { Cam } from "./sim";
@@ -350,7 +350,11 @@ export class View {
     };
     const pelvis = mk(dark, "pelvis");
     const torso = mk(cloth, "torso");
-    const head = mk(skin, "head");
+    const neck = mk(skin, "neck");
+    const head = new THREE.Mesh(GEO.sphere, skin);
+    head.name = "head";
+    head.castShadow = true;
+    g.add(head);
     const luarm = mk(skin, "luarm");
     const llarm = mk(skin, "llarm");
     const ruarm = mk(skin, "ruarm");
@@ -359,11 +363,14 @@ export class View {
     const lshin = mk(dark, "lshin");
     const rthigh = mk(dark, "rthigh");
     const rshin = mk(dark, "rshin");
+    for (const m of [pelvis, torso, neck, head, luarm, llarm, ruarm, rlarm, lthigh, lshin, rthigh, rshin]) {
+      addWounds(m, a.id);
+    }
     if (a.helmet) {
       const h = new THREE.Mesh(GEO.sphere, mat(0x4a4c50, { metalness: 0.5, roughness: 0.4 }));
       h.name = "helmet";
-      h.scale.set(1.15, 0.85, 1.1);
-      h.position.y = 0.35;
+      h.scale.set(1.05, 0.72, 1.05);
+      h.position.y = 0.12;
       head.add(h);
     }
     const wep = new THREE.Group();
@@ -371,6 +378,7 @@ export class View {
     g.add(wep);
     g.userData.parts = {
       head,
+      neck,
       torso,
       pelvis,
       larm: luarm,
@@ -409,13 +417,22 @@ export class View {
       z: p.pz + (p.z - p.pz) * alpha,
     });
     const A = body.parts.map(lerpP);
-    placeSeg(parts.pelvis!, A[P.pelvis]!, A[P.spine]!, 0.22);
-    placeSeg(parts.torso!, A[P.spine]!, A[P.head]!, 0.28);
+    const sp = A[P.spine]!;
     const hd = A[P.head]!;
+    const nx = hd.x - sp.x;
+    const ny = hd.y - sp.y;
+    const nz = hd.z - sp.z;
+    const neckBase = { x: sp.x + nx * 0.38, y: sp.y + ny * 0.38, z: sp.z + nz * 0.38 };
+    const skull = { x: sp.x + nx * 0.78, y: sp.y + ny * 0.78, z: sp.z + nz * 0.78 };
+    placeSeg(parts.pelvis!, A[P.pelvis]!, sp, 0.22);
+    placeSeg(parts.torso!, sp, neckBase, 0.26);
+    if (parts.neck) placeSeg(parts.neck, neckBase, skull, 0.09);
     parts.head!.position.set(hd.x, hd.y, hd.z);
-    parts.head!.scale.set(0.26, 0.28, 0.24);
-    parts.head!.quaternion.identity();
-    placeSeg(parts.luarm!, A[P.spine]!, A[P.uarmL]!, 0.1);
+    parts.head!.scale.set(0.22, 0.24, 0.21);
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    _dir.set(nx / nl, ny / nl, nz / nl);
+    parts.head!.quaternion.setFromUnitVectors(_up, _dir);
+    placeSeg(parts.luarm!, sp, A[P.uarmL]!, 0.1);
     placeSeg(parts.llarm!, A[P.uarmL]!, A[P.larmL]!, 0.09);
     placeSeg(parts.ruarm!, A[P.spine]!, A[P.uarmR]!, 0.1);
     placeSeg(parts.rlarm!, A[P.uarmR]!, A[P.larmR]!, 0.09);
@@ -449,11 +466,20 @@ export class View {
       }
     }
     if (parts.head) (parts.head as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.head));
+    if (parts.neck) (parts.neck as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.head) * 0.4);
     if (parts.torso) (parts.torso as THREE.Mesh).material = tintInjury(a.cloth, injurySum(a.injuries.torso) * 0.6);
     if (parts.llarm) (parts.llarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.larm));
     if (parts.rlarm) (parts.rlarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.rarm));
+    if (parts.luarm) (parts.luarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.larm) * 0.5);
+    if (parts.ruarm) (parts.ruarm as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.rarm) * 0.5);
     if (parts.lshin) (parts.lshin as THREE.Mesh).material = tintInjury(a.accent, injurySum(a.injuries.lleg));
     if (parts.rshin) (parts.rshin as THREE.Mesh).material = tintInjury(a.accent, injurySum(a.injuries.rleg));
+    paintWounds(parts.head, a.injuries.head);
+    paintWounds(parts.torso, a.injuries.torso);
+    paintWounds(parts.rlarm, a.injuries.rarm);
+    paintWounds(parts.llarm, a.injuries.larm);
+    paintWounds(parts.rshin, a.injuries.rleg);
+    paintWounds(parts.lshin, a.injuries.lleg);
   }
 
   private makeBeast(a: Actor) {
@@ -814,6 +840,57 @@ function rebuildHeldWeapon(g: THREE.Object3D, kind: WeaponKind, lit: boolean, is
 }
 
 const injuryMats = new Map<string, THREE.MeshStandardMaterial>();
+function addWounds(parent: THREE.Object3D, id: number) {
+  const bruise = new THREE.Mesh(
+    GEO.box,
+    new THREE.MeshStandardMaterial({ color: 0x6a241c, roughness: 1, transparent: true, opacity: 0.0 }),
+  );
+  bruise.name = "wound-bruise";
+  bruise.scale.set(1.12, 1.12, 1.12);
+  bruise.visible = false;
+  bruise.castShadow = false;
+  parent.add(bruise);
+  const cut = new THREE.Mesh(GEO.box, new THREE.MeshStandardMaterial({ color: 0x2a0808, roughness: 0.9, metalness: 0.05 }));
+  cut.name = "wound-cut";
+  cut.scale.set(0.18, 0.85, 0.07);
+  cut.rotation.z = ((id % 7) - 3) * 0.16;
+  cut.rotation.x = 0.2;
+  cut.visible = false;
+  parent.add(cut);
+  const burn = new THREE.Mesh(
+    GEO.box,
+    new THREE.MeshStandardMaterial({ color: 0x1a120c, emissive: 0x4a2208, emissiveIntensity: 0.2, roughness: 1 }),
+  );
+  burn.name = "wound-burn";
+  burn.scale.set(1.08, 0.45, 1.08);
+  burn.visible = false;
+  parent.add(burn);
+}
+
+function paintWounds(mesh: THREE.Object3D | undefined, inj: Injury) {
+  if (!mesh) return;
+  const bruise = mesh.getObjectByName("wound-bruise") as THREE.Mesh | undefined;
+  const cut = mesh.getObjectByName("wound-cut") as THREE.Mesh | undefined;
+  const burn = mesh.getObjectByName("wound-burn") as THREE.Mesh | undefined;
+  if (bruise) {
+    const amt = inj.bruise + inj.sprain * 0.4;
+    bruise.visible = amt > 0.1;
+    const m = bruise.material as THREE.MeshStandardMaterial;
+    m.opacity = clamp01(amt * 0.7);
+    m.color.setRGB(0.42 + amt * 0.1, 0.12, 0.1);
+  }
+  if (cut) cut.visible = inj.cut + inj.puncture > 0.08;
+  if (burn) {
+    burn.visible = inj.burn > 0.1;
+    const m = burn.material as THREE.MeshStandardMaterial;
+    m.emissiveIntensity = 0.12 + Math.min(0.5, inj.burn);
+  }
+}
+
+function clamp01(v: number) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
 function tintInjury(base: number, amount: number) {
   const key = base + ":" + (amount * 8 | 0);
   let m = injuryMats.get(key);

@@ -837,6 +837,12 @@ function resolveMelee(
     if (how === "kick") {
       o.injuries.lleg.sprain += 0.12;
       o.vy += 0.45;
+      a.injuries.rleg.sprain += 0.04;
+      if (a.injuries.rleg.fracture > 0.22) {
+        a.loco = "stumble";
+        a.locoT = 0.4;
+        a.pain = clamp(a.pain + 0.15, 0, 1);
+      }
     }
   }
   if (how !== "strike") return;
@@ -867,11 +873,11 @@ function resolveShove(w: World, a: Actor) {
     const rel = a.mass / (a.mass + o.mass);
     o.vx += f.x * 4.2 * rel;
     o.vz += f.z * 4.2 * rel;
-    o.balance -= 0.32 * rel;
-    applyImpulseToNearest(o, o.x, o.y + 1.05, o.z, f.x * 8 * rel, 1.6 * rel, f.z * 8 * rel);
-    if (o.balance < 0.22) {
+    o.balance = Math.max(0, o.balance - 0.12 * rel);
+    applyImpulseToNearest(o, o.x, o.y + 1.05, o.z, f.x * 5 * rel, 0.8 * rel, f.z * 5 * rel);
+    if (o.balance < 0.18) {
       o.loco = "stumble";
-      o.locoT = 0.4;
+      o.locoT = 0.32;
     }
   }
 }
@@ -890,14 +896,14 @@ function hitActor(
   const f = facing(atk.yaw);
   const rel = atk.mass / (atk.mass + vic.mass);
   const force = (0.6 + speed * 0.25) * (0.7 + st.mass * 0.25) * (0.8 + atk.strength * 0.4);
-  vic.vx += f.x * force * 2.4 * rel;
-  vic.vz += f.z * force * 2.4 * rel;
-  vic.balance -= 0.22 + st.blunt * 0.28 * rel;
+  vic.vx += f.x * force * 1.6 * rel;
+  vic.vz += f.z * force * 1.6 * rel;
+  vic.balance = Math.max(0, vic.balance - (0.05 + st.blunt * 0.08 * rel));
   const side = rightOf(atk.yaw).x * (vic.x - atk.x) + rightOf(atk.yaw).z * (vic.z - atk.z);
   const hitX = hx ?? vic.x + f.x * 0.12;
   const hitY = hy ?? (how === "kick" ? vic.y + 0.32 : vic.y + 1.05);
   const hitZ = hz ?? vic.z + f.z * 0.12;
-  const jScale = vic.body?.mode === "stance" ? 5 : 12;
+  const jScale = vic.body?.mode === "stance" ? 2.8 : 12;
   const part = applyImpulseToNearest(
     vic,
     hitX,
@@ -951,17 +957,19 @@ function hitActor(
   if (atk.kind === "player" && vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.35);
   if (atk.kind === "player" && vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.2);
   vic.alert = 1;
-  if (vic.balance < 0.12 || force > 2.35) {
+  const legsBroken = vic.injuries.lleg.fracture + vic.injuries.rleg.fracture > 0.4;
+  const dropped = vic.consciousness < 0.22 || (vic.balance < 0.08 && force > 1.9) || (legsBroken && how === "kick" && force > 1.15);
+  if (dropped) {
     vic.loco = "ragdoll";
     vic.locoT = 0.7 + (1 - vic.balance);
-    vic.vy += 0.9 * rel;
+    vic.vy += 0.5 * rel;
     if (vic.body) vic.body.mode = "ragdoll";
-  } else if (vic.balance < 0.4) {
+  } else if (vic.balance < 0.3 || (force > 1.7 && st.blunt > 1)) {
     vic.loco = "stumble";
-    vic.locoT = 0.4;
+    vic.locoT = 0.32;
     vic.flinchT = Math.max(vic.flinchT, FLINCH_DUR);
   } else {
-    vic.flinchT = Math.max(vic.flinchT, 0.2 + force * 0.1);
+    vic.flinchT = Math.max(vic.flinchT, 0.22 + force * 0.08);
   }
   w.emitSound(vic.x, vic.z, 0.55 + force * 0.2, "impact", atk.id);
   if (vic.kind === "human" || vic.kind === "player") {
@@ -1127,7 +1135,7 @@ function tryLockGrab(w: World, a: Actor) {
     }
     a.carry = o.mass * (o.mass > a.mass * 0.62 || !o.alive ? 0.7 : 0.42);
     setGrab(a, o);
-    if (o.balance < 0.55) {
+    if (!o.alive || o.consciousness < 0.22) {
       o.loco = "ragdoll";
       o.locoT = 0.6;
       if (o.body) o.body.mode = "ragdoll";
@@ -1181,6 +1189,10 @@ function stepLocomotion(w: World, dt: number) {
       if (a.locoT <= 0) a.loco = "idle";
     }
     if (a.grabbedBy) a.intendSpeed *= 0.62;
+    if (a.kind !== "player") {
+      const limp = 1 - clamp(injurySum(a.injuries.lleg) + injurySum(a.injuries.rleg), 0, 1.8) * 0.28;
+      a.intendSpeed *= limp;
+    }
     if (a.loco === "down") {
       a.intendSpeed = 0;
       continue;
