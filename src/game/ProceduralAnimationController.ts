@@ -4,13 +4,15 @@ import type { World } from "./world";
 import { AnimationController } from "./AnimationController";
 import { MeleeKinematics } from "./melee-kinematics";
 import { SocialAwarenessController } from "./social-awareness";
+import { impactDynamics } from "./impact-dynamics";
 
 /**
  * Canonical runtime animation orchestrator.
  *
  * AnimationController owns phase-matched locomotion/root motion.
  * MeleeKinematics owns contact-authoritative kinetic-chain Punch/Kick and
- * weapon melee. AnimatedPhysicalBodies underneath still owns Grab while
+ * weapon melee. impactDynamics owns anatomical impulse/torque propagation
+ * after contact. AnimatedPhysicalBodies underneath still owns Grab while
  * INTERACTION remains the next migration slice. Every system projects into
  * the same authoritative BodyRig.
  */
@@ -20,18 +22,22 @@ export class ProceduralAnimationController extends AnimationController {
 
   override bootstrap(w: World) {
     super.bootstrap(w);
+    impactDynamics.bind(this);
+    impactDynamics.bootstrap(w);
     this.melee.bootstrap(w);
     this.social.reset();
   }
 
   override clear() {
     super.clear();
+    impactDynamics.clear();
     this.melee.clear();
     this.social.reset();
   }
 
   override reset(a: Actor) {
     super.reset(a);
+    impactDynamics.reset(a);
     this.melee.reset(a);
   }
 
@@ -55,5 +61,6 @@ export class ProceduralAnimationController extends AnimationController {
     this.social.endStep(w);
     super.step(w, dt);
     this.melee.step(w, dt);
+    impactDynamics.step(w, dt);
   }
 }
