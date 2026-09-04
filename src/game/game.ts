@@ -5,7 +5,7 @@ import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
-import { PhysicalBodies } from "./body";
+import { AnimatedPhysicalBodies } from "./body-actions";
 import { BodyView } from "./body-render";
 import { clearSave, loadSave, writeSave } from "./save";
 
@@ -14,7 +14,7 @@ export class Game {
   input: Input;
   audio = new GameAudio();
   view: View;
-  bodies = new PhysicalBodies();
+  bodies = new AnimatedPhysicalBodies();
   bodyView: BodyView;
   cam: Cam = { yaw: 0, pitch: 0.18 };
   hud: HudState = defaultHud();
@@ -135,7 +135,7 @@ export class Game {
     buildLevel(this.world);
     this.view = new View(this.canvas);
     this.view.bootstrap(this.world);
-    this.bodies = new PhysicalBodies();
+    this.bodies = new AnimatedPhysicalBodies();
     this.bodies.bootstrap(this.world);
     this.bodyView = new BodyView(this.view, this.bodies);
     this.bodyView.bootstrap(this.world.actors);
@@ -176,6 +176,7 @@ export class Game {
     const playing = this.world.phase === "playing" || this.world.phase === "title";
     const simPlaying = this.world.phase === "playing";
     const input = this.input.sample();
+    this.bodies.captureInput(input);
     if (simPlaying) {
       this.cam.yaw -= input.lookX;
       this.cam.pitch = clamp(this.cam.pitch - input.lookY, -0.9, 0.55);
