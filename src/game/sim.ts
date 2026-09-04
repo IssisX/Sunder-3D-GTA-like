@@ -40,6 +40,7 @@ import {
   GRAB_DUR,
   FLINCH_DUR,
   P,
+  punchKind,
 } from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
@@ -840,21 +841,50 @@ function breakFence(w: World, a: Actor) {
   }
 }
 
+export function startStrike(w: World, a: Actor) {
+  const chaining =
+    (a.strikeT > 0 && actionUnit(a.strikeT, strikeDuration(a)) > 0.44) ||
+    (a.kickT > 0 && actionUnit(a.kickT, KICK_DUR) > 0.52) ||
+    (a.combo > 0 && a.comboAge < 0.36 && a.strikeT <= 0);
+  a.combo = chaining ? Math.min(6, a.combo + 1) : 1;
+  a.comboAge = 0;
+  a.kickT = 0;
+  const kind = a.weapon === "fist" ? punchKind(a) : "cross";
+  const scale = kind === "jab" ? 0.82 : kind === "hook" ? 1.06 : 1;
+  a.strikeT = strikeDuration(a) * scale;
+  a.strikeCd = chaining ? a.strikeT * 0.52 : a.strikeT + 0.1;
+  a.strikeHit = 0;
+  if (!a.grabbedId) a.grabT = 0;
+  a.stamina = Math.max(0, a.stamina - 0.05);
+  w.emitSound(a.x, a.z, 0.35, "weapon", a.id);
+}
+
+export function startKick(w: World, a: Actor) {
+  const chaining =
+    (a.strikeT > 0 && actionUnit(a.strikeT, strikeDuration(a)) > 0.46) ||
+    (a.combo > 0 && a.comboAge < 0.36 && a.kickT <= 0);
+  a.combo = chaining ? Math.min(6, a.combo + 1) : 1;
+  a.comboAge = 0;
+  a.strikeT = 0;
+  a.kickT = KICK_DUR;
+  a.strikeHit = 0;
+  w.emitSound(a.x, a.z, 0.3, "whoosh", a.id);
+}
+
 function stepCombat(w: World, dt: number, input: Actions | null) {
   const p = w.player();
   if (input && p.alive && p.consciousness > 0.4) {
-    if (input.attackPressed && p.strikeCd <= 0 && p.loco !== "ragdoll" && p.loco !== "down" && p.loco !== "getup") {
-      p.strikeT = strikeDuration(p);
-      p.strikeCd = p.strikeT + 0.16;
-      p.strikeHit = 0;
-      if (!p.grabbedId) p.grabT = 0;
-      p.stamina = Math.max(0, p.stamina - 0.06);
-      w.emitSound(p.x, p.z, 0.35, "weapon", p.id);
+    if (input.attackPressed && p.loco !== "ragdoll" && p.loco !== "down" && p.loco !== "getup") {
+      const u = p.strikeT > 0 ? actionUnit(p.strikeT, strikeDuration(p)) : 1;
+      const ku = p.kickT > 0 ? actionUnit(p.kickT, KICK_DUR) : 1;
+      const can =
+        (p.strikeCd <= 0 && p.strikeT <= 0 && p.kickT <= 0) || u > 0.44 || ku > 0.52 || (p.combo > 0 && p.comboAge < 0.34 && p.strikeT <= 0);
+      if (can) startStrike(w, p);
     }
-    if (input.kickPressed && p.kickT <= 0 && p.grounded && p.loco !== "ragdoll") {
-      p.kickT = KICK_DUR;
-      p.strikeHit = 0;
-      w.emitSound(p.x, p.z, 0.3, "whoosh", p.id);
+    if (input.kickPressed && p.grounded && p.loco !== "ragdoll") {
+      const u = p.strikeT > 0 ? actionUnit(p.strikeT, strikeDuration(p)) : 1;
+      const can = p.kickT <= 0 || u > 0.46;
+      if (can) startKick(w, p);
     }
     if (input.shovePressed && p.shoveT <= 0 && p.loco !== "ragdoll") {
       p.shoveT = SHOVE_DUR;
@@ -865,20 +895,25 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
     a.strikeCd = Math.max(0, a.strikeCd - dt);
     a.attackCd = Math.max(0, a.attackCd - dt);
     a.flinchT = Math.max(0, a.flinchT - dt);
+    a.comboAge += dt;
+    if (a.combo > 0 && a.strikeT <= 0 && a.kickT <= 0 && a.comboAge > 0.42) a.combo = 0;
     if (a.strikeT > 0) {
       const dur =
         a.species === "human" || a.kind === "player" ? strikeDuration(a) : a.species === "bear" ? 0.42 : 0.34;
       a.strikeT = Math.max(0, a.strikeT - dt);
       const u = actionUnit(Math.max(0, a.strikeT), dur);
       const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
-      if (u >= 0.3 && u <= 0.54) {
+      const kind = a.weapon === "fist" ? punchKind(a) : "cross";
+      const lo = kind === "jab" ? 0.28 : kind === "hook" ? 0.4 : 0.38;
+      const hi = kind === "jab" ? 0.5 : 0.56;
+      if (u >= lo && u <= hi) {
         resolveMelee(w, a, "strike", st);
       }
     }
     if (a.kickT > 0) {
       const prev = a.kickT;
       a.kickT = Math.max(0, a.kickT - dt);
-      if (prev > KICK_DUR * 0.52 && a.kickT <= KICK_DUR * 0.52) {
+      if (prev > KICK_DUR * 0.5 && a.kickT <= KICK_DUR * 0.5) {
         resolveMelee(w, a, "kick", { ...WEAPON_STATS.fist, blunt: 1.15, reach: 0.08 });
       }
     }

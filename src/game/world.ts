@@ -260,6 +260,8 @@ export class World {
       plantPart: -1,
       plantX: 0,
       plantZ: 0,
+      combo: 0,
+      comboAge: 0,
       ...partial,
     };
     a.px = a.x;

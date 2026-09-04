@@ -265,6 +265,8 @@ export interface Actor {
   plantPart: number;
   plantX: number;
   plantZ: number;
+  combo: number;
+  comboAge: number;
   body?: Physique;
 }
 

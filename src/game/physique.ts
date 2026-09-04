@@ -33,20 +33,20 @@ export const PART_REGION: Region[] = [
 ];
 
 const LOCAL: [number, number, number][] = [
-  [0, 0.92, 0],
-  [0, 1.3, 0.02],
-  [0, 1.7, 0],
-  [-0.36, 1.42, 0],
-  [-0.38, 0.96, 0.03],
-  [0.36, 1.42, 0],
-  [0.38, 0.96, 0.03],
-  [-0.14, 0.52, 0.02],
-  [-0.14, 0.08, 0.05],
-  [0.14, 0.52, 0.02],
-  [0.14, 0.08, 0.05],
+  [0, 0.94, 0],
+  [0, 1.36, 0.04],
+  [0, 1.64, 0.03],
+  [-0.18, 1.46, 0.02],
+  [-0.22, 0.86, 0.06],
+  [0.18, 1.46, 0.02],
+  [0.22, 0.86, 0.06],
+  [-0.1, 0.52, 0.03],
+  [-0.11, 0.08, 0.05],
+  [0.1, 0.52, 0.03],
+  [0.11, 0.08, 0.05],
 ];
 
-const RAD = [0.15, 0.13, 0.11, 0.08, 0.07, 0.08, 0.07, 0.09, 0.08, 0.09, 0.08];
+const RAD = [0.14, 0.13, 0.11, 0.09, 0.075, 0.09, 0.075, 0.11, 0.09, 0.11, 0.09];
 const MASSW = [18, 14, 6, 4, 3, 4, 3, 8, 5, 8, 5];
 
 const BONES: [number, number, number][] = [
@@ -68,10 +68,10 @@ const BONES: [number, number, number][] = [
 
 /** Hinge spans (a-b-c). Min cosine keeps the joint from folding flat; max keeps it from going the wrong way past straight. */
 const HINGES: [number, number, number, number, number][] = [
-  [P.spine, P.uarmL, P.larmL, -0.72, 0.92],
-  [P.spine, P.uarmR, P.larmR, -0.72, 0.92],
-  [P.pelvis, P.thighL, P.shinL, -0.88, 0.78],
-  [P.pelvis, P.thighR, P.shinR, -0.88, 0.78],
+  [P.spine, P.uarmL, P.larmL, -0.88, 0.96],
+  [P.spine, P.uarmR, P.larmR, -0.88, 0.96],
+  [P.pelvis, P.thighL, P.shinL, -0.92, 0.9],
+  [P.pelvis, P.thighR, P.shinR, -0.92, 0.9],
   [P.pelvis, P.spine, P.head, 0.42, 0.999],
 ];
 
@@ -120,6 +120,22 @@ function weaponArc(kind: Actor["weapon"]) {
     return { wind: [0.07, 0.1, -0.16] as [number, number, number], hit: [0.02, 0.03, 0.56] as [number, number, number], hands: 1 };
   }
   return { wind: [0.11, 0.18, -0.3] as [number, number, number], hit: [-0.05, 0.05, 0.64] as [number, number, number], hands: 1 };
+}
+
+export function punchKind(a: Actor): "jab" | "cross" | "hook" {
+  const n = Math.max(0, a.combo - 1) % 3;
+  return n === 0 ? "jab" : n === 1 ? "cross" : "hook";
+}
+
+export function punchLeft(a: Actor) {
+  if (a.weapon !== "fist") return false;
+  return punchKind(a) !== "cross";
+}
+
+function phase01(u: number, a0: number, a1: number) {
+  if (u <= a0) return 0;
+  if (u >= a1) return 1;
+  return smooth01((u - a0) / (a1 - a0));
 }
 
 function hasHumanBody(a: Actor) {
@@ -171,9 +187,19 @@ export function makePhysique(a: Actor): Physique {
 }
 
 export function ensureBodies(w: World) {
+  const shoulderRest = Math.hypot(
+    LOCAL[P.spine]![0] - LOCAL[P.uarmL]![0],
+    LOCAL[P.spine]![1] - LOCAL[P.uarmL]![1],
+    LOCAL[P.spine]![2] - LOCAL[P.uarmL]![2],
+  );
   for (const a of w.actors) {
     if (!hasHumanBody(a)) continue;
-    if (!a.body) a.body = makePhysique(a);
+    if (!a.body) {
+      a.body = makePhysique(a);
+      continue;
+    }
+    const j = a.body.joints[2];
+    if (!j || Math.abs(j.rest - shoulderRest) > 0.012) a.body = makePhysique(a);
   }
 }
 
@@ -340,55 +366,160 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
 
   if (punching) {
     const u = actionUnit(a.strikeT, strikeDuration(a));
-    const arc = weaponArc(a.weapon);
     const rear = a.grabbedBy > 0 && toGrabZ < -0.12;
-    const wind = rear ? ([0.06, 0.14, 0.1] as [number, number, number]) : arc.wind;
-    const hit = rear ? ([0.02, 0.04, -0.52] as [number, number, number]) : arc.hit;
-    let off: [number, number, number];
-    if (u < 0.3) off = lerp3([0, 0, 0], wind, smooth01(u / 0.3));
-    else if (u < 0.52) off = lerp3(wind, hit, smooth01((u - 0.3) / 0.22));
-    else off = lerp3(hit, [0, 0, 0], smooth01((u - 0.52) / 0.48));
-    const k = i === P.larmR ? 1 : i === P.uarmR ? 0.48 : 0;
-    if (k) {
-      lx += off[0] * k;
-      ly += off[1] * k;
-      lz += off[2] * k;
+    const armed = a.weapon !== "fist";
+    const kind = armed ? (a.weapon === "spear" || a.weapon === "pitchfork" ? "cross" : "hook") : punchKind(a);
+    const left = !armed && kind !== "cross";
+    const loadU = kind === "jab" ? 0.18 : kind === "hook" ? 0.26 : 0.22;
+    const hitU = kind === "jab" ? 0.46 : kind === "hook" ? 0.54 : 0.5;
+    const arc = weaponArc(a.weapon);
+    let load: [number, number, number];
+    let hit: [number, number, number];
+    if (rear) {
+      load = [0.06, 0.18, 0.08];
+      hit = [0.02, 0.08, -0.56];
+    } else if (armed) {
+      load = arc.wind;
+      hit = arc.hit;
+    } else if (kind === "jab") {
+      load = [0.04, 0.54, 0.06];
+      hit = [0.14, 0.62, 0.54];
+    } else if (kind === "hook") {
+      load = [-0.14, 0.5, -0.1];
+      hit = [-0.22, 0.52, 0.3];
+    } else {
+      load = [-0.04, 0.52, -0.24];
+      hit = [-0.12, 0.62, 0.66];
     }
-    if (!rear && arc.hands === 2 && (i === P.larmL || i === P.uarmL)) {
+    const guard: [number, number, number] = [left ? 0.06 : -0.06, 0.54, 0.16];
+    let off: [number, number, number];
+    if (u < loadU) off = lerp3([0, 0.1, 0.02], load, phase01(u, 0, loadU));
+    else if (u < hitU) off = lerp3(load, hit, phase01(u, loadU, hitU));
+    else off = lerp3(hit, guard, phase01(u, hitU, 1));
+    const hipT = u < hitU ? phase01(u, 0, loadU * 0.9) : 1 - 0.7 * phase01(u, hitU, 1);
+    const drive = u < hitU ? phase01(u, loadU * 0.4, hitU) : 1 - phase01(u, hitU, 1);
+    const hand = left ? P.larmL : P.larmR;
+    const uarm = left ? P.uarmL : P.uarmR;
+    const otherH = left ? P.larmR : P.larmL;
+    const otherU = left ? P.uarmR : P.uarmL;
+    const side = left ? -1 : 1;
+    if (i === hand) {
+      lx += off[0];
+      ly += off[1];
+      lz += off[2];
+    } else if (i === uarm) {
+      lx += off[0] * 0.38 + side * 0.05 * drive;
+      ly += off[1] * 0.42;
+      lz += off[2] * 0.36;
+    } else if (i === otherH) {
+      lx += -side * 0.06;
+      ly += 0.54;
+      lz += 0.18 - off[2] * 0.05;
+    } else if (i === otherU) {
+      ly += 0.18;
+      lz += 0.08;
+      lx += -side * 0.02;
+    }
+    if (i === P.pelvis) {
+      lx += side * (0.05 * hipT - 0.08 * drive);
+      lz += -0.07 * hipT + 0.12 * drive;
+    } else if (i === P.spine) {
+      lx += side * (0.06 * hipT - 0.1 * drive);
+      ly += 0.04 * drive;
+      lz += -0.04 * hipT + 0.14 * drive;
+    } else if (i === P.head) {
+      lx += side * (0.03 * hipT - 0.04 * drive);
+      lz += 0.05 * drive;
+      ly -= 0.02 * hipT;
+    }
+    const rearLeg = left ? P.shinL : P.shinR;
+    const leadLeg = left ? P.shinR : P.shinL;
+    const rearTh = left ? P.thighL : P.thighR;
+    const leadTh = left ? P.thighR : P.thighL;
+    if (i === rearLeg) {
+      lz -= 0.12 * hipT;
+      ly += 0.05 * drive;
+    } else if (i === leadLeg) {
+      lz += 0.1 * drive;
+    } else if (i === rearTh) {
+      lz -= 0.06 * hipT;
+    } else if (i === leadTh) {
+      lz += 0.04 * drive;
+    }
+    if (armed && arc.hands === 2 && (i === P.larmL || i === P.uarmL) && !left) {
       const g = i === P.larmL ? 0.78 : 0.38;
       lx -= off[0] * g * 0.35;
       ly += off[1] * g;
       lz += off[2] * g;
-    } else if (i === P.larmL || i === P.uarmL) {
-      const g = i === P.larmL ? 1 : 0.4;
-      lz += (u < 0.52 ? 0.14 : 0.14 * (1 - (u - 0.52) / 0.48)) * g * (rear ? -0.4 : 1);
     }
-    if (i === P.spine) {
-      lz += off[2] * 0.12;
-      ly += off[1] * 0.18;
-    }
-    if (i === P.head) lz += off[2] * 0.06;
+  } else if ((a.combo > 0 || a.comboAge < 0.22) && !kicking && !shoving && a.grabT <= 0 && !a.grabbedId) {
+    if (i === P.larmL) {
+      ly += 0.54;
+      lz += 0.16;
+      lx += 0.04;
+    } else if (i === P.uarmL) {
+      ly += 0.18;
+      lz += 0.06;
+    } else if (i === P.larmR) {
+      ly += 0.54;
+      lz += 0.18;
+      lx -= 0.04;
+    } else if (i === P.uarmR) {
+      ly += 0.18;
+      lz += 0.07;
+    } else if (i === P.spine) lz += 0.03;
+    else if (i === P.shinL) lz += 0.05;
+    else if (i === P.shinR) lz -= 0.06;
   }
 
   if (kicking) {
     const u = actionUnit(a.kickT, KICK_DUR);
-    const chamber: [number, number, number] = [0.02, 0.28, -0.08];
-    const snap: [number, number, number] = [0.02, 0.1, 0.72];
+    const chamber: [number, number, number] = [-0.02, 0.82, -0.12];
+    const snap: [number, number, number] = [-0.04, 0.96, 0.8];
     let off: [number, number, number];
-    if (u < 0.32) off = lerp3([0, 0, 0], chamber, smooth01(u / 0.32));
-    else if (u < 0.5) off = lerp3(chamber, snap, smooth01((u - 0.32) / 0.18));
-    else off = lerp3(snap, [0, 0, 0], smooth01((u - 0.5) / 0.5));
+    if (u < 0.22) off = lerp3([0, 0, 0], chamber, phase01(u, 0, 0.22));
+    else if (u < 0.48) off = lerp3(chamber, snap, phase01(u, 0.22, 0.48));
+    else if (u < 0.58) off = snap;
+    else if (u < 0.78) off = lerp3(snap, chamber, phase01(u, 0.58, 0.78));
+    else off = lerp3(chamber, [0, 0, 0], phase01(u, 0.78, 1));
+    const chamberAmt =
+      u < 0.22 ? phase01(u, 0, 0.22) : u < 0.58 ? 1 : u < 0.78 ? 1 - phase01(u, 0.58, 0.78) : 0;
+    const snapAmt = u < 0.22 ? 0 : u < 0.48 ? phase01(u, 0.22, 0.48) : u < 0.58 ? 1 : u < 0.78 ? 1 - phase01(u, 0.58, 0.78) : 0;
     if (i === P.shinR) {
       lx += off[0];
       ly += off[1];
       lz += off[2];
     } else if (i === P.thighR) {
-      lx += off[0] * 0.4;
-      ly += off[1] * 0.7;
-      lz += off[2] * 0.4;
-    } else if (i === P.shinL || i === P.thighL) {
+      lx += off[0] * 0.35;
+      ly += 0.4 * Math.max(chamberAmt, snapAmt * 0.85);
+      lz += -0.04 * chamberAmt + 0.38 * snapAmt;
+    } else if (i === P.shinL) {
       lz -= 0.06;
-    } else if (i === P.spine) lz += off[2] * 0.08;
+    } else if (i === P.thighL) {
+      lz -= 0.04;
+      ly -= 0.02 * snapAmt;
+    } else if (i === P.pelvis) {
+      lx -= 0.06 * snapAmt;
+      ly += 0.05 * chamberAmt;
+      lz += -0.08 * chamberAmt + 0.1 * snapAmt;
+    } else if (i === P.spine) {
+      lz += -0.1 * chamberAmt + 0.12 * snapAmt;
+      lx -= 0.05 * snapAmt;
+      ly += 0.03 * snapAmt;
+    } else if (i === P.head) {
+      lz -= 0.06 * chamberAmt;
+      ly += 0.02;
+    } else if (i === P.larmL || i === P.uarmL) {
+      const g = i === P.larmL ? 1 : 0.4;
+      lz += 0.22 * g;
+      ly += 0.48 * g;
+      lx -= 0.04 * g;
+    } else if (i === P.larmR || i === P.uarmR) {
+      const g = i === P.larmR ? 1 : 0.4;
+      lz -= 0.16 * g;
+      ly += 0.28 * g;
+      lx += 0.08 * g;
+    }
   }
 
   if (shoving) {
@@ -625,7 +756,7 @@ export function meleeTip(a: Actor, kind: "strike" | "kick" | "shove") {
   }
   const wpn = weaponEnds(a);
   if (wpn) return { x: wpn.bx, y: wpn.by, z: wpn.bz, r: wpn.thick + 0.05 };
-  const hand = a.body.parts[P.larmR]!;
+  const hand = a.body.parts[punchLeft(a) ? P.larmL : P.larmR]!;
   return { x: hand.x, y: hand.y, z: hand.z, r: hand.r + 0.04 };
 }
 
@@ -864,8 +995,20 @@ function poseCompliance(a: Actor, i: number) {
     if (i === P.pelvis) return 0.00005 * (1 + inj);
     return 0.00012 * (1 + inj * 2);
   }
-  if (a.strikeT > 0 && (i === P.larmR || i === P.uarmR || i === P.spine)) return 0.0000035 * (1 + frac * 8);
-  if (a.kickT > 0 && (i === P.shinR || i === P.thighR || i === P.pelvis)) return 0.0000035 * (1 + frac * 8);
+  if (a.strikeT > 0) {
+    const left = punchLeft(a);
+    const hand = left ? P.larmL : P.larmR;
+    const uarm = left ? P.uarmL : P.uarmR;
+    const otherH = left ? P.larmR : P.larmL;
+    const otherU = left ? P.uarmR : P.uarmL;
+    if (i === hand || i === uarm || i === P.spine || i === P.pelvis) return 0.0000026 * (1 + frac * 8);
+    if (i === otherH || i === otherU) return 0.0000042 * (1 + frac * 8);
+  }
+  if (a.kickT > 0) {
+    if (i === P.shinR || i === P.thighR || i === P.pelvis || i === P.spine) return 0.0000026 * (1 + frac * 8);
+    if (i === P.shinL || i === P.thighL) return 0.0000038 * (1 + frac * 8);
+    if (i === P.larmL || i === P.larmR || i === P.uarmL || i === P.uarmR) return 0.000005 * (1 + frac * 8);
+  }
   if (a.shoveT > 0 && (i === P.larmL || i === P.larmR || i === P.uarmL || i === P.uarmR || i === P.spine)) {
     return 0.0000045 * (1 + frac * 8);
   }

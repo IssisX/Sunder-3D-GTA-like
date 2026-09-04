@@ -3,10 +3,10 @@ import { World, injurySum, clamp, facing, rightOf } from "./world";
 import { Input, isTouchDevice } from "./input";
 import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
-import { hintFor, stepWorld, dropHeld, ensureWeaponProp, dropWeapon, type Cam } from "./sim";
+import { hintFor, stepWorld, dropHeld, ensureWeaponProp, dropWeapon, startStrike, startKick, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
-import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P, weaponEnds, setGrab } from "./physique";
+import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P, weaponEnds, setGrab, punchKind } from "./physique";
 
 export class Game {
   world = new World();
@@ -368,9 +368,7 @@ export class Game {
           self.hud.phase = "playing";
           self.input.enabled = true;
         }
-        p.strikeT = strikeDuration(p);
-        p.strikeCd = p.strikeT + 0.16;
-        p.strikeHit = 0;
+        startStrike(self.world, p);
       },
       forceKick: () => {
         const p = self.world.player();
@@ -379,8 +377,7 @@ export class Game {
           self.hud.phase = "playing";
           self.input.enabled = true;
         }
-        p.kickT = KICK_DUR;
-        p.strikeHit = 0;
+        startKick(self.world, p);
       },
       forceGrab: () => {
         const p = self.world.player();
@@ -508,6 +505,7 @@ export class Game {
           const d = Math.hypot(pr.x - p.x, pr.z - p.z);
           if (!nearWep || d < nearWep.d) nearWep = { id: pr.id, kind: pr.weapon, d, heldBy: pr.heldBy, y: pr.y };
         }
+        const punchHand = p.weapon === "fist" && punchKind(p) !== "cross" ? left : hand;
         return {
           strikeT: p.strikeT,
           kickT: p.kickT,
@@ -520,6 +518,8 @@ export class Game {
           twoHand: p.body?.grab?.myPart2 ?? -1,
           handFwd: hand ? fwd(hand.x, hand.z) : 0,
           handY: hand ? hand.y - p.y : 0,
+          leftY: left ? left.y - p.y : 0,
+          fistY: punchHand ? punchHand.y - p.y : 0,
           leftFwd: left ? fwd(left.x, left.z) : 0,
           headSide: head ? side(head.x, head.z) : 0,
           headY: head ? head.y - p.y : 0,
@@ -537,6 +537,11 @@ export class Game {
           rarm: injurySum(p.injuries.rarm) + p.injuries.rarm.fracture,
           cutR: p.injuries.rarm.cut,
           chestW: (mesh?.userData?.parts?.torso as { scale?: { x: number } } | undefined)?.scale?.x ?? 0,
+          chestD: (mesh?.userData?.parts?.torso as { scale?: { z: number } } | undefined)?.scale?.z ?? 0,
+          uarmSpan:
+            p.body?.parts[3] && p.body?.parts[5]
+              ? Math.hypot(p.body.parts[3]!.x - p.body.parts[5]!.x, p.body.parts[3]!.z - p.body.parts[5]!.z)
+              : 0,
           hands: !!(mesh?.userData?.parts?.lhand && mesh?.userData?.parts?.rhand),
           feet: !!(mesh?.userData?.parts?.lfoot && mesh?.userData?.parts?.rfoot),
           meshRev: mesh?.userData?.rev ?? 0,
@@ -550,6 +555,9 @@ export class Game {
           carry: p.carry,
           spd: Math.hypot(p.vx, p.vz),
           nearWep,
+          combo: p.combo,
+          punch: punchKind(p),
+          leftPunch: p.weapon === "fist" && punchKind(p) !== "cross",
         };
       },
       forceInjure: (region?: string, kind?: string) => {
