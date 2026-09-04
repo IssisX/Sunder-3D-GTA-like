@@ -1,6 +1,7 @@
 import type { Actor } from "./types";
 import type { World } from "./world";
-import { BODY, bodyScale, type BodyRig, type PhysicalBodies } from "./body";
+import { BODY, type PhysicalBodies } from "./body";
+import { bodyScale, type BodyRig } from "./body-model";
 import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 
 const ENTITY_ID_CAP = 8192;
