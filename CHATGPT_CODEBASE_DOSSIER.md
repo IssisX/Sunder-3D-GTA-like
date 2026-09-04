@@ -2,253 +2,448 @@
 
 ## Purpose
 
-This is the rolling technical memory for the `ChatGPT-version` branch.
+This is the rolling technical memory for `ChatGPT-version`.
+Read this before making consequential changes to SUNDER.
+It is not a feature list. It records the actual causal architecture,
+authority boundaries, system couplings, scaling limits, hidden constraints,
+and the highest-leverage paths for future expansion.
 
-Read this before making substantial changes. It is not a substitute for reading the source that a change touches. Its job is to restore the high-level mental model quickly, preserve architectural discoveries across long development sessions, and prevent future work from treating visible behavior as if it were the underlying mechanism.
-
-Update this document when a change materially alters architecture, authority, subsystem ownership, runtime ordering, persistent state, or a major expansion seam. Do not bloat it with ordinary patch history.
-
-**Source baseline deeply analyzed:** `fb82dd1e776cf440ec69c213e8d66492f141e2ad`
-
-**Canonical working branch:** `ChatGPT-version`
+Last architecture refresh: 2026-09-04.
+Baseline branch: `main`.
+Working branch: `ChatGPT-version`.
+Original fork point: `fb82dd1e776cf440ec69c213e8d66492f141e2ad`.
 
 ---
 
 # 1. Product thesis
 
-SUNDER is a compact third-person systemic sandbox set in Harrow's Ford. Its strongest identity is not authored missions. It is causal interaction among a body, townspeople, guards, animals, props, structures, weather, fire, visibility, sound, injury, fear, pursuit, tracks, and memory.
+SUNDER is a small open systemic 3D world built around direct physical action
+and visible consequences.
 
-The intended player fantasy is direct physical agency inside a world that reacts:
+The useful mental model is not "GTA clone" and not "collection of mechanics."
+It is a causal machine:
 
-- move, sprint, crouch, jump, vault, climb, swim;
-- strike, kick, shove, grab, drag, carry, throw;
-- pick up weapons and combustible objects;
-- break stalls, walls, supports, lamps, fences, and structures;
-- spill oil and ignite terrain;
-- injure bodies by region;
-- create sound and visual evidence;
-- trigger witnesses, fear, guard pursuit, search, rescue, fire response, animal flight, hunting, and structural collapse.
+`player action -> physical/world change -> perception -> memory -> AI response
+-> social/environmental consequence -> new physical state`
 
-The code already supports real causal chains. A representative chain is:
+The game becomes better when new mechanisms couple into several existing
+systems instead of living as isolated features.
 
-`player action -> actor/prop impulse or damage -> oil/fire/sound -> perception + memory -> fear/wanted/AI transition -> pursuit or flight -> secondary collisions/fire -> structural collapse -> injury/death -> more fear/memory/pursuit`
+Examples already present:
 
-That chain is the core asset to preserve and deepen.
+- a lamp can become a grabbed object, weapon-like object, breakable prop,
+  oil source, fire source, sound source, AI stimulus, and structural hazard;
+- blood loss affects consciousness, creates tracks, changes predator behavior,
+  and can ultimately change movement state and death;
+- fire changes actors, props, structures, visibility, fear, weather response,
+  audio, rendering, and traversal conditions;
+- a shout changes memory and pursuit rather than merely playing audio.
 
----
-
-# 2. What is actually product code
-
-## Primary game surface
-
-- `src/game/types.ts` - domain schema, constants, weapon stats.
-- `src/game/world.ts` - authoritative world container, factories, seeded RNG, spatial hash, shared geometry/helpers.
-- `src/game/level.ts` - procedural/code-authored construction of Harrow's Ford and initial population.
-- `src/game/sim.ts` - causal simulation spine. Most gameplay semantics live here.
-- `src/game/game.ts` - lifecycle, fixed-step accumulator, render interpolation, HUD projection, save cadence, audio event drain.
-- `src/game/render.ts` - Three.js scene construction and visual projection of world state.
-- `src/game/input.ts` - keyboard, mouse, pointer lock, touch, gamepad, virtual controls.
-- `src/game/audio.ts` - procedural WebAudio SFX and ambient beds.
-- `src/game/save.ts` - localStorage snapshot format.
-- `src/components/sunder-app.tsx` - React boot bridge around the imperative game.
-- `src/components/sunder-hud.tsx` - title, status, touch controls, HUD.
-- `src/styles.css` - visual tokens, fullscreen behavior, Fold/phone touch layout.
-
-## Platform/support surface
-
-`AGENTS.md`, `.grok/**`, `scripts/**`, `server/**`, prewired `src/lib/**`, generated `.vercel/output/**`, and App Builder support files are platform/runtime infrastructure unless a requested capability genuinely crosses into them.
-
-Do not casually refactor platform infrastructure while modifying game systems.
+This coupling density is the project's strongest design property.
 
 ---
 
-# 3. Authority model
+# 2. Real application surface
 
-## The single authoritative simulation state
+The product-bearing code is concentrated in:
 
-`World` is the center of gravity.
+- `src/game/game.ts`
+- `src/game/types.ts`
+- `src/game/world.ts`
+- `src/game/sim.ts`
+- `src/game/level.ts`
+- `src/game/render.ts`
+- `src/game/input.ts`
+- `src/game/audio.ts`
+- `src/game/save.ts`
+- `src/game/body-model.ts`
+- `src/game/body-contacts.ts`
+- `src/game/body.ts`
+- `src/game/body-render.ts`
+- `src/components/sunder-app.tsx`
+- `src/components/sunder-hud.tsx`
+- `src/styles.css`
 
-It owns:
+The large `.grok`, platform, generated `.vercel`, auth/data helper, and build
+scaffold surfaces are support/environment code unless a requested change
+actually crosses into them.
 
-- global time, day phase, rain, wind, thunder;
+Do not mistake generated deployment output for source authority.
+
+---
+
+# 3. Runtime topology
+
+React owns shell/bootstrap/HUD composition.
+`Game` owns runtime lifecycle.
+`World` owns canonical coarse game state.
+`stepWorld()` is the original causal mutation spine.
+`PhysicalBodies` now owns articulated human body state.
+`View` and `BodyView` are projections.
+
+Main runtime flow:
+
+1. React mounts `SunderApp`.
+2. The game module is dynamically imported.
+3. `Game` constructs `World`, input, audio, Three.js `View`, and body system.
+4. `buildLevel()` creates the deterministic starting world from `World.rng()`.
+5. save state is restored into coarse world state.
+6. physical human rigs are initialized from restored actor state.
+7. Three.js renders continuously through `setAnimationLoop()`.
+8. simulation advances in fixed 1/60-second steps.
+9. each fixed step runs existing world simulation, then articulated body solve.
+10. rendering interpolates both root/world state and physical body nodes.
+11. HUD is projected from the current world state.
+
+Fixed timestep:
+
+`STEP = 1 / 60`
+
+Frame accumulation is capped at five fixed steps per render frame.
+Raw frame delta is clamped to 0.1 seconds.
+
+Important consequence:
+
+Simulation is fixed-step, but it is not yet globally deterministic because some
+legacy gameplay and presentation paths still use `Math.random()`.
+`World.rng()` is deterministic and should be preferred for authoritative new
+simulation logic.
+
+---
+
+# 4. Authority model
+
+## 4.1 World authority
+
+`World` remains the canonical aggregate for:
+
 - actors;
 - props;
 - buildings;
-- colliders;
+- collision volumes;
 - tracks;
-- sounds;
+- sound events;
 - whispers;
-- fire/environment scalar fields;
-- spatial hash;
-- transient simulation events;
-- wanted level;
-- fire count;
-- camera trauma/hitstop signals;
+- weather;
+- wanted state;
+- fire/environment fields;
 - phase/death/capture state;
-- seeded RNG state.
+- spatial actor hash;
+- simulation RNG.
 
-Actors and props are mutable records. Systems mutate these records in place.
+Actor root state remains the compatibility interface used by legacy systems:
 
-There is no separate ECS authority, physics-engine authority, animation-state authority, navmesh authority, or replicated server state.
+- position/velocity;
+- facing;
+- locomotion state;
+- balance;
+- stamina/fatigue;
+- injuries;
+- consciousness;
+- AI state;
+- memory;
+- grabbed relationships;
+- weapon state.
 
-React is not authoritative gameplay state. The HUD is projected from `World` each frame.
+## 4.2 Articulated body authority
 
-Three.js is not authoritative gameplay state. Render objects interpolate and visualize `World` records.
+Human/player body shape is no longer merely a render animation.
 
-This distinction is critical. Future upgrades should normally enrich authoritative world state first and make rendering consume it, rather than creating visually convincing parallel state that the simulation does not know about.
+`PhysicalBodies` maintains a 15-node physical rig for each human:
+
+- pelvis;
+- chest;
+- head;
+- left/right shoulders;
+- left/right elbows;
+- left/right hands;
+- left/right hips;
+- left/right knees;
+- left/right feet.
+
+Body positions and previous positions are held in preallocated `Float32Array`
+state. This gives each rig actual temporal inertia without per-frame body-node
+allocation.
+
+The articulated body is authoritative for dynamic human shape during:
+
+- ragdoll;
+- downed states;
+- physical dragging/grabbing;
+- stumbling;
+- get-up recovery.
+
+For compatibility, the actor root is derived back from the physical pelvis/body
+state after dynamic solving.
+
+Normal locomotion still uses the existing actor root as the movement authority,
+with the articulated rig following a constrained target pose.
+
+This is intentionally a bridge architecture: sophisticated body dynamics were
+added without forcing AI, perception, combat targeting, camera, or existing
+world queries to adopt an entirely new entity contract in one rewrite.
 
 ---
 
-# 4. Runtime loop and causal ordering
+# 5. Original `stepWorld()` causal order
 
-`Game.frame()` uses a fixed simulation step:
+Order matters. It is semantics, not organization.
 
-- `STEP = 1 / 60`.
-- wall-clock delta is clamped to 0.1 s;
-- accumulator runs at most 5 fixed substeps per rendered frame;
-- rendering interpolates between previous and current simulation transforms;
-- title mode still advances much of the world simulation, but player control is not applied;
-- hitstop can suspend fixed-step advancement while still rendering.
+Current legacy world pass order:
 
-The order inside `stepWorld()` is a semantic contract:
-
-1. clear transient events;
+1. clear per-step events;
 2. advance clock/weather;
-3. copy previous actor/prop transforms;
+3. snapshot actor/prop previous transforms;
 4. rebuild actor spatial hash;
 5. apply player intent;
 6. perception;
-7. AI decision/intent;
+7. AI;
 8. combat;
-9. grabbing/carrying;
-10. locomotion state classification;
-11. physics/integration/collision;
-12. injury/bleeding/consciousness/death;
-13. fire/environment fields;
-14. prop consequences;
-15. structural failure;
-16. tracks/evidence;
+9. grabbing;
+10. locomotion state;
+11. root/prop physics;
+12. injury physiology;
+13. fire/environment field;
+14. prop state;
+15. structure failure;
+16. tracks;
 17. sound culling;
-18. decay shake/hitstop.
+18. shake/hitstop decay.
 
-Future systems must be inserted based on causality, not convenience. Moving a pass can alter gameplay because later passes observe earlier mutations during the same tick.
+`PhysicalBodies.step()` currently runs immediately after this pass inside each
+fixed step.
 
-Example: combat creates injury and impulses before physics; physics moves the victim; injury then evaluates bleeding/consciousness; fire then affects bodies/props; structures can then fail and apply further injury.
+That means articulated state affects rendered/body/root state immediately and
+feeds legacy systems on the following fixed tick.
 
----
-
-# 5. World scale and current population
-
-## Spatial scale
-
-- world width: `88` units;
-- half extent: `44`;
-- fire/environment cell size: `2`;
-- fire grid: `44 x 44 = 1936` cells;
-- actor spatial-hash cell size: `4` units.
-
-## Initial actor population
-
-Current level construction produces approximately 34 actors:
-
-- 1 player;
-- 12 civilians;
-- 7 guards;
-- 1 hunter;
-- 5 livestock;
-- 4 deer;
-- 3 wolves;
-- 1 bear.
-
-`MAX_ACTORS = 64` exists but is not currently enforcing population.
-
-The map is authored through code, not external scene data. Buildings, market stalls, forest, river, bridge, livestock pen, homes, barracks, tavern, warehouse, weapons, fuel, and population are all instantiated in `level.ts`.
-
-World generation is largely seeded through `World.rng()` once `Game` assigns a seed from time.
+This is a deliberate integration boundary, not something to forget.
+A later deeper integration can move the body solve between legacy physics and
+physiology once the body substrate itself is proven stable.
 
 ---
 
-# 6. Simulation systems
+# 6. Articulated physical body substrate
 
-## 6.1 Movement and body state
+## 6.1 Ownership split
 
-Player input generates intent vectors and desired speed in camera space.
+`body-model.ts`
 
-Movement modifiers already include:
+- body topology;
+- node indices;
+- inverse-mass weighting;
+- collision radii;
+- anatomical link definitions;
+- joint-range definitions;
+- body rig allocation;
+- follow target generation;
+- body-mode selection;
+- injury snapshots.
 
-- crouch;
-- sprint stamina/fatigue;
-- leg injury;
-- carried mass;
-- mud;
-- consciousness;
-- grabbed targets;
-- surface friction/acceleration;
-- water drag and buoyancy-like vertical force.
+`body-contacts.ts`
 
-Locomotion is a state classification over the same actor record:
+- node/world collision;
+- node/body collision;
+- self-contact exclusions/guards;
+- impact-speed measurement;
+- region-local collision injury;
+- pile contact;
+- support-height query.
 
-`idle / walk / run / sprint / crouch / crawl / stumble / fall / getup / vault / climb / swim / ragdoll / pin / down`
+`body.ts`
 
-Important reality: current `ragdoll` is **not an articulated ragdoll solver**. The actor remains a single simulated body record. The renderer tilts the whole humanoid group and simple limbs are animation children. There is no multi-body skeleton, joint constraint graph, angular momentum model, per-limb collision, or authoritative pose state.
+- distance/joint solving;
+- pose pinning;
+- dynamic integration;
+- external impulse transfer;
+- physical grab constraints;
+- drag load feedback;
+- stumble destabilization;
+- get-up solving;
+- actor-root derivation;
+- subsystem orchestration.
 
-That makes articulated physical humans a genuine future substrate upgrade, not a cosmetic tweak.
+`body-render.ts`
 
-## 6.2 Collision and physics
+- visible segmented humanoid projection;
+- upper/lower limbs;
+- physical hand/foot placement;
+- physical head/torso/pelvis placement;
+- weapons attached to the articulated hand;
+- regional injury tinting;
+- hiding the legacy flat/simple humanoid mesh.
 
-The current physics layer is custom and deliberately lightweight:
+## 6.2 Constraint model
 
-- gravity + velocity integration;
-- adaptive micro-substeps based on travel distance;
-- circle-vs-AABB actor collision;
-- vertical floor/ceiling resolution;
-- limited step-up logic;
-- O(n^2) actor separation;
-- simple mass-weighted body separation impulses;
-- basic dynamic prop integration;
-- mostly static world colliders;
-- emergency `unstickActor()` escape search.
+The body is a particle/truss articulated solver rather than a hidden rigid-body
+library.
 
-It is not a general rigid-body engine.
+It uses:
 
-Dynamic props do not form a full contact graph with actors and one another. Structural debris becomes visually/dynamically loose but collapsed prop colliders are disabled rather than converted into rich persistent debris collision.
+- anatomical distance constraints;
+- torso cross-bracing;
+- shoulder/hip width constraints;
+- elbow and knee fold-range constraints;
+- weighted inverse node mass;
+- repeated projection iterations;
+- world collision constraints;
+- body-body contact projection;
+- selected self-contact guards.
 
-This is one of the largest available expansion frontiers.
+The torso is intentionally more rigid than distal limbs.
+Hands and feet move more freely than pelvis/chest nodes.
 
-## 6.3 Perception, memory, and evidence
+## 6.3 Body modes
 
-Actors perceive through:
+`follow`
 
-- sound events;
-- approximate visual range;
-- FOV dot tests;
-- smoke attenuation;
-- crouch/motion modifiers;
-- indoor/outdoor modifier;
-- sampled line-of-sight through colliders;
-- nearby fires;
+Normal locomotion remains actor-root driven. The rig tracks an articulated walk,
+crouch, attack, and kick target pose.
+
+`stumble`
+
+The rig becomes partially dynamic. Pelvis/chest/head/feet retain weak target
+pins. Loss of torso rise, excessive lean, or low balance escalates the actor to
+ragdoll.
+
+`dynamic`
+
+The body is gravity/inertia/contact driven. Used for ragdolls, downed/dead
+bodies, and physically grabbed actors.
+
+`recover`
+
+The body remains collision constrained while progressively pinning toward an
+upright pose. If it cannot approach that pose when the get-up timer expires, it
+falls back to ragdoll instead of blindly standing through geometry.
+
+## 6.4 Physical grabbing and dragging
+
+Legacy actor relationships remain:
+
+- holder `grabbedId`;
+- victim `grabbedBy`.
+
+The body layer converts that relationship into a physical constraint.
+
+A grabbed human is attached at the nearest suitable body node to the holder's
+articulated right hand. The selected grab node persists during the hold.
+
+The body then:
+
+- drags across geometry;
+- collides limb-by-limb;
+- can fold around obstacles;
+- transfers load back into holder balance/velocity;
+- participates in piles;
+- receives region-local impact injury while dragged.
+
+This same mechanism automatically applies to AI rescue because rescue already
+uses the same grab relationship.
+
+## 6.5 Piles and body-body contact
+
+Dynamic/stumbling/recovering bodies collide through selected major contact
+nodes rather than actor-root circles alone.
+
+Follow-mode standing bodies behave as effectively fixed articulated obstacles
+for dynamic body contact.
+
+Two dynamic bodies split positional correction according to node inverse mass.
+Relative contact speed can generate localized injury on either body.
+
+This is the first real substrate for:
+
+- body piles;
+- falling onto another person;
+- dragged bodies catching on people;
+- crowd knockdown chains;
+- bodies cushioning or worsening falls.
+
+## 6.6 Impact-local injury
+
+Physical collision injury is keyed to the actual body node that contacted the
+world or another body.
+
+Node-to-region mapping drives:
+
+- bruising;
+- limb sprain;
+- high-energy fracture;
+- head consciousness loss;
+- pain;
+- balance loss;
+- stumble/ragdoll escalation.
+
+Legacy weapon combat still computes its own region injury in `sim.ts`.
+The body layer observes the changed region plus root impulse and injects the
+external impulse into the corresponding physical limb/region so combat and the
+new body solver visually/physically agree as much as possible without rewriting
+combat yet.
+
+A future upgrade should make weapon contact itself query the physical rig so the
+same contact point owns both impulse and injury from the start.
+
+---
+
+# 7. Root physics reality
+
+The original game does not use a general rigid-body engine.
+
+Actor root physics includes:
+
+- exponential velocity response toward intent;
+- friction by surface;
+- gravity;
+- water drag/buoyancy-like behavior;
+- substepped high-speed actor movement;
+- actor circle vs AABB collision;
+- vertical collider support;
+- actor separation;
+- dynamic prop integration;
+- simple prop/collider resolution;
+- unstick recovery.
+
+The new human body solver sits above this legacy root model rather than deleting
+it.
+
+Do not claim full rigid-body simulation for every world object.
+Humans now have articulated body physics; most props are still coarse single
+bodies.
+
+---
+
+# 8. AI/perception substrate
+
+AI is stateful and information-driven rather than purely distance-triggered.
+
+Actors can retain memories of:
+
+- threats;
 - bodies;
-- known threats.
+- fire;
+- sounds;
+- tracks;
+- theft;
+- allies.
 
-Actor memory records:
+Human properties include:
 
-`threat / body / fire / sound / track / theft / ally`
+- fear;
+- courage;
+- aggression;
+- loyalty;
+- competence;
+- known actors;
+- alertness;
+- home;
+- routines;
+- last seen position/time;
+- search target/time.
 
-Each memory has time, position, subject id, and certainty. Certainty decays and old memories expire.
+Human behaviors include:
 
-Guards can share threat knowledge by shouting. Tracks can redirect searches after line-of-sight is lost.
-
-This is a strong existing seam for richer knowledge, witness, rumor, suspicion, faction, and historical-world systems.
-
-Current LOS is heuristic - six samples along the line - not geometric ray casting.
-
-## 6.4 AI
-
-AI is stateful but not planner-based.
-
-Human states include:
-
-- wander/work routines;
+- work/routine;
+- wander;
 - investigate;
 - pursue;
 - search;
@@ -257,21 +452,15 @@ Human states include:
 - rescue;
 - extinguish.
 
-Behavior depends on faction, courage, fear, aggression, loyalty, competence, memory, target visibility, fire proximity, injuries, and wanted level.
+Animal behaviors include grazing/fleeing, predator hunting, and fence breaking.
 
-Notable systemic behavior already present:
+The body substrate improves AI behavior indirectly because rescue, knockdown,
+injury, dragging, and body location now have richer physical consequences
+without requiring a second AI representation.
 
-- civilians panic and spread fear;
-- guards fight, call allies, search last-known positions, follow tracks, and extinguish fire;
-- wounded allies can be grabbed and carried toward home;
-- deer/livestock flee humans, predators, violence, and fire;
-- livestock can damage fences while escaping;
-- wolves choose prey and can become interested in a bleeding player;
-- bears hunt nearby bodies depending on aggression/proximity.
+---
 
-Navigation is direct steering toward target positions. There is no path planner or navmesh. Collision resolution and unstick logic compensate for obstacles.
-
-## 6.5 Combat and injury
+# 9. Combat and injury substrate
 
 Weapons are data-driven through `WEAPON_STATS`:
 
@@ -283,347 +472,418 @@ Weapons are data-driven through `WEAPON_STATS`:
 - pierce;
 - fire.
 
-Combat supports strike, kick, shove, grabbing, carrying, and throwing.
+Combat currently combines:
 
-Actors have six injury regions:
+- attack windows;
+- reach and facing tests;
+- impulse;
+- balance loss;
+- regional injury;
+- bleeding;
+- pain;
+- consciousness;
+- wanted state;
+- sound;
+- hitstop/shake;
+- ragdoll/stumble transitions.
 
-`head / torso / left arm / right arm / left leg / right leg`
+Regional anatomy:
 
-Each region tracks:
+- head;
+- torso;
+- left/right arm;
+- left/right leg.
 
-`bruise / cut / puncture / burn / fracture / sprain`
-
-Consequences include pain, bleed rate, blood volume, consciousness loss, balance loss, locomotion degradation, ragdoll/stumble transitions, death, and visible HUD injury state.
-
-The system is regional but not anatomically articulated. Hit location is selected heuristically rather than derived from limb collision geometry.
-
-One authoritative nondeterminism leak exists here: consequential hit-region/scream decisions use bare `Math.random()` instead of `World.rng()`. Render/audio randomness is non-authoritative, but combat randomness prevents exact deterministic replay.
-
-The per-strike hit mask uses `1 << (actor.id % 30)`. Distinct actor ids can alias once ids differ by 30, which becomes a scaling constraint as population grows.
-
-## 6.6 Grabbing and physical agency
-
-The grab system is one of the strongest direct-agency mechanisms.
-
-The player can acquire a nearby actor or prop in front of the body. Mass and balance affect whether an actor grab succeeds. Held actors and props are attached to the holder's authoritative transform each step. Releasing converts the relationship into an impulse, enabling throws.
-
-AI rescue reuses the same actor-to-actor grab relationship rather than inventing a separate rescue representation.
-
-This reuse is architecturally valuable and should be preserved when deepening interactions.
-
-## 6.7 Fire, weather, and environmental fields
-
-The fire system is a 44x44 scalar-field simulation using typed arrays:
-
-- `fuel`;
-- `heat`;
-- `wet`;
-- `oil`;
-- `smoke`;
-- `char`;
-- `burning`;
-- `indoor`.
-
-Interactions include:
-
-- rain increases outdoor wetness and can extinguish fire;
-- wind biases heat spread;
-- oil increases fuel and spread potential;
-- lamps/flasks can spill oil;
-- burning terrain heats/injures actors;
-- wet actors resist ignition better;
-- burning cells damage flammable props;
-- indoor smoke reduces breath/consciousness;
-- burned ground changes visually;
-- rain alters visibility/hearing and rendering.
-
-This is an excellent systemic substrate because several gameplay domains share the same fields.
-
-Current scaling costs to remember:
-
-- `stepFire()` copies the full heat array each fixed tick;
-- every cell is scanned each tick;
-- burning-cell logic scans props;
-- `closestFire()` scans the entire fire grid for each AI actor;
-- renderer repaints the whole ground color grid every rendered frame.
-
-At the current world size this is acceptable. A much larger map, denser population, or several additional environmental fields should not simply multiply these loops.
-
-## 6.8 Structural destruction
-
-Buildings own part ids and support ids.
-
-Supports are props with HP. When surviving support count drops to roughly half or less, the building collapses. Collapse:
-
-- marks the building collapsed;
-- emits sound;
-- increases camera shake;
-- collapses all parts;
-- launches pieces;
-- disables corresponding static colliders;
-- injures/ragdolls actors inside;
-- increases fear and wanted level.
-
-Important reality: `Prop.load` and `Prop.capacity` exist, but current structural failure is support-count/HP based. There is no authoritative load path, stress transfer, torque, fracture propagation, or contact-supported debris structure yet.
-
-Those fields are expansion seams, not evidence that those mechanics already exist.
-
-## 6.9 Tracks, wanted state, and social consequence
-
-The player can leave footprints on suitable wet/dirt/mud surfaces and blood tracks while bleeding. Rain shortens evidence lifetime. Guards in search mode can follow player tracks.
-
-`wanted` is a global scalar. It rises from violence against civilians/guards, theft, structural destruction, and some deaths. Guards treat it as part of hostility logic.
-
-The system already has the beginnings of history and witness behavior but not a full crime/witness graph. `known[]`, memories, sounds, tracks, and wanted are the current social substrate.
+The articulated body now maps those six gameplay regions onto 15 physical nodes.
+This is the critical bridge for future physically grounded combat.
 
 ---
 
-# 7. Rendering model
+# 10. Fire/environment field
 
-Three.js renders a projection of simulation state.
+World size:
 
-Current graphics strategy:
+`WORLD = 88`
 
-- shared primitive geometries;
-- per-object/groups built at bootstrap or lazily;
-- procedural canvas textures for wood/dirt;
-- MeshStandardMaterial lighting;
-- sun/hemisphere/ambient/fire fill lights;
-- fog and day/night changes;
-- pooled fire meshes;
-- pooled smoke meshes;
-- point-cloud rain;
-- simple procedural humanoids and beasts;
-- interpolation from previous to current transforms;
-- camera trauma from `World.shake`;
-- touch devices reduce shadows, antialiasing, pixel ratio, and rain count.
+Environmental cell size:
 
-Humanoid visuals are box-based primitives. Arms and legs are render-only child groups driven by walk phase and attack state. They are not simulation bodies.
+`FIRE_CELL = 2`
 
-The camera is a smoothed third-person chase camera. It currently has no world occlusion/camera-collision solver.
+Grid resolution:
 
-Render-side randomness exists for foliage variation, rain initialization, and camera shake. That does not alter authoritative world state.
+`44 x 44 = 1,936 cells`
 
-### Render scaling pressure
+Typed fields:
 
-- full ground vertex-color repaint every frame;
-- one group per actor/prop rather than instancing large homogeneous sets;
-- many separately allocated materials;
-- procedural primitive meshes are intentionally cheap, but visual fidelity expansion must respect mobile GPU limits.
+- fuel;
+- heat;
+- wet;
+- oil;
+- smoke;
+- char;
+- burning;
+- indoor.
 
-The current architecture has room for much richer visuals, but visual upgrades should remain subordinate to authoritative state rather than becoming fake parallel simulation.
+Fire couples:
+
+- fuel consumption;
+- oil;
+- rain;
+- wind;
+- smoke;
+- actor heat/burns;
+- prop damage;
+- structural failure;
+- AI fear/perception;
+- ground rendering;
+- audio/light.
+
+This remains one of the best substrates for high-value expansion because a new
+field or material interaction can influence many systems at once.
 
 ---
 
-# 8. Input and device model
+# 11. Structures/destruction
 
-`Input` unifies:
+Buildings group props into:
+
+- parts;
+- supports;
+- bounds;
+- indoor state.
+
+Current structural failure is support-count/HP based, not load-path or continuum
+structural simulation.
+
+When enough supports fail:
+
+- the building collapses;
+- parts become dynamic;
+- sound/shake propagate;
+- occupants receive injury/knockdown;
+- nearby actors gain fear;
+- wanted state can rise;
+- colliders are disabled as props collapse.
+
+This system is strongly coupled but mechanically coarse.
+
+---
+
+# 12. Rendering reality
+
+Three.js remains the renderer.
+
+Main visual systems include:
+
+- procedural dirt/wood textures;
+- dynamic vertex-colored ground;
+- day/night lighting;
+- fog;
+- rain points;
+- fire/smoke meshes;
+- water;
+- props;
+- beasts;
+- articulated physical humans;
+- camera trauma.
+
+Human rendering is now a projection of the physical body rig instead of the old
+single-segment procedural humanoid pose.
+
+The legacy human render objects still exist because `View` owns mixed actor
+rendering, but `BodyView` suppresses them before final render.
+
+This preserves existing `View` behavior for beasts and avoids a dangerous broad
+renderer rewrite.
+
+---
+
+# 13. Input/mobile reality
+
+Input supports:
 
 - keyboard;
-- mouse/pointer lock;
-- touch joystick;
-- touch look pad;
-- touch action buttons;
+- pointer lock mouse;
+- touch;
 - gamepad;
-- injected test controls.
+- injected controls test state.
 
-Movement is camera-relative. Digital and analog movement are normalized.
+The UI already contains Galaxy Fold-specific layout handling.
 
-The HUD has explicit Galaxy Fold/phone handling:
-
-- cover-screen aspect handling;
-- near-square Fold inner-display handling;
-- controls parked toward outer thirds;
-- safe-area padding;
-- touch look width changes by form factor.
-
-This mobile interaction layer is part of the product, not an afterthought.
+Touch UI routes into the same `Input` abstraction as desktop input.
+Do not create parallel gameplay controls in React.
 
 ---
 
-# 9. React/UI boundary
+# 14. Persistence reality
 
-`SunderApp` dynamically imports and owns one imperative `Game` instance.
+Persistence uses localStorage save version 1.
 
-React responsibilities:
+It stores only a partial world snapshot:
 
-- canvas lifecycle;
-- HUD state snapshots;
-- title/pause/dead/captured overlays;
-- touch controls;
-- mute/pause/restart/wake commands.
+- time/weather;
+- player location/basic state;
+- burned cells;
+- collapsed building IDs;
+- dead actor IDs;
+- wanted state.
 
-`Game.pushHud()` constructs a new HUD projection every frame and calls React state through `onHud`.
+It does not persist full physical body rigs, AI memories, exact prop dynamics,
+tracks, or all injuries/state.
 
-This is simple and currently functional, but it creates a high-frequency React update boundary. If the HUD becomes much richer, it should not be allowed to turn the render loop into React churn.
+On load, physical bodies are reconstructed from restored coarse actor state.
+This is intentional for now.
 
-The current built browser QA baseline reports desktop and mobile HTTP 200, canvas present, no horizontal overflow, and no console/page errors.
-
----
-
-# 10. Audio
-
-Audio is procedural WebAudio rather than sample-asset driven.
-
-It has:
-
-- master/SFX/music buses;
-- noise buffer synthesis;
-- oscillator/noise bursts for event SFX;
-- positional stereo panning from world events;
-- rain/fire/drone ambient beds;
-- danger/time-of-day modulation;
-- short per-kind anti-spam cooldown.
-
-Audio randomness is intentionally perceptual and non-authoritative.
+If persistent world history becomes a major goal, the save model must be
+expanded rather than pretending current continuity is complete.
 
 ---
 
-# 11. Persistence reality
+# 15. Scaling pressure
 
-Persistence is local-only through `localStorage` key `sunder.save.v1`.
+Known pressure points from source inspection:
 
-The save blob includes:
+- actor root separation is O(n^2);
+- actor/prop ID lookup uses array `.find()`;
+- `closestFire()` scans the fire field for each AI actor;
+- fire scans the full field every fixed tick;
+- burning cells scan props;
+- ground colors repaint the field every render frame;
+- React receives HUD state every render frame;
+- LOS is sampled against colliders;
+- body-body contact is pairwise across humans, with node tests after coarse
+  pelvis rejection;
+- articulated rendering materially increases human draw count.
 
-- time/day/weather;
-- player position/yaw/blood/stamina/weapon/torch;
-- burned cell ids;
-- collapsed building ids;
-- dead actor ids;
-- wanted level.
-
-Current restore behavior is **partial**. It restores player/global weather state and burned cells, but does not currently replay the saved `collapsed` or `dead` arrays into the reconstructed world. It also does not preserve the full mutable state of injuries, props, memories, tracks, fires, oil, AI, grabbed relationships, or structural part damage.
-
-There is a backup key written, but `loadSave()` currently does not fall back to it.
-
-Therefore current persistence should be understood as a lightweight continuity snapshot, not a serialized authoritative world.
-
-Any future promise that "the world remembers what actually happened" across sessions will require a deliberate persistence upgrade.
-
----
-
-# 12. Hidden invariants and coupling to preserve
-
-1. `World` is authoritative. Do not introduce a second mutable gameplay truth casually.
-2. `stepWorld()` ordering is causal behavior.
-3. actor `px/py/pz/pyaw` are render interpolation history and must be captured before simulation mutation.
-4. spatial hash is rebuilt once near the start of a fixed tick. Several later systems assume movement per tick is small relative to the 4-unit hash cell.
-5. collapsed structural props disable their static colliders.
-6. AI uses the same actor state and interaction relationships as the player where practical.
-7. sound is both gameplay information (`World.sounds`) and an audio-render event (`World.events`).
-8. fire fields are authoritative gameplay state, not visual particles.
-9. `World.rng()` is the intended authoritative random stream.
-10. rendering and audio may use nondeterministic cosmetic randomness, but simulation randomness should use the world stream when replayability matters.
-11. desktop, touch, gamepad, and Fold layouts share one input/action contract.
-12. React must remain a shell/projection around the simulation, not become the 60 Hz gameplay engine.
+Do not preemptively "optimize everything."
+Use these facts when a requested expansion actually approaches the relevant
+limit.
 
 ---
 
-# 13. Expansion-pressure map
+# 16. Hidden invariants
 
-These are not instructions to refactor immediately. They are the places where sophisticated expansions will hit the current substrate first.
+Preserve these unless a deliberate architecture change replaces them.
 
-## Highest-leverage systemic seams
-
-### A. Articulated physical bodies
-
-Current ragdolls are whole-body state changes with render-only limbs. A true body solver could unlock:
-
-- limb contacts;
-- joint limits;
-- grabs at actual body parts;
-- dragging by limbs;
-- impact-local injury;
-- body-to-prop force transfer;
-- piles/crowds;
-- physically grounded get-up and stumble behavior.
-
-This is a major architecture extension and should be designed as authority, not animation decoration.
-
-### B. Contact-rich props and debris
-
-Current dynamic props are lightweight ballistic objects. Deepening prop/actor/prop contact would amplify throwing, collapse, traps, crowd chaos, and emergent destruction.
-
-### C. Structural mechanics
-
-Existing `support`, `load`, `capacity`, building parts, material, fire, HP, and collider links give a natural path from support-count collapse toward load-bearing structural behavior without replacing the entire game model.
-
-### D. AI knowledge and social history
-
-Memory, known threats, sound, tracks, fear, loyalty, wanted, routine, rescue, and faction already form a usable information substrate. This can become richer witness propagation, rumor, relationships, territorial knowledge, group tactics, and persistent consequences.
-
-### E. Environmental field generalization
-
-Fire/wet/oil/smoke already demonstrate coupled fields. Additional fields could support mud depth, scent, blood, heat, windborne smoke, visibility, structural heat, toxic gas, snow, or other systemic media - but only after avoiding full-grid/full-agent brute-force multiplication.
-
-### F. Navigation and crowd motion
-
-Direct steering is enough for the current scale. More actors, denser interiors, formation behavior, fleeing crowds, and long pursuits will expose the lack of path planning/local avoidance.
-
-### G. Persistent history
-
-The current save layer does not serialize the authoritative world. A deeper persistence model would make destruction, bodies, fires, relationships, injuries, and social knowledge survive reloads.
+1. Actor root remains the compatibility contract used by legacy AI/world code.
+2. Fixed-step simulation remains authoritative over frame rate.
+3. Render interpolation must never become gameplay authority.
+4. Body rendering must follow body simulation, not maintain a second skeleton.
+5. Human dynamic body state must derive back to actor root before the next
+   legacy tick.
+6. Existing grab relationships are shared by player grabbing and AI rescue.
+7. Broken prop colliders must stop being solid.
+8. Fire fields are authoritative environmental state, not particle effects.
+9. `World.rng()` is the preferred RNG for new consequential simulation logic.
+10. `main` is the original baseline; `ChatGPT-version` is the working canon.
 
 ---
 
-# 14. Scaling limits already visible
+# 17. High-value discoveries - current
 
-These are confirmed implementation properties, not speculative criticism.
+## A. Physical humans are now a platform, not a feature
 
-- `World.actor(id)` and `prop(id)` use linear search.
-- `separateBodies()` is O(n^2).
-- `nearby()` allocates output arrays and a `Set` per query.
-- `closestFire()` scans all 1936 cells for each AI actor.
-- `stepFire()` scans the full field and allocates `w.heat.slice()` every fixed tick.
-- burning-cell damage loops over props.
-- ground colors are repainted over the whole fire-grid-sized mesh every rendered frame.
-- HUD React state is updated every frame.
-- line of sight uses sampled collider checks rather than a spatially accelerated ray query.
-- actor strike hit bookkeeping aliases ids modulo 30.
-- several schema fields (`load`, `capacity`, `weaponProp`, `pinnedId`, `MAX_ACTORS`) are unused or only partially realized.
+The highest-value result of the body work is not "better ragdolls."
 
-Do not optimize these merely because they exist. Optimize when an intended expansion would make one a real capability or performance barrier.
+There is now one physical representation that can increasingly own:
+
+- weapon contact;
+- grappling;
+- falls;
+- environmental impacts;
+- crowd knockdowns;
+- dragging;
+- rescue;
+- body piles;
+- local injury;
+- balance;
+- physical recovery.
+
+That creates a convergence point where previously disconnected mechanics can be
+made consequences of the same state.
+
+## B. The next body leap is contact-authored combat
+
+Legacy combat still chooses gameplay hit regions independently and the body
+solver adapts to the result.
+
+The stronger architecture is the inverse:
+
+`weapon trajectory/contact -> physical node -> impulse -> tissue/region injury
+-> balance/consciousness -> body reaction`
+
+That would remove one of the last major duplicated interpretations of a hit.
+It is the strongest immediate continuation of this substrate.
+
+## C. Full same-tick coupling is now worth considering
+
+The body solve currently executes after the legacy `stepWorld()` pass.
+That was the safest way to establish the substrate without destabilizing every
+existing system.
+
+Once behavior is proven, moving the body pass between root physics and
+physiology would make fire exposure, structural injury, dragging, tracks, and
+other downstream systems observe the articulated result in the same fixed tick.
+
+This is a meaningful architectural upgrade, not cleanup.
+Do it when it buys visible systemic behavior, not merely elegance.
+
+## D. Crowd physics can become systemic without adding a crowd system
+
+Because dynamic humans now collide by body nodes and existing AI already has
+fear, fleeing, rescue, pursuit, and routines, crowd disasters can emerge from
+existing systems once density and propagation are increased.
+
+Potential consequences include:
+
+- stampedes;
+- blocked exits;
+- people tripping over bodies;
+- rescue attempts creating secondary falls;
+- fire panic causing pileups;
+- guards physically forcing through crowds.
+
+No separate "crowd event manager" is required.
+
+## E. Environment x body is a high-leverage frontier
+
+The field system and articulated body system now create a natural coupling
+frontier:
+
+- mud changes footing and fall probability;
+- oil can create actual body slips;
+- water can drag/submerge individual limbs;
+- fire can damage regionally based on exposed nodes;
+- collapsing structures can contact actual body parts;
+- surfaces can carry distinct impact/friction behavior.
+
+This path multiplies existing systems rather than adding content islands.
+
+## F. Structural debris is now the weakest physical link in large disasters
+
+Humans can become articulated and pile physically, while collapsed props are
+still coarse bodies with shallow contact handling.
+
+If large-scale destruction becomes a priority, better debris/body interaction
+will deliver more value than adding more destruction visuals.
 
 ---
 
-# 15. Architectural interpretation
+# 18. Best forward paths - ranked by leverage
 
-SUNDER's current strength is **coupling density**, not individual subsystem sophistication.
+These are not generic feature suggestions. They are the current highest-value
+continuations of the actual architecture.
 
-Each subsystem is relatively small, but many share the same authoritative state:
+## 1. Physical contact-authored combat
 
-- fire affects actors, props, structures, visuals, sound, fear, AI, weather response;
-- injury affects locomotion, blood, tracks, consciousness, AI threat interest, HUD, death;
-- sound affects perception and pursuit while also producing audio;
-- physical actions affect wanted state and social memory;
-- structural failure affects collision topology, bodies, fear, sound, camera trauma, fire exposure;
-- weather affects fire, wetness, visibility, hearing, rendering, and evidence lifetime.
+Make melee attacks generate a real weapon/contact trajectory against articulated
+body nodes. Let the contacted node determine region, impulse, injury type,
+balance response, and physical reaction.
 
-That means the best future upgrades are usually those that **increase the number and quality of meaningful cross-system couplings** rather than adding isolated features.
+Why first:
 
-A sophisticated feature that only renders differently is weaker than a smaller feature that changes simulation, perception, behavior, consequence, and history coherently.
+- directly deepens the player's primary action;
+- removes duplicated hit interpretation;
+- makes every existing injury/body feature more meaningful;
+- immediately visible;
+- naturally extends to blocks, grabs, shields, pinned limbs, and weapon traps.
+
+## 2. Same-tick body/environment coupling
+
+Move body solving into the world causal sequence after coarse movement/physics
+but before injury/fire/structures/tracks consume final body state.
+
+Why second:
+
+- makes articulated position authoritative to more systems;
+- improves dragging through fire/water/debris;
+- enables local structural impact;
+- reduces root/body temporal mismatch.
+
+## 3. Surface-contact locomotion and falls
+
+Use physical feet/contact normals plus mud/oil/wetness to drive support quality,
+slipping, bracing, stumbling, and fall initiation.
+
+Why third:
+
+- connects body + environment + weather + movement;
+- converts "surface modifiers" into visible physical behavior;
+- produces emergent chaos without authored encounters.
+
+## 4. Crowd chain dynamics
+
+Increase physical knock-on behavior between fear-driven humans, bodies, rescue,
+and constrained spaces.
+
+Why high leverage:
+
+- uses AI already present;
+- uses body contacts already present;
+- uses sound/fire/wanted state already present;
+- creates large visible consequences from small causes.
+
+## 5. Debris/body contact depth
+
+Promote selected broken structural props to better collision bodies and let their
+mass/velocity apply node-local human injury.
+
+Why later:
+
+- major payoff during destruction;
+- but player-to-human physical combat will be encountered more often and should
+  mature first.
 
 ---
 
-# 16. Development doctrine for this branch
+# 19. Expansion doctrine
 
-When expanding SUNDER:
+When adding a major mechanic, prefer this question:
 
-1. inspect the exact authoritative source first;
-2. identify which state is real and which state is projection;
-3. trace all producers and consumers of the state being changed;
-4. preserve `stepWorld()` causal semantics unless the change intentionally alters them;
-5. prefer extending existing shared mechanisms over parallel special-case systems when the semantics genuinely match;
-6. do not claim an underlying physical/social/environmental mechanism exists because a visual approximation resembles it;
-7. make sophisticated upgrades visible and playable through direct player agency;
-8. protect mobile/Fold interaction and performance as first-class constraints;
-9. do not refactor unrelated working systems for cleanliness while implementing a requested expansion;
-10. after a major architecture change, update this dossier with the new authority map and remove claims that are no longer true.
+"What existing states can this mechanism read, and what existing systems can
+observe its consequences?"
+
+Prefer:
+
+- shared authority;
+- conserved/physical relationships;
+- visible causality;
+- consequences that propagate;
+- small mechanisms with large coupling surfaces.
+
+Avoid:
+
+- parallel fake state;
+- animation-only approximations when physical state already exists;
+- scripted one-off spectacle;
+- feature managers that duplicate information already represented by world,
+  memory, field, or body state;
+- broad rewrites whose only payoff is code cleanliness.
 
 ---
 
-# 17. Fast mental reload
+# 20. Fast reload - read this if context is scarce
 
-If only one section can be read before a future turn, remember this:
+SUNDER is a fixed-step TypeScript/React/Three.js systemic game.
+`World` is the coarse state aggregate and `stepWorld()` is the original ordered
+mutation pipeline.
 
-SUNDER is a custom Three.js systemic sandbox with one mutable authoritative `World` and a fixed 60 Hz ordered simulation pipeline. `sim.ts` is the causal core. Actors combine body state, regional injury, AI state, memory, social traits, locomotion, and interaction state in one record. Props combine material, damage, flammability, structural membership, and simple dynamics. Fire is a real typed-array field coupled to weather, actors, props, structures, smoke, wetness, oil, and visuals. AI is reactive state logic driven by perception/memory rather than planning. Physics is custom circle/AABB and ballistic integration, not a rigid-body or articulated solver. Rendering is a projection with simple primitive humans and whole-body pseudo-ragdolls. The current architecture is small enough to understand end-to-end and coupled enough to reward deep systemic upgrades. The main danger is adding visually impressive parallel systems that do not become authoritative causes in the world.
+Humans now also have a 15-node articulated physical body system split across
+`body-model.ts`, `body-contacts.ts`, `body.ts`, and `body-render.ts`.
+Normal movement remains actor-root driven for compatibility; stumble, ragdoll,
+down, dragging, piles, and get-up use physical body constraints and contact.
+Dynamic body state derives back into actor root state for AI/camera/world
+compatibility.
+
+Fire is a 44x44 coupled environmental field over an 88x88 world.
+AI already has perception, memory, fear, loyalty, routines, pursuit, search,
+rescue, and animal predator/prey behavior.
+Structures are support-count/HP based.
+Props remain coarse dynamic bodies.
+Persistence is partial.
+
+The strongest next expansion is to let real weapon/body contact author injury
+and impulse, then move body solving deeper into the same-tick world causal
+sequence so environment/physiology consume articulated results directly.
+
+Always seek deeper coupling before adding isolated feature count.
