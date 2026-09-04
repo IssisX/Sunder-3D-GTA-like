@@ -5,6 +5,8 @@ import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
+import { PhysicalBodies } from "./body";
+import { BodyView } from "./body-render";
 import { clearSave, loadSave, writeSave } from "./save";
 
 export class Game {
@@ -12,6 +14,8 @@ export class Game {
   input: Input;
   audio = new GameAudio();
   view: View;
+  bodies = new PhysicalBodies();
+  bodyView: BodyView;
   cam: Cam = { yaw: 0, pitch: 0.18 };
   hud: HudState = defaultHud();
   onHud: (h: HudState) => void;
@@ -31,6 +35,9 @@ export class Game {
     buildLevel(this.world);
     this.view.bootstrap(this.world);
     this.restore();
+    this.bodies.bootstrap(this.world);
+    this.bodyView = new BodyView(this.view, this.bodies);
+    this.bodyView.bootstrap(this.world.actors);
     this.cam.yaw = this.world.player().yaw;
     this.resize();
     this.canvas.addEventListener("click", this.onCanvasClick);
@@ -67,6 +74,8 @@ export class Game {
     this.flushSave();
     this.input.dispose();
     this.view.dispose();
+    this.bodyView.forget();
+    this.bodies.clear();
     this.unsubVis?.();
     this.canvas.removeEventListener("click", this.onCanvasClick);
     window.removeEventListener("resize", this.resize);
@@ -119,11 +128,17 @@ export class Game {
   restart(fresh = true) {
     if (fresh) clearSave();
     this.view.dispose();
+    this.bodyView.forget();
+    this.bodies.clear();
     this.world = new World();
     this.world.seed = (Date.now() % 2147483646) + 1;
     buildLevel(this.world);
     this.view = new View(this.canvas);
     this.view.bootstrap(this.world);
+    this.bodies = new PhysicalBodies();
+    this.bodies.bootstrap(this.world);
+    this.bodyView = new BodyView(this.view, this.bodies);
+    this.bodyView.bootstrap(this.world.actors);
     this.cam = { yaw: this.world.player().yaw, pitch: 0.18 };
     this.hud = defaultHud();
     this.input.enabled = false;
@@ -142,9 +157,11 @@ export class Game {
     p.stamina = 0.4;
     p.weapon = "fist";
     p.grabbedId = 0;
+    p.grabbedBy = 0;
     p.loco = "idle";
     p.alive = true;
     p.downT = 0;
+    this.bodies.reset(p);
     this.world.phase = "playing";
     this.hud.phase = "playing";
     this.input.enabled = true;
@@ -169,6 +186,7 @@ export class Game {
     if (this.world.hitstop > 0 && simPlaying) {
       this.world.hitstop -= raw;
       this.view.sync(this.world, this.cam, 1, raw, this.world.phase === "title");
+      this.bodyView.sync(this.world.actors, 1);
       this.view.render();
       return;
     }
@@ -177,6 +195,7 @@ export class Game {
       let steps = 0;
       while (this.acc >= STEP && steps < 5) {
         stepWorld(this.world, STEP, input, this.cam, simPlaying);
+        this.bodies.step(this.world, STEP);
         this.acc -= STEP;
         steps++;
         this.drainAudio();
@@ -184,6 +203,7 @@ export class Game {
     }
     const alpha = playing ? this.acc / STEP : 1;
     this.view.sync(this.world, this.cam, alpha, raw, this.world.phase === "title");
+    this.bodyView.sync(this.world.actors, alpha);
     this.view.render();
     this.saveT += raw;
     if (this.saveT > 4) {
