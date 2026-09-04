@@ -19,20 +19,16 @@ import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
 
-// How much of the support reaction is transmitted immediately to each node.
-// Supported feet remain nearly stationary; the articulated chain carries the
-// reaction from the ground into the pelvis/torso instead of simply sliding the
-// entire rig as one kinematic object.
 const DRIVE_WEIGHT = new Float32Array([
-  1.14, // pelvis
-  1.08, // chest
-  0.9, // head
-  0.94, 0.94, // shoulders
-  0.84, 0.84, // elbows
-  0.74, 0.74, // hands
-  1.02, 1.02, // hips
-  0.78, 0.78, // knees
-  0.6, 0.6, // feet; supported feet are reduced further below
+  1.14,
+  1.08,
+  0.9,
+  0.94, 0.94,
+  0.84, 0.84,
+  0.74, 0.74,
+  1.02, 1.02,
+  0.78, 0.78,
+  0.6, 0.6,
 ]);
 
 function clamp01(v: number) {
@@ -42,15 +38,6 @@ function clamp01(v: number) {
 /**
  * Converts desired human translation into a friction-limited external support
  * reaction on the authoritative articulated body.
- *
- * This is the missing bridge between "I intend to walk" and actual COM
- * momentum. Internal joint actuation cannot manufacture net translation, so
- * locomotor momentum is introduced only while a real support contact exists
- * (or the previous physical step confirmed grounded support).
- *
- * The legacy Actor root remains a compatibility predictor for one fixed step;
- * it is not the final authority. PhysicalBodies derives the Actor root back
- * from the solved pelvis after this impulse, constraints, and contacts run.
  */
 export class SupportMotionController {
   private readonly state: MechanicalState = makeMechanicalState();
@@ -68,9 +55,6 @@ export class SupportMotionController {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
     sampleMechanicalState(w, a, rig, h, this.state);
 
-    // Previous-step grounded state is a valid one-tick support witness and
-    // prevents a contact-tolerance deadlock from making an otherwise standing
-    // body incapable of initiating its first step.
     const supportCount =
       this.state.supportCount > 0
         ? this.state.supportCount
@@ -83,20 +67,29 @@ export class SupportMotionController {
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
 
-    // Game/AI intent supplies the desired velocity, while the tiny Actor/pelvis
-    // mismatch from the compatibility world step is treated only as a tracking
-    // reference. The solved pelvis will overwrite that predictor later.
-    let targetVx = a.intendX * Math.max(0, a.intendSpeed);
-    let targetVz = a.intendZ * Math.max(0, a.intendSpeed);
+    // The previous support envelope already has enough acceleration authority to
+    // reach the requested speed quickly. The remaining slow feel therefore comes
+    // from the gameplay velocity target itself, not insufficient traction. Raise
+    // the player target directly while keeping the same friction/leg/fatigue law.
+    const requestedSpeed = Math.max(0, a.intendSpeed);
+    let speedScale = 1;
+    if (a.kind === "player") {
+      if (a.crouch) {
+        speedScale = 1.08;
+      } else {
+        const sprintBlend = clamp01((requestedSpeed - 4.2) / 2.4);
+        speedScale = 1.32 + (1.15 - 1.32) * sprintBlend;
+      }
+    }
+
+    let targetVx = a.intendX * requestedSpeed * speedScale;
+    let targetVz = a.intendZ * requestedSpeed * speedScale;
     const rootErrX = a.x - rig.x[BODY.pelvis]!;
     const rootErrZ = a.z - rig.z[BODY.pelvis]!;
     const errGain = a.kind === "player" ? 9.5 : 6.2;
     targetVx += clamp(rootErrX * errGain, -2.1 * scale, 2.1 * scale);
     targetVz += clamp(rootErrZ * errGain, -2.1 * scale, 2.1 * scale);
 
-    // A bare-fist strike recruits a small legitimate ground reaction into the
-    // punch. This is not an animation shove: it is available only through
-    // support and is capped by the same traction envelope as locomotion.
     let handReach = 0;
     if (a.weapon === "fist") {
       if (bodyTaskTargets.priorityFor(a, BODY.lHand) >= TASK_PRIORITY.ACTION) {
@@ -126,10 +119,6 @@ export class SupportMotionController {
       targetVz += fz * recruitment * 0.42 * scale;
     }
 
-    // The player already requests a normal 3.45 m/s walk in sim.ts. The prior
-    // support envelope was too weak to let the physical COM actually reach that
-    // request. This response is intentionally quicker while remaining limited
-    // by real support, grip, leg integrity and control authority.
     const response =
       mode === "stumble"
         ? 0.16
@@ -163,9 +152,6 @@ export class SupportMotionController {
     const dvx = ax * h;
     const dvz = az * h;
 
-    // Jump still originates in the existing gameplay request, but the takeoff
-    // velocity is now admitted to the articulated body only while support is
-    // available. Once airborne, internal articulation cannot create more lift.
     let dvy = 0;
     if (a.vy > this.state.velY + 0.7 && a.vy > 1.2) {
       const requested = Math.min(7.2 * scale, a.vy - this.state.velY);
