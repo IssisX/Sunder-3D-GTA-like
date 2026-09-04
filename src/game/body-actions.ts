@@ -24,6 +24,7 @@ interface GrabMotion {
   t: number;
   lastGrabbedId: number;
   recoverFrom: RecoverFrom;
+  contactIssued: boolean;
 }
 
 const ANTICIPATE_T = 0.1;
@@ -72,6 +73,16 @@ function canPose(a: Actor) {
     a.loco !== "down" &&
     a.loco !== "getup"
   );
+}
+
+function makeMotion(): GrabMotion {
+  return {
+    phase: "idle",
+    t: 0,
+    lastGrabbedId: 0,
+    recoverFrom: "reach",
+    contactIssued: false,
+  };
 }
 
 function setLocalNode(
@@ -267,6 +278,48 @@ function applyPose(
   }
 }
 
+function advancePassive(
+  motion: GrabMotion,
+  dt: number,
+  holding: boolean,
+) {
+  if (motion.phase === "idle" || motion.phase === "hold") return;
+  motion.t += dt;
+
+  if (
+    motion.phase === "anticipate" &&
+    motion.t >= ANTICIPATE_T
+  ) {
+    motion.phase = "reach";
+    motion.t = 0;
+  } else if (
+    motion.phase === "reach" &&
+    motion.t >= REACH_T
+  ) {
+    if (holding) {
+      motion.phase = "hold";
+      motion.t = 0;
+    } else {
+      motion.phase = "recover";
+      motion.t = 0;
+      motion.recoverFrom = "reach";
+    }
+  } else if (
+    motion.phase === "release" &&
+    motion.t >= RELEASE_T
+  ) {
+    motion.phase = "recover";
+    motion.t = 0;
+    motion.recoverFrom = "release";
+  } else if (
+    motion.phase === "recover" &&
+    motion.t >= RECOVER_T
+  ) {
+    motion.phase = "idle";
+    motion.t = 0;
+  }
+}
+
 export class AnimatedPhysicalBodies extends PhysicalBodies {
   private motions = new Map<number, GrabMotion>();
   private playerGrabPressed = false;
@@ -275,6 +328,96 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
   captureInput(input: Actions) {
     this.playerGrabPressed ||= input.grabPressed;
     this.playerGrabReleased ||= input.grabReleased;
+
+    // The physical action layer owns the timing of these two edges.
+    // Keep hold state intact, but suppress the legacy instant latch/release.
+    input.grabPressed = false;
+    input.grabReleased = false;
+  }
+
+  prepareInput(w: World, input: Actions, dt: number) {
+    input.grabPressed = false;
+    input.grabReleased = false;
+
+    const p = w.player();
+    let motion = this.motions.get(p.id);
+    if (!motion) {
+      motion = makeMotion();
+      this.motions.set(p.id, motion);
+    }
+
+    if (!canPose(p)) {
+      motion.phase = "idle";
+      motion.t = 0;
+      motion.contactIssued = false;
+      this.playerGrabPressed = false;
+      this.playerGrabReleased = false;
+      return;
+    }
+
+    if (this.playerGrabReleased) {
+      this.playerGrabReleased = false;
+      this.playerGrabPressed = false;
+
+      if (p.grabbedId) {
+        input.grabReleased = true;
+        motion.phase = "release";
+        motion.t = 0;
+        motion.recoverFrom = "release";
+        motion.contactIssued = false;
+      } else if (
+        motion.phase === "anticipate" ||
+        motion.phase === "reach"
+      ) {
+        motion.phase = "recover";
+        motion.t = 0;
+        motion.recoverFrom = "reach";
+        motion.contactIssued = false;
+      }
+    }
+
+    if (
+      this.playerGrabPressed &&
+      !p.grabbedId &&
+      motion.phase === "idle"
+    ) {
+      this.playerGrabPressed = false;
+      motion.phase = "anticipate";
+      motion.t = 0;
+      motion.recoverFrom = "reach";
+      motion.contactIssued = false;
+    }
+
+    if (motion.phase === "anticipate") {
+      motion.t += dt;
+      if (motion.t >= ANTICIPATE_T) {
+        motion.phase = "reach";
+        motion.t = 0;
+      }
+    } else if (motion.phase === "reach") {
+      motion.t += dt;
+      if (
+        motion.t >= REACH_T &&
+        !motion.contactIssued
+      ) {
+        motion.t = REACH_T;
+        motion.contactIssued = true;
+        input.grabPressed = true;
+      }
+    } else if (motion.phase === "release") {
+      motion.t += dt;
+      if (motion.t >= RELEASE_T) {
+        motion.phase = "recover";
+        motion.t = 0;
+        motion.recoverFrom = "release";
+      }
+    } else if (motion.phase === "recover") {
+      motion.t += dt;
+      if (motion.t >= RECOVER_T) {
+        motion.phase = "idle";
+        motion.t = 0;
+      }
+    }
   }
 
   override reset(a: Actor) {
@@ -290,11 +433,6 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
   }
 
   override step(w: World, dt: number) {
-    const pressed = this.playerGrabPressed;
-    const released = this.playerGrabReleased;
-    this.playerGrabPressed = false;
-    this.playerGrabReleased = false;
-
     super.step(w, dt);
 
     for (const a of w.actors) {
@@ -304,18 +442,11 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
 
       let motion = this.motions.get(a.id);
       if (!motion) {
-        motion = {
-          phase: "idle",
-          t: 0,
-          lastGrabbedId: 0,
-          recoverFrom: "reach",
-        };
+        motion = makeMotion();
         this.motions.set(a.id, motion);
       }
 
       const isPlayer = a.id === w.playerId;
-      const grabPressed = isPlayer && pressed;
-      const grabReleased = isPlayer && released;
       const grabbedNow = a.grabbedId;
       const beganHolding =
         grabbedNow !== 0 && motion.lastGrabbedId === 0;
@@ -325,65 +456,49 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
       if (!canPose(a)) {
         motion.phase = "idle";
         motion.t = 0;
-      } else if (grabReleased || stoppedHolding) {
-        motion.phase = "release";
-        motion.t = 0;
-        motion.recoverFrom = "release";
-      } else if (grabPressed) {
-        motion.phase = "anticipate";
-        motion.t = 0;
-        motion.recoverFrom = "reach";
-      } else if (
-        beganHolding &&
-        motion.phase === "idle"
-      ) {
-        motion.phase = "reach";
-        motion.t = 0;
-        motion.recoverFrom = "reach";
-      }
-
-      motion.lastGrabbedId = grabbedNow;
-      motion.t += dt;
-
-      if (
-        motion.phase === "anticipate" &&
-        motion.t >= ANTICIPATE_T
-      ) {
-        motion.phase = "reach";
-        motion.t = 0;
-      } else if (
-        motion.phase === "reach" &&
-        motion.t >= REACH_T
-      ) {
-        if (grabbedNow) {
-          motion.phase = "hold";
+        motion.contactIssued = false;
+      } else if (isPlayer) {
+        if (
+          motion.phase === "reach" &&
+          motion.contactIssued
+        ) {
+          motion.contactIssued = false;
+          if (grabbedNow) {
+            motion.phase = "hold";
+            motion.t = 0;
+          } else {
+            motion.phase = "recover";
+            motion.t = 0;
+            motion.recoverFrom = "reach";
+          }
+        } else if (
+          stoppedHolding &&
+          motion.phase === "hold"
+        ) {
+          motion.phase = "release";
           motion.t = 0;
-        } else {
-          motion.phase = "recover";
+          motion.recoverFrom = "release";
+        }
+      } else {
+        if (
+          stoppedHolding &&
+          motion.phase === "hold"
+        ) {
+          motion.phase = "release";
+          motion.t = 0;
+          motion.recoverFrom = "release";
+        } else if (
+          beganHolding &&
+          motion.phase === "idle"
+        ) {
+          motion.phase = "reach";
           motion.t = 0;
           motion.recoverFrom = "reach";
         }
-      } else if (
-        motion.phase === "hold" &&
-        !grabbedNow
-      ) {
-        motion.phase = "release";
-        motion.t = 0;
-        motion.recoverFrom = "release";
-      } else if (
-        motion.phase === "release" &&
-        motion.t >= RELEASE_T
-      ) {
-        motion.phase = "recover";
-        motion.t = 0;
-        motion.recoverFrom = "release";
-      } else if (
-        motion.phase === "recover" &&
-        motion.t >= RECOVER_T
-      ) {
-        motion.phase = "idle";
-        motion.t = 0;
+        advancePassive(motion, dt, Boolean(grabbedNow));
       }
+
+      motion.lastGrabbedId = grabbedNow;
 
       const targetActor =
         grabbedNow ? w.actor(grabbedNow) : undefined;
