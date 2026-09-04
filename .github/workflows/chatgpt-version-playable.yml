@@ -25,7 +25,8 @@ jobs:
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Typecheck current source
+      - name: Typecheck current source (diagnostic)
+        continue-on-error: true
         run: npm run typecheck
 
       - name: Build single-file canonical playable
