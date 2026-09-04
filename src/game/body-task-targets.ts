@@ -21,7 +21,7 @@ export const TASK_PRIORITY = {
  * Zero-allocation task-space target buffer.
  *
  * Producers describe desired body geometry here before the physical solve.
- * The active controller consumes the merged targets through rig.tx/ty/tz.
+ * ActiveBodyControl consumes the same targets as velocity-space actuation.
  * Nothing in this module is allowed to move solved body nodes directly.
  */
 class BodyTaskTargets {
@@ -121,15 +121,34 @@ class BodyTaskTargets {
   }
 
   priorityFor(a: Actor, node: number) {
-    const slot = this.slot(a.id);
-    if (slot < 0 || node < 0 || node >= STRIDE) return 0;
-    return this.priority[slot * STRIDE + node]!;
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.priority[q]!;
   }
 
   weightFor(a: Actor, node: number) {
-    const slot = this.slot(a.id);
-    if (slot < 0 || node < 0 || node >= STRIDE) return 0;
-    return this.weight[slot * STRIDE + node]!;
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.weight[q]!;
+  }
+
+  targetXFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.x[q]!;
+  }
+
+  targetYFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.y[q]!;
+  }
+
+  targetZFor(a: Actor, node: number) {
+    const q = this.index(a.id, node);
+    return q < 0 ? 0 : this.z[q]!;
+  }
+
+  private index(id: number, node: number) {
+    if (node < 0 || node >= STRIDE) return -1;
+    const slot = this.slot(id);
+    return slot < 0 ? -1 : slot * STRIDE + node;
   }
 
   private slot(id: number) {
