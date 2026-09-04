@@ -10,14 +10,12 @@ import { BodyCausality } from "./body-causality";
 /**
  * Canonical runtime body/action orchestrator.
  *
- * The fixed-step causal order is intentional:
- *   base articulated solve / locomotion
- *   -> action geometry and physical contact
- *   -> anatomical/root impulse propagation
- *   -> support/COM stability decision
- *
- * No action system is allowed to independently choose a hit reaction or fall
- * state when the common body substrate can derive it from contact mechanics.
+ * Fixed-step ownership:
+ *   pre-world: input/action selection + locomotion intent shaping
+ *   world sim: AI/world/root compatibility movement
+ *   post-world/pre-body: locomotion + melee whole-body task generation
+ *   body solve: active motors -> joint constraints -> contacts
+ *   post-solve: real effector contact -> impulse -> stability outcome
  */
 export class ProceduralAnimationController extends AnimationController {
   private readonly melee = new MeleeKinematics(this);
@@ -57,26 +55,29 @@ export class ProceduralAnimationController extends AnimationController {
 
   override prepareStep(w: World, dt: number) {
     this.social.beginStep(w);
+    // Only intent shaping belongs before stepWorld. Absolute task geometry is
+    // deliberately deferred until step(), which runs after World simulation.
     super.prepareStep(w, dt);
-    this.melee.prepareStep(w, dt);
   }
 
   override step(w: World, dt: number) {
     this.social.endStep(w);
 
-    // Establish the current articulated body and locomotion state first.
+    // Generate all task-space geometry from the current post-world root and the
+    // previous solved physical rig immediately before active motor control.
+    super.prepareBodyStep(w, dt);
+    this.melee.prepareStep(w, dt);
+
+    // ActiveBodyControl consumes the merged locomotion/action targets here.
     super.step(w, dt);
 
-    // The action solver moves the real effectors and detects contact from their
-    // swept geometry. Contact writes injury plus one shared impulse field.
+    // Contact is measured from the solved physical fist/foot trajectory only.
     this.melee.step(w, dt);
 
-    // The same field now drives both visible anatomical recoil and coarse root
-    // momentum. No separate melee knockback path exists.
+    // The same impulse field drives visible recoil and coarse root momentum.
     impactDynamics.step(w, dt);
 
-    // Finally derive absorb/recoil/stumble/collapse from actual support geometry,
-    // COM projection, posture, injury and the impulse that just occurred.
+    // Support/COM mechanics decide absorb, corrective recovery, stumble or fall.
     this.causality.step(w, dt);
   }
 }
