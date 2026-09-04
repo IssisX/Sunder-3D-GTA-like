@@ -1,6 +1,6 @@
 import type { Actor, Region } from "./types";
 import type { World } from "./world";
-import { clamp, injurySum } from "./world";
+import { injurySum } from "./world";
 import {
   BODY,
   BODY_NODE_COUNT,
@@ -15,35 +15,36 @@ import {
   sampleMechanicalState,
   type MechanicalState,
 } from "./mechanical-state";
-import { bodyTaskTargets } from "./body-task-targets";
+import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
 
-// Natural-frequency hierarchy. Core posture gets the most authority; distal
-// limbs remain more compliant so contacts and disturbances can visibly win.
+// Controlled humans should feel actively supported, not floppy. Core and legs
+// carry stronger posture bandwidth; distal joints remain compliant enough for
+// contacts and impact torque to visibly win.
 const OMEGA = new Float32Array([
-  17.5, // pelvis
-  18.5, // chest
-  13.5, // head
-  16.0, 16.0, // shoulders
-  13.5, 13.5, // elbows
-  11.5, 11.5, // hands
-  17.0, 17.0, // hips
-  14.5, 14.5, // knees
-  11.0, 11.0, // feet
+  21.0, // pelvis
+  22.0, // chest
+  16.0, // head
+  18.0, 18.0, // shoulders
+  16.0, 16.0, // elbows
+  15.0, 15.0, // hands
+  20.0, 20.0, // hips
+  18.0, 18.0, // knees
+  16.0, 16.0, // feet
 ]);
 
 const NODE_AUTHORITY = new Float32Array([
   1.0,
   1.0,
-  0.56,
-  0.82, 0.82,
-  0.68, 0.68,
-  0.5, 0.5,
-  0.92, 0.92,
+  0.62,
+  0.86, 0.86,
   0.76, 0.76,
-  0.48, 0.48,
+  0.68, 0.68,
+  0.95, 0.95,
+  0.86, 0.86,
+  0.72, 0.72,
 ]);
 
 function clamp01(v: number) {
@@ -87,7 +88,6 @@ export class ActiveBodyControl {
 
     // Base anatomical targets are produced by body-model. Locomotion/actions
     // may only alter that desired state through this pre-solve task buffer.
-    // No task producer receives authority to move solved rig nodes directly.
     bodyTaskTargets.apply(a, rig);
     sampleMechanicalState(w, a, rig, h, this.state);
 
@@ -95,14 +95,17 @@ export class ActiveBodyControl {
     const painAuthority = clamp01(1 - a.pain * 0.34);
     const consciousAuthority = 0.08 + this.state.consciousness * 0.92;
     const disturbanceAuthority = 1 / (1 + this.state.disturbance * 0.72);
-    const balanceAuthority = 0.38 + clamp01(a.balance) * 0.62;
+    const balanceAuthority = 0.42 + clamp01(a.balance) * 0.58;
 
-    // Support is required for strong whole-body posture actuation. Airborne or
-    // slipping bodies retain orientation control but cannot invent propulsion.
+    // Ordinary controlled stance must not enter a positive-feedback collapse
+    // just because a foot briefly loses the support tolerance. Contact still
+    // limits what the body can actually accomplish after actuation.
     const groundedAuthority =
       this.state.supportCount > 0
-        ? 0.42 + this.state.supportScore * 0.58
-        : 0.28;
+        ? 0.68 + this.state.supportScore * 0.32
+        : mode === "follow"
+          ? 0.58
+          : 0.34;
 
     const global =
       modeGain *
@@ -113,15 +116,17 @@ export class ActiveBodyControl {
       balanceAuthority;
 
     const scale = bodyScale(a);
-    const maxDv = (mode === "recover" ? 4.2 : mode === "stumble" ? 2.4 : 5.4) * scale;
+    const baseMaxDv =
+      (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
 
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
       const region = NODE_REGION[node]!;
       const integrity = regionIntegrity(a, region);
+      const taskPriority = bodyTaskTargets.priorityFor(a, node);
+      const taskWeight = bodyTaskTargets.weightFor(a, node);
+
       let authority = global * NODE_AUTHORITY[node]! * (0.22 + integrity * 0.78);
 
-      // Legs and core depend strongly on actual support. Arms/head can still
-      // orient in air, but never create root momentum by themselves.
       if (
         node === BODY.pelvis ||
         node === BODY.chest ||
@@ -135,16 +140,35 @@ export class ActiveBodyControl {
         authority *= groundedAuthority;
       }
 
-      // A planted foot is a contact constraint first and a pose target second.
-      // Keep the motor compliant there so the ground, friction and joint chain
-      // determine what motion is actually feasible.
+      // The ground owns a planted foot. Motor authority remains finite there;
+      // high-priority task requests cannot simply drag a contact through space.
       if (
         (node === BODY.lFoot && this.state.leftSupported) ||
         (node === BODY.rFoot && this.state.rightSupported)
       ) {
-        authority *= 0.46 + this.state.grip * 0.28;
+        authority *= 0.58 + this.state.grip * 0.28;
       }
 
+      let frequencyGain = 1;
+      let maxDv = baseMaxDv;
+      if (taskPriority >= TASK_PRIORITY.ACTION) {
+        // A punch/kick must move with athletic bandwidth rather than the same
+        // low-gain posture servo used for idle hands. It is still bounded and
+        // remains subordinate to contact/joint constraints.
+        frequencyGain = 1.72 + taskWeight * 0.28;
+        authority *= 1.18 + taskWeight * 0.22;
+        maxDv *= 1.7;
+      } else if (taskPriority >= TASK_PRIORITY.CORRECTIVE_STEP) {
+        frequencyGain = 1.48;
+        authority *= 1.18;
+        maxDv *= 1.45;
+      } else if (taskPriority >= TASK_PRIORITY.LOCOMOTION) {
+        frequencyGain = 1.24;
+        authority *= 1.08;
+        maxDv *= 1.25;
+      }
+
+      authority = Math.min(1.25, authority);
       if (authority < 0.015) continue;
 
       const ex = rig.tx[node]! - rig.x[node]!;
@@ -154,9 +178,9 @@ export class ActiveBodyControl {
       const vy = nodeVelocityComponent(rig.y[node]!, rig.py[node]!, h);
       const vz = nodeVelocityComponent(rig.z[node]!, rig.pz[node]!, h);
 
-      const omega = OMEGA[node]!;
+      const omega = OMEGA[node]! * frequencyGain;
       const kp = omega * omega;
-      const kd = 2 * 0.88 * omega;
+      const kd = 2 * 0.9 * omega;
       let dvx = (kp * ex - kd * vx) * h * authority;
       let dvy = (kp * ey - kd * vy) * h * authority;
       let dvz = (kp * ez - kd * vz) * h * authority;
@@ -169,8 +193,7 @@ export class ActiveBodyControl {
         dvz *= q;
       }
 
-      // Velocity-space actuation. This is the critical distinction from the old
-      // followPose()/pinNode path: no node is teleported toward its target.
+      // Velocity-space actuation. No solved node is teleported to its target.
       rig.px[node] -= dvx * h;
       rig.py[node] -= dvy * h;
       rig.pz[node] -= dvz * h;
