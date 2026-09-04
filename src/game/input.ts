@@ -3,6 +3,9 @@ export interface Actions {
   moveY: number;
   lookX: number;
   lookY: number;
+  /** Cursor offset from centre, [-1,1]; used only when pointer lock is denied. */
+  hoverX: number;
+  hoverY: number;
   sprint: boolean;
   crouch: boolean;
   jump: boolean;
@@ -29,6 +32,8 @@ const EMPTY: Actions = {
   moveY: 0,
   lookX: 0,
   lookY: 0,
+  hoverX: 0,
+  hoverY: 0,
   sprint: false,
   crouch: false,
   jump: false,
@@ -93,13 +98,25 @@ export class Input {
   mouseDx = 0;
   mouseDy = 0;
   locked = false;
+  /**
+   * True once a pointer-lock request has been refused. Embedded contexts (an
+   * iframe without `allow="pointer-lock"`, for example) deny it outright, and
+   * without a fallback the mouse would simply not turn the camera there.
+   */
+  lockDenied = false;
+  /** Cursor offset from the canvas centre, normalised to [-1,1] per axis. */
+  hoverX = 0;
+  hoverY = 0;
   lookSens = 0.0022;
   lookTouchSens = 0.0074;
   invertY = false;
   enabled = false;
   hudControls = false;
   private padAwake = false;
-  private pointerIds = new Map<number, { role: "joy" | "look" | "btn"; x: number; y: number; sx: number; sy: number; btn?: string }>();
+  private pointerIds = new Map<
+    number,
+    { role: "joy" | "look" | "btn"; x: number; y: number; sx: number; sy: number; btn?: string }
+  >();
   joyX = 0;
   joyY = 0;
   lookTouchX = 0;
@@ -150,7 +167,14 @@ export class Input {
   requestLock() {
     if (this.locked) return;
     if (isTouchDevice()) return;
-    this.canvas.requestPointerLock?.();
+    const req = this.canvas.requestPointerLock?.();
+    if (req && typeof (req as Promise<void>).catch === "function") {
+      (req as Promise<void>).catch(() => {
+        this.lockDenied = true;
+      });
+    } else if (!this.canvas.requestPointerLock) {
+      this.lockDenied = true;
+    }
   }
 
   setKeys(codes: string[]) {
@@ -177,6 +201,7 @@ export class Input {
 
   private onLockChange() {
     this.locked = document.pointerLockElement === this.canvas;
+    if (this.locked) this.lockDenied = false;
     this.onLock?.(this.locked);
   }
 
@@ -188,6 +213,8 @@ export class Input {
     this.joyY = 0;
     this.lookTouchX = 0;
     this.lookTouchY = 0;
+    this.hoverX = 0;
+    this.hoverY = 0;
     this.pointerIds.clear();
     this.heldButtons.clear();
   }
@@ -204,9 +231,25 @@ export class Input {
 
   private onMouse(e: MouseEvent) {
     if (!this.enabled) return;
-    if (e.type === "mousemove" && this.locked) {
-      this.mouseDx += e.movementX;
-      this.mouseDy += e.movementY;
+    if (e.type === "mousemove") {
+      if (this.locked) {
+        this.mouseDx += e.movementX;
+        this.mouseDy += e.movementY;
+      } else {
+        // Fallback aim: the cursor's offset from the centre drives a turn RATE,
+        // so the camera is still steerable where pointer lock is refused.
+        const r = this.canvas.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          this.hoverX = Math.max(
+            -1,
+            Math.min(1, (e.clientX - r.left - r.width * 0.5) / (r.width * 0.5)),
+          );
+          this.hoverY = Math.max(
+            -1,
+            Math.min(1, (e.clientY - r.top - r.height * 0.5) / (r.height * 0.5)),
+          );
+        }
+      }
     }
     if (e.type === "mousedown") {
       if (e.button === 0) this.heldButtons.add("attack");
@@ -275,7 +318,7 @@ export class Input {
     if (down("KeyS") || down("ArrowDown")) moveY -= 1;
     moveX += this.joyX;
     moveY += this.joyY;
-    const pads = typeof navigator !== "undefined" ? navigator.getGamepads?.() ?? [] : [];
+    const pads = typeof navigator !== "undefined" ? (navigator.getGamepads?.() ?? []) : [];
     for (const pad of pads) {
       if (!pad) continue;
       const any = pad.buttons.some((b) => b.pressed);
@@ -300,7 +343,9 @@ export class Input {
       moveY /= mag;
     }
     const lookX = this.mouseDx * this.lookSens + this.lookTouchX * this.lookTouchSens;
-    const lookY = (this.mouseDy * this.lookSens + this.lookTouchY * this.lookTouchSens) * (this.invertY ? -1 : 1);
+    const lookY =
+      (this.mouseDy * this.lookSens + this.lookTouchY * this.lookTouchSens) *
+      (this.invertY ? -1 : 1);
     this.mouseDx = 0;
     this.mouseDy = 0;
     this.lookTouchX = 0;
@@ -321,6 +366,8 @@ export class Input {
       moveY,
       lookX,
       lookY,
+      hoverX: this.hoverX,
+      hoverY: this.hoverY,
       sprint,
       crouch: down("KeyC") || down("ControlLeft") || this.heldButtons.has("crouch"),
       jump,
@@ -342,7 +389,8 @@ export class Input {
       pausePressed: pause && !this.prev.pausePressed,
     };
     this.prev = { ...a, pausePressed: pause };
-    if (this.heldButtons.has("jump") && !down("Space") && !this.hudControls) this.heldButtons.delete("jump");
+    if (this.heldButtons.has("jump") && !down("Space") && !this.hudControls)
+      this.heldButtons.delete("jump");
     if (this.heldButtons.has("pause")) this.heldButtons.delete("pause");
     return a;
   }

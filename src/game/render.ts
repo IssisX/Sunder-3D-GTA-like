@@ -1,8 +1,57 @@
 import * as THREE from "three";
-import type { Actor, Prop } from "./types";
-import { FIRE_RES, HALF, WORLD } from "./types";
-import { World, facing, injurySum, lerpAng } from "./world";
+import type { Actor, Prop, Region } from "./types";
+import { FIRE_RES, HALF, WORLD, injurySum } from "./types";
+import { World, facing } from "./world";
 import type { Cam } from "./sim";
+
+/**
+ * A rendered bone: a box spanning two body nodes.
+ *
+ * The renderer reads node positions and never writes them. Every pose the
+ * player sees -- gait, stumble, ragdoll, drape, get-up -- is solved state, not
+ * an animation chosen here. That separation is the reason a limp looks like a
+ * limp: nothing in this file knows what a limp is.
+ */
+interface LimbSpec {
+  a: number;
+  b: number;
+  /** Cross-section width (local x) and depth (local z), m at unit scale. */
+  w: number;
+  d: number;
+  region: Region;
+  /** Pushes the near end sideways so shoulders and hips read as joints. */
+  offX?: number;
+  offY?: number;
+}
+
+interface Limb extends LimbSpec {
+  mesh: THREE.Mesh;
+}
+
+const HUMAN_LIMBS: LimbSpec[] = [
+  { a: 1, b: 2, w: 0.42, d: 0.25, region: "torso" },
+  { a: 0, b: 1, w: 0.2, d: 0.19, region: "torso" },
+  { a: 1, b: 3, w: 0.14, d: 0.14, region: "larm", offX: -0.16, offY: 0.12 },
+  { a: 3, b: 4, w: 0.11, d: 0.11, region: "larm" },
+  { a: 1, b: 5, w: 0.14, d: 0.14, region: "rarm", offX: 0.16, offY: 0.12 },
+  { a: 5, b: 6, w: 0.11, d: 0.11, region: "rarm" },
+  { a: 2, b: 7, w: 0.18, d: 0.18, region: "lleg", offX: -0.05 },
+  { a: 7, b: 8, w: 0.14, d: 0.14, region: "lleg" },
+  { a: 2, b: 9, w: 0.18, d: 0.18, region: "rleg", offX: 0.05 },
+  { a: 9, b: 10, w: 0.14, d: 0.14, region: "rleg" },
+];
+
+const BEAST_LIMBS: LimbSpec[] = [
+  { a: 1, b: 2, w: 0.62, d: 0.62, region: "torso" },
+  { a: 0, b: 1, w: 0.3, d: 0.3, region: "head" },
+  { a: 2, b: 7, w: 0.2, d: 0.2, region: "torso" },
+  { a: 1, b: 3, w: 0.16, d: 0.16, region: "larm" },
+  { a: 1, b: 4, w: 0.16, d: 0.16, region: "rarm" },
+  { a: 2, b: 5, w: 0.17, d: 0.17, region: "lleg" },
+  { a: 2, b: 6, w: 0.17, d: 0.17, region: "rleg" },
+];
+
+const UP = new THREE.Vector3(0, 1, 0);
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
@@ -12,7 +61,10 @@ const GEO = {
   plane: new THREE.PlaneGeometry(1, 1),
 };
 
-function mat(color: number, extra: ConstructorParameters<typeof THREE.MeshStandardMaterial>[0] = {}) {
+function mat(
+  color: number,
+  extra: ConstructorParameters<typeof THREE.MeshStandardMaterial>[0] = {},
+) {
   return new THREE.MeshStandardMaterial({
     color,
     roughness: 0.86,
@@ -21,7 +73,10 @@ function mat(color: number, extra: ConstructorParameters<typeof THREE.MeshStanda
   });
 }
 
-function noiseCanvas(size: number, fn: (x: number, y: number, i: number) => [number, number, number]) {
+function noiseCanvas(
+  size: number,
+  fn: (x: number, y: number, i: number) => [number, number, number],
+) {
   const c = document.createElement("canvas");
   c.width = c.height = size;
   const g = c.getContext("2d")!;
@@ -68,6 +123,8 @@ export class View {
   lampLights: THREE.PointLight[] = [];
   tmp = new THREE.Vector3();
   tmp2 = new THREE.Vector3();
+  private dir = new THREE.Vector3();
+  private tmpQuat = new THREE.Quaternion();
   camPos = new THREE.Vector3();
   look = new THREE.Vector3();
   trauma = 0;
@@ -140,7 +197,12 @@ export class View {
       opacity: 0.28,
       depthWrite: false,
     });
-    this.waterMat = mat(0x2a3a40, { roughness: 0.18, metalness: 0.2, transparent: true, opacity: 0.72 });
+    this.waterMat = mat(0x2a3a40, {
+      roughness: 0.18,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.72,
+    });
 
     this.buildGround();
     this.buildSky();
@@ -163,7 +225,14 @@ export class View {
     this.dirtTex.dispose();
     this.scene.traverse((o) => {
       const m = o as THREE.Mesh;
-      if (m.geometry && m.geometry !== GEO.box && m.geometry !== GEO.sphere && m.geometry !== GEO.cyl && m.geometry !== GEO.cone && m.geometry !== GEO.plane) {
+      if (
+        m.geometry &&
+        m.geometry !== GEO.box &&
+        m.geometry !== GEO.sphere &&
+        m.geometry !== GEO.cyl &&
+        m.geometry !== GEO.cone &&
+        m.geometry !== GEO.plane
+      ) {
         m.geometry.dispose();
       }
       const mat = m.material as THREE.Material | THREE.Material[] | undefined;
@@ -302,7 +371,10 @@ export class View {
   private ensureProp(p: Prop) {
     if (this.propMap.has(p.id)) return;
     const color = p.color;
-    const mesh = new THREE.Mesh(GEO.box, mat(color, { map: p.material === "wood" || p.kind === "stall" ? this.woodTex : null }));
+    const mesh = new THREE.Mesh(
+      GEO.box,
+      mat(color, { map: p.material === "wood" || p.kind === "stall" ? this.woodTex : null }),
+    );
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.scale.set(p.sx, p.sy, p.sz);
@@ -327,91 +399,163 @@ export class View {
 
   private ensureActor(a: Actor) {
     if (this.actorMap.has(a.id)) return;
-    const g =
-      a.species === "human" || a.kind === "player"
-        ? this.makeHumanoid(a)
-        : this.makeBeast(a);
+    const g = this.makeRig(a, a.species === "human" ? HUMAN_LIMBS : BEAST_LIMBS);
     this.scene.add(g);
     this.actorMap.set(a.id, g);
   }
 
-  private makeHumanoid(a: Actor) {
+  /** Builds one box per bone. Nothing here is posed; `poseFromBody` does that. */
+  private makeRig(a: Actor, specs: LimbSpec[]) {
     const g = new THREE.Group();
-    const skin = mat(a.skin);
-    const cloth = mat(a.cloth);
-    const dark = mat(a.accent);
-    const head = new THREE.Mesh(GEO.box, skin);
+    const limbs: Limb[] = [];
+    const skinRegions: Record<string, boolean> = { head: true, larm: true, rarm: true };
+    for (const sp of specs) {
+      const base =
+        a.species === "human"
+          ? skinRegions[sp.region]
+            ? a.skin
+            : a.cloth
+          : sp.region === "head"
+            ? a.skin
+            : a.cloth;
+      const m = new THREE.Mesh(GEO.box, mat(base));
+      m.castShadow = true;
+      m.receiveShadow = true;
+      g.add(m);
+      limbs.push({ ...sp, mesh: m });
+    }
+    const head = new THREE.Mesh(GEO.box, mat(a.skin));
     head.name = "head";
-    head.scale.set(0.28, 0.3, 0.26);
-    head.position.y = 1.52;
     head.castShadow = true;
-    const torso = new THREE.Mesh(GEO.box, cloth);
-    torso.name = "torso";
-    torso.scale.set(0.42, 0.52, 0.24);
-    torso.position.y = 1.12;
-    torso.castShadow = true;
-    const pelvis = new THREE.Mesh(GEO.box, dark);
-    pelvis.scale.set(0.38, 0.2, 0.22);
-    pelvis.position.y = 0.78;
-    const larm = arm(skin, -1);
-    const rarm = arm(skin, 1);
-    const lleg = leg(dark, -1);
-    const rleg = leg(dark, 1);
-    larm.name = "larm";
-    rarm.name = "rarm";
-    lleg.name = "lleg";
-    rleg.name = "rleg";
-    g.add(head, torso, pelvis, larm, rarm, lleg, rleg);
+    g.add(head);
     if (a.helmet) {
       const h = new THREE.Mesh(GEO.sphere, mat(0x4a4c50, { metalness: 0.5, roughness: 0.4 }));
-      h.scale.set(0.32, 0.22, 0.3);
-      h.position.y = 1.64;
+      h.name = "helmet";
       g.add(h);
     }
-    const wep = new THREE.Mesh(GEO.box, mat(0x6a5a48));
-    wep.name = "weapon";
-    wep.scale.set(0.06, 0.06, 0.9);
-    rarm.add(wep);
-    wep.position.set(0, -0.42, 0.2);
-    g.userData.parts = { head, torso, larm, rarm, lleg, rleg, wep };
-    return g;
-  }
-
-  private makeBeast(a: Actor) {
-    const g = new THREE.Group();
-    const fur = mat(a.cloth);
-    const body = new THREE.Mesh(GEO.box, fur);
-    const s =
-      a.species === "bear"
-        ? [1.3, 0.9, 2.1]
-        : a.species === "cow"
-          ? [0.9, 0.85, 1.6]
-          : a.species === "wolf"
-            ? [0.45, 0.5, 1.1]
-            : a.species === "deer"
-              ? [0.4, 0.7, 1.15]
-              : a.species === "pig"
-                ? [0.55, 0.45, 0.95]
-                : [0.35, 0.55, 0.7];
-    body.scale.set(s[0]!, s[1]!, s[2]!);
-    body.position.y = s[1]! * 0.55 + 0.15;
-    body.castShadow = true;
-    const head = new THREE.Mesh(GEO.box, mat(a.skin));
-    head.scale.set(s[0]! * 0.55, s[1]! * 0.55, s[2]! * 0.4);
-    head.position.set(0, body.position.y + s[1]! * 0.15, -s[2]! * 0.55);
-    head.castShadow = true;
-    g.add(body, head);
     if (a.species === "deer") {
-      const ant = mat(0x5a4a38);
       for (const sx of [-1, 1]) {
-        const h = new THREE.Mesh(GEO.box, ant);
-        h.scale.set(0.06, 0.45, 0.06);
-        h.position.set(sx * 0.12, head.position.y + 0.35, head.position.z);
+        const h = new THREE.Mesh(GEO.box, mat(0x5a4a38));
+        h.name = "antler" + sx;
         g.add(h);
       }
     }
-    g.userData.bodyH = body.position.y;
+    if (a.species === "human") {
+      const wep = new THREE.Mesh(GEO.box, mat(0x6a5a48));
+      wep.name = "weapon";
+      wep.castShadow = true;
+      g.add(wep);
+    }
+    g.userData.limbs = limbs;
+    g.userData.base = { skin: a.skin, cloth: a.cloth };
     return g;
+  }
+
+  /**
+   * Positions every mesh from the solved node positions, interpolated between
+   * the tick boundaries. This is the whole of character animation now: there is
+   * no pose logic left in the renderer to disagree with the simulation.
+   */
+  private poseFromBody(w: World, a: Actor, g: THREE.Group, alpha: number) {
+    const B = w.bodies;
+    const slot = a.body;
+    const b = B.base(slot);
+    const limbs = g.userData.limbs as Limb[] | undefined;
+    if (!limbs) return;
+    const base = g.userData.base as { skin: number; cloth: number };
+    const skinRegions: Record<string, boolean> = { head: true, larm: true, rarm: true };
+    const scale = B.scale[slot]!;
+    const cy = Math.cos(a.yaw);
+    const sy = Math.sin(a.yaw);
+    for (const L of limbs) {
+      const ka = b + L.a;
+      const kb = b + L.b;
+      const ox = (L.offX ?? 0) * scale;
+      const oy = (L.offY ?? 0) * scale;
+      const ax = B.rx[ka]! + (B.px[ka]! - B.rx[ka]!) * alpha + ox * cy;
+      const ay = B.ry[ka]! + (B.py[ka]! - B.ry[ka]!) * alpha + oy;
+      const az = B.rz[ka]! + (B.pz[ka]! - B.rz[ka]!) * alpha - ox * sy;
+      const bx = B.rx[kb]! + (B.px[kb]! - B.rx[kb]!) * alpha;
+      const by = B.ry[kb]! + (B.py[kb]! - B.ry[kb]!) * alpha;
+      const bz = B.rz[kb]! + (B.pz[kb]! - B.rz[kb]!) * alpha;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const dz = bz - az;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      L.mesh.position.set((ax + bx) * 0.5, (ay + by) * 0.5, (az + bz) * 0.5);
+      if (len > 1e-4) {
+        this.dir.set(dx / len, dy / len, dz / len);
+        L.mesh.quaternion.setFromUnitVectors(UP, this.dir);
+      }
+      L.mesh.scale.set(L.w * scale, Math.max(0.02, len), L.d * scale);
+      // Damage tints the limb that took it, so the injury model is legible
+      // on the body itself rather than only on the HUD silhouette.
+      const hurt = injurySum(a.injuries[L.region]);
+      if (hurt > 0.06) {
+        L.mesh.material = tintInjury(
+          skinRegions[L.region] ? base.skin : base.cloth,
+          Math.min(1.4, hurt),
+        );
+      }
+    }
+    const plan = B.plan(slot);
+    const kh = b + plan.head;
+    const hx = B.rx[kh]! + (B.px[kh]! - B.rx[kh]!) * alpha;
+    const hy = B.ry[kh]! + (B.py[kh]! - B.ry[kh]!) * alpha;
+    const hz = B.rz[kh]! + (B.pz[kh]! - B.rz[kh]!) * alpha;
+    const head = g.getObjectByName("head") as THREE.Mesh | undefined;
+    const hr = B.rad[kh]! * 2;
+    if (head) {
+      head.position.set(hx, hy, hz);
+      head.scale.set(hr * 0.92, hr, hr * 0.88);
+      head.quaternion.copy((limbs[1] ?? limbs[0])!.mesh.quaternion);
+      head.material = tintInjury(base.skin, Math.min(1.4, injurySum(a.injuries.head)));
+    }
+    const helm = g.getObjectByName("helmet");
+    if (helm) {
+      helm.position.set(hx, hy + hr * 0.22, hz);
+      helm.scale.set(hr * 1.06, hr * 0.74, hr * 1.0);
+    }
+    for (const sx of [-1, 1]) {
+      const ant = g.getObjectByName("antler" + sx);
+      if (!ant) continue;
+      ant.position.set(hx + sx * 0.12 * scale, hy + 0.34 * scale, hz);
+      ant.scale.set(0.06 * scale, 0.45 * scale, 0.06 * scale);
+    }
+    const wep = g.getObjectByName("weapon") as THREE.Mesh | undefined;
+    if (wep) {
+      wep.visible = a.weapon !== "fist";
+      if (wep.visible) {
+        const kHand = b + plan.grabHand;
+        const kElbow = b + (plan.grabHand === 6 ? 5 : plan.chest);
+        const wx = B.rx[kHand]! + (B.px[kHand]! - B.rx[kHand]!) * alpha;
+        const wy = B.ry[kHand]! + (B.py[kHand]! - B.ry[kHand]!) * alpha;
+        const wz = B.rz[kHand]! + (B.pz[kHand]! - B.rz[kHand]!) * alpha;
+        let ex = wx - B.px[kElbow]!;
+        let ey = wy - B.py[kElbow]!;
+        let ez = wz - B.pz[kElbow]!;
+        const em = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (em > 1e-4) {
+          ex /= em;
+          ey /= em;
+          ez /= em;
+        } else {
+          ex = 0;
+          ey = -1;
+          ez = 0;
+        }
+        const wlen =
+          a.weapon === "spear" || a.weapon === "pitchfork"
+            ? 1.7
+            : a.weapon === "club" || a.weapon === "board"
+              ? 1.05
+              : 0.62;
+        wep.position.set(wx + ex * wlen * 0.42, wy + ey * wlen * 0.42, wz + ez * wlen * 0.42);
+        this.dir.set(ex, ey, ez);
+        wep.quaternion.setFromUnitVectors(UP, this.dir);
+        wep.scale.set(0.06, wlen, 0.06);
+      }
+    }
   }
 
   sync(w: World, cam: Cam, alpha: number, dt: number, title: boolean) {
@@ -425,8 +569,19 @@ export class View {
       const y = p.py + (p.y - p.py) * alpha;
       const z = p.pz + (p.z - p.pz) * alpha;
       m.position.set(x, y, z);
-      m.rotation.y = p.yaw;
-      m.rotation.z = p.collapsed ? 0.8 : 0;
+      // A prop that has been through the solver carries a full orientation; one
+      // that has never moved is still upright about its yaw. There is no
+      // hardcoded lean for "collapsed" any more -- a fallen beam lies the way it
+      // actually landed.
+      if (p.frame >= 0 || p.qw !== 1) {
+        this.tmpQuat.set(p.qx, p.qy, p.qz, p.qw);
+        // Slerp rather than snap: the solver runs at a fixed 60 Hz and the
+        // display may not, and a tumbling beam should not step between frames.
+        m.quaternion.slerp(this.tmpQuat, 1 - Math.exp(-25 * dt));
+      } else {
+        m.quaternion.identity();
+        m.rotation.y = p.yaw;
+      }
       m.visible = !p.heldBy;
       if (p.kind === "lamp") {
         const fl = m.getObjectByName("flame");
@@ -436,68 +591,17 @@ export class View {
     for (const a of w.actors) {
       this.ensureActor(a);
       const g = this.actorMap.get(a.id)!;
-      const x = a.px + (a.x - a.px) * alpha;
-      const y = a.py + (a.y - a.py) * alpha;
-      const z = a.pz + (a.z - a.pz) * alpha;
-      const yaw = lerpAng(a.pyaw, a.yaw, alpha);
-      g.position.set(x, y, z);
-      g.rotation.y = yaw;
-      g.rotation.x = a.loco === "ragdoll" || a.loco === "down" ? 1.25 : a.loco === "getup" ? 0.5 : 0;
-      g.rotation.z = a.loco === "stumble" ? Math.sin(w.time * 10) * 0.12 : 0;
-      if (a.species === "human" || a.kind === "player") this.animHuman(a, g, w);
-      else this.animBeast(a, g);
+      // Node positions are world-space, so the group carries no transform of
+      // its own. There is deliberately no `rotation.x = 1.25` fallback here: a
+      // body lying down is lying down because the solver put it there.
+      g.position.set(0, 0, 0);
+      g.quaternion.identity();
       g.visible = true;
-      if (!a.alive) g.rotation.x = 1.4;
+      if (a.body >= 0) this.poseFromBody(w, a, g, alpha);
     }
     this.updateFire(w);
     this.updateRain(w, dt);
     this.updateCamera(w, cam, alpha, title);
-  }
-
-  private animHuman(a: Actor, g: THREE.Group, w: World) {
-    const parts = g.userData.parts as {
-      head: THREE.Object3D;
-      torso: THREE.Object3D;
-      larm: THREE.Object3D;
-      rarm: THREE.Object3D;
-      lleg: THREE.Object3D;
-      rleg: THREE.Object3D;
-      wep: THREE.Object3D;
-    };
-    if (!parts) return;
-    const spd = Math.hypot(a.vx, a.vz);
-    const ph = a.walkPhase;
-    const limp = injurySum(a.injuries.lleg) + injurySum(a.injuries.rleg);
-    const swing = Math.min(0.9, spd * 0.18);
-    parts.lleg.rotation.x = Math.sin(ph) * swing * (1 - injurySum(a.injuries.lleg) * 0.4);
-    parts.rleg.rotation.x = Math.sin(ph + Math.PI) * swing * (1 - injurySum(a.injuries.rleg) * 0.4);
-    parts.larm.rotation.x = Math.sin(ph + Math.PI) * swing * 0.8;
-    parts.rarm.rotation.x = Math.sin(ph) * swing * 0.8;
-    if (a.strikeT > 0) {
-      parts.rarm.rotation.x = -1.4 + a.strikeT * 4;
-      parts.rarm.rotation.y = 0.4;
-    } else {
-      parts.rarm.rotation.y = 0;
-    }
-    if (a.kickT > 0) parts.rleg.rotation.x = -1.2;
-    parts.torso.rotation.x = a.crouch ? 0.35 : spd > 5 ? 0.18 : 0.04;
-    parts.head.rotation.x = a.crouch ? 0.2 : 0;
-    const wepLen =
-      a.weapon === "spear" || a.weapon === "pitchfork" ? 1.6 : a.weapon === "club" || a.weapon === "board" ? 1.05 : 0.7;
-    parts.wep.scale.set(0.05, 0.05, wepLen);
-    parts.wep.visible = a.weapon !== "fist";
-    (parts.head as THREE.Mesh).material = tintInjury(a.skin, injurySum(a.injuries.head));
-    if (a.heat > 0.4) {
-      const t = w.time * 18;
-      g.position.y += Math.sin(t) * 0.01;
-    }
-    void limp;
-  }
-
-  private animBeast(a: Actor, g: THREE.Group) {
-    const spd = Math.hypot(a.vx, a.vz);
-    g.position.y += Math.abs(Math.sin(a.walkPhase * 2)) * Math.min(0.08, spd * 0.02);
-    g.rotation.z = Math.sin(a.walkPhase) * Math.min(0.1, spd * 0.02);
   }
 
   private updateFire(w: World) {
@@ -578,12 +682,20 @@ export class View {
     const d = w.day;
     const night = d < 0.22 || d > 0.8 ? 1 : d < 0.3 || d > 0.72 ? 0.45 : 0;
     const dusk = d > 0.7 && d < 0.86 ? 1 : d < 0.28 ? 0.5 : 0;
-    const sunCol = new THREE.Color().setHSL(0.09 - dusk * 0.03, 0.42 + dusk * 0.15, 0.78 - night * 0.28);
+    const sunCol = new THREE.Color().setHSL(
+      0.09 - dusk * 0.03,
+      0.42 + dusk * 0.15,
+      0.78 - night * 0.28,
+    );
     this.sun.color.copy(sunCol);
     this.sun.intensity = 2.05 - night * 1.15 + dusk * 0.15;
     const ang = (d - 0.25) * Math.PI * 2;
     this.sun.position.set(Math.cos(ang) * 40, Math.max(8, Math.sin(ang) * 28 + 10), 18);
-    const fogCol = new THREE.Color().setRGB(0.22 + dusk * 0.08, 0.18 + dusk * 0.04, 0.14 + night * 0.02);
+    const fogCol = new THREE.Color().setRGB(
+      0.22 + dusk * 0.08,
+      0.18 + dusk * 0.04,
+      0.14 + night * 0.02,
+    );
     (this.scene.fog as THREE.FogExp2).color.copy(fogCol);
     (this.scene.fog as THREE.FogExp2).density = 0.01 + w.rain * 0.008 + night * 0.006;
     this.renderer.setClearColor(fogCol, 1);
@@ -631,31 +743,9 @@ export class View {
   }
 }
 
-function arm(matSkin: THREE.Material, side: number) {
-  const g = new THREE.Group();
-  const u = new THREE.Mesh(GEO.box, matSkin);
-  u.scale.set(0.12, 0.42, 0.12);
-  u.position.set(0, -0.2, 0);
-  u.castShadow = true;
-  g.add(u);
-  g.position.set(side * 0.28, 1.32, 0);
-  return g;
-}
-
-function leg(matCloth: THREE.Material, side: number) {
-  const g = new THREE.Group();
-  const u = new THREE.Mesh(GEO.box, matCloth);
-  u.scale.set(0.14, 0.7, 0.14);
-  u.position.set(0, -0.35, 0);
-  u.castShadow = true;
-  g.add(u);
-  g.position.set(side * 0.12, 0.7, 0);
-  return g;
-}
-
 const injuryMats = new Map<string, THREE.MeshStandardMaterial>();
 function tintInjury(base: number, amount: number) {
-  const key = base + ":" + (amount * 8 | 0);
+  const key = base + ":" + ((amount * 8) | 0);
   let m = injuryMats.get(key);
   if (!m) {
     const c = new THREE.Color(base);

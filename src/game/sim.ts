@@ -2,7 +2,9 @@ import type { Actions } from "./input";
 import {
   type Actor,
   type Collider,
+  type Building,
   type Prop,
+  type Region,
   type WeaponKind,
   WEAPON_STATS,
   FIRE_CELL,
@@ -10,6 +12,7 @@ import {
   GRAVITY,
   HALF,
   REGIONS,
+  STEP,
 } from "./types";
 import {
   World,
@@ -20,12 +23,39 @@ import {
   injurySum,
   lerpAng,
   locoSpeed,
-  regionFromHit,
   rightOf,
 } from "./world";
+import {
+  EDGES,
+  boneTolOf,
+  concussion,
+  contactFocus,
+  hardnessOf,
+  impulseDamage,
+} from "./body";
+import { dropFrame, makeFrame, wakeFrame } from "./frames";
+import {
+  armMotor,
+  checkTrips,
+  collapse,
+  legMotor,
+  releaseGrab,
+  stepBodies,
+  updateMotor,
+} from "./physique";
+import {
+  avoidBodies,
+  incapacity,
+  isHelpless,
+  isOffBalance,
+  shouldStrikeLow,
+  threatLevel,
+} from "./tactics";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
+/** Fastest a prop may be moving at the moment it becomes a physical body, m/s. */
+const PROP_BIRTH_SPEED = 10;
 
 export interface Cam {
   yaw: number;
@@ -74,6 +104,9 @@ export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playin
     p.pz = p.z;
   }
   w.rebuildHash();
+  // Motor authority is computed first so that gait speed, reach, grip strength
+  // and the solver all read the same numbers within a tick.
+  for (const a of w.actors) updateMotor(a);
   if (playing) applyPlayer(w, dt, input, cam);
   stepPerception(w, dt);
   stepAI(w, dt);
@@ -81,6 +114,10 @@ export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playin
   stepGrab(w, dt, playing ? input : null);
   stepLocomotion(w, dt);
   stepPhysics(w, dt);
+  // Bodies and prop frames are solved together: `stepBodies` interleaves them.
+  stepBodies(w, dt);
+  checkTrips(w, dt);
+  stepDragTracks(w);
   stepInjury(w, dt);
   stepFire(w, dt);
   stepProps(w, dt);
@@ -115,7 +152,14 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   if (!p.alive) return;
   p.crouch = input.crouch && p.loco !== "ragdoll" && p.loco !== "down";
   if (p.consciousness < 0.35) return;
-  if (p.loco === "ragdoll" || p.loco === "down" || p.loco === "getup" || p.loco === "vault") return;
+  if (
+    p.loco === "ragdoll" ||
+    p.loco === "down" ||
+    p.loco === "getup" ||
+    p.loco === "pin" ||
+    p.loco === "vault"
+  )
+    return;
 
   const f = CAM_FORWARD(cam.yaw);
   const r = rightOf(cam.yaw);
@@ -125,15 +169,15 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   p.intendX = wishMag > 0.05 ? wishX / wishMag : 0;
   p.intendZ = wishMag > 0.05 ? wishZ / wishMag : 0;
 
-  const leg =
-    1 -
-    clamp(injurySum(p.injuries.lleg) + injurySum(p.injuries.rleg), 0, 1.6) * 0.35;
-  const load = 1 / (1 + p.carry / 90);
+  // Speed is gated by the legs that still have motor authority and by what the
+  // arms are actually hauling, not by an abstract injury total.
+  const leg = 0.35 + legMotor(p) * 0.65;
+  const load = 1 / (1 + p.carry / 90 + p.dragLoad / (p.mass * 26));
   const mud = surfaceAt(w, p.x, p.z) === "mud" ? 0.72 : 1;
   let max = p.crouch ? 1.5 : 3.45;
   if (input.sprint && p.stamina > 0.08 && wishMag > 0.2 && !p.crouch) max = 6.6;
   max *= leg * load * mud * (0.55 + p.consciousness * 0.45) * (1 - p.fatigue * 0.35);
-  if (p.grabbedId) max *= 0.72;
+  if (p.balance < 0.4) max *= 0.4 + p.balance;
   p.intendSpeed = wishMag * max;
 
   if (wishMag > 0.08) {
@@ -167,9 +211,19 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
       p.vy = 6.2 * (0.7 + p.stamina * 0.3) * leg;
       p.grounded = false;
       p.stamina -= 0.08;
+      if (p.body >= 0) w.bodies.addVelocity(p.body, 0, p.vy, 0, dt);
     }
   }
 
+  {
+    const f2 = facing(p.yaw);
+    const r2 = rightOf(p.yaw);
+    const along = p.vx * f2.x + p.vz * f2.z;
+    const side = p.vx * r2.x + p.vz * r2.z;
+    const k = 1 - Math.exp(-dt * 5);
+    p.leanZ += (-clamp(along * 0.028, -0.2, 0.2) - p.leanZ) * k;
+    p.leanX += (clamp(side * 0.03, -0.16, 0.16) - p.leanX) * k;
+  }
   if (input.bandage) treat(w, p, dt);
   if (input.ignitePressed) tryIgnite(w, p);
   if (input.dropPressed) dropHeld(w, p, 0.5);
@@ -198,6 +252,13 @@ function probeHeight(w: World, x: number, z: number) {
 
 function treat(w: World, p: Actor, dt: number) {
   p.intendSpeed = Math.min(p.intendSpeed, 0.6);
+  // Binding a wound needs a hand that still works.
+  const hands = armMotor(p);
+  if (hands < 0.2) {
+    if (p.kind === "player") w.whisper("Your hands will not obey.");
+    return;
+  }
+  dt *= hands;
   p.bleed = Math.max(0, p.bleed - dt * 0.35);
   for (const r of REGIONS) {
     p.injuries[r].cut = Math.max(0, p.injuries[r].cut - dt * 0.12);
@@ -227,36 +288,57 @@ function tryIgnite(w: World, p: Actor) {
   }
 }
 
+/**
+ * Releasing a grab with a throw.
+ *
+ * The throw impulse is bounded by what the arm can actually deliver:
+ *   J = m_thrower * armMotor * throwMul * K       [N*s]
+ * so the resulting speed is J/m_target, and a heavy body barely moves while a
+ * bucket flies. The impulse is applied to every node so the released body
+ * leaves the hand spinning rather than translating rigidly.
+ */
 function dropHeld(w: World, p: Actor, throwMul: number) {
-  if (p.grabbedId) {
-    const t = w.actor(p.grabbedId) || w.prop(p.grabbedId);
-    if (t && "mass" in t) {
-      const f = facing(p.yaw);
-      const spd = 4.5 * throwMul * (p.mass / (p.mass + t.mass));
-      if ("species" in t) {
-        const a = t as Actor;
-        a.grabbedBy = 0;
-        a.vx += f.x * spd + p.vx;
-        a.vz += f.z * spd + p.vz;
-        a.vy += 2.4 * throwMul;
-        a.loco = "ragdoll";
-        a.locoT = 0.8;
-        a.balance = 0;
-      } else {
-        const pr = t as Prop;
-        pr.heldBy = 0;
-        pr.dynamic = true;
-        pr.anchored = false;
-        pr.vx += f.x * spd * 1.4 + p.vx;
-        pr.vz += f.z * spd * 1.4 + p.vz;
-        pr.vy += 3 * throwMul;
-      }
+  if (!p.grabbedId) return;
+  const t = w.actor(p.grabbedId);
+  const pr = t ? null : w.prop(p.grabbedId);
+  const f = facing(p.yaw);
+  const j = p.mass * (0.35 + armMotor(p) * 1.15) * throwMul * 3.4; // N*s
+  if (t) {
+    const dv = j / t.mass;
+    if (t.body >= 0) {
+      w.bodies.addVelocity(t.body, f.x * dv + p.vx, dv * 0.42, f.z * dv + p.vz, STEP);
+      // extra impulse at the chest so it tumbles rather than sliding flat
+      w.bodies.applyImpulse(
+        t.body,
+        w.bodies.plan(t.body).chest,
+        f.x * j * 0.3,
+        j * 0.12,
+        f.z * j * 0.3,
+        STEP,
+      );
     }
-    p.grabbedId = 0;
-    p.carry = 0;
-    w.emitSound(p.x, p.z, 0.5, "whoosh", p.id);
-    return;
+    t.vx += f.x * dv + p.vx;
+    t.vz += f.z * dv + p.vz;
+    t.vy += dv * 0.42;
+    if (dv > 1.4 || !t.alive) collapse(w, t, 0.7);
+  } else if (pr) {
+    pr.dynamic = true;
+    pr.anchored = false;
+    const dv = j / Math.max(1, pr.mass);
+    pr.vx += f.x * dv + p.vx;
+    pr.vz += f.z * dv + p.vz;
+    pr.vy += dv * 0.5;
+    // Thrown, so it becomes a physical object again: it tumbles, it lands on
+    // whatever is under it, and what it lands on is hurt where it was hit.
+    const slot = makeFrame(w.bodies, pr);
+    if (slot >= 0) {
+      w.bodies.addVelocity(slot, pr.vx, pr.vy, pr.vz, STEP);
+      // Thrown flat spins about the vertical, so it turns as it flies.
+      w.bodies.addSpin(slot, 0, (f.z * pr.vx - f.x * pr.vz) * 0.5, 0, STEP);
+    }
   }
+  releaseGrab(w, p);
+  w.emitSound(p.x, p.z, 0.5, "whoosh", p.id);
 }
 
 function stepPerception(w: World, dt: number) {
@@ -277,7 +359,8 @@ function stepPerception(w: World, dt: number) {
       const reach = s.mag * 22 * hearMul;
       if (d < reach) {
         w.addMemory(a, "sound", s.x, s.z, s.who, clamp(1 - d / reach, 0.2, 1));
-        if (s.kind === "scream" || s.kind === "collapse" || s.kind === "weapon") a.alert = Math.min(1, a.alert + 0.4);
+        if (s.kind === "scream" || s.kind === "collapse" || s.kind === "weapon")
+          a.alert = Math.min(1, a.alert + 0.4);
         if (s.kind === "scream") a.fear = Math.min(1, a.fear + 0.2 * (1 - a.courage));
       }
     }
@@ -291,8 +374,10 @@ function stepPerception(w: World, dt: number) {
       const dot = d > 0.01 ? (dx * f.x + dz * f.z) / d : 1;
       const fov = a.species === "deer" ? 0.15 : 0.32;
       if (dot < fov && d > 2.2) continue;
-      const smoke = w.smoke[w.cell(o.x, o.z)] + w.smoke[w.cell((a.x + o.x) * 0.5, (a.z + o.z) * 0.5)];
-      let chance = (1 - d / visRange) * (0.4 + dot) * (o.crouch ? 0.45 : 1) * (o.loco === "sprint" ? 1.2 : 1);
+      const smoke =
+        w.smoke[w.cell(o.x, o.z)] + w.smoke[w.cell((a.x + o.x) * 0.5, (a.z + o.z) * 0.5)];
+      let chance =
+        (1 - d / visRange) * (0.4 + dot) * (o.crouch ? 0.45 : 1) * (o.loco === "sprint" ? 1.2 : 1);
       chance *= 1 - Math.min(0.8, smoke * 0.5);
       chance *= 1 - (o.loco === "idle" && o.crouch ? 0.5 : 0);
       if (w.indoorAt(o.x, o.z) && !w.indoorAt(a.x, a.z)) chance *= 0.45;
@@ -307,9 +392,19 @@ function stepPerception(w: World, dt: number) {
         w.addMemory(a, "threat", o.x, o.z, o.id, 1);
         if (!a.known.includes(o.id)) a.known.push(o.id);
       }
-      if (!o.alive) {
+      if (!o.alive || isHelpless(o)) {
         w.addMemory(a, "body", o.x, o.z, o.id, 1);
-        a.fear = Math.min(1, a.fear + 0.25 * (1 - a.courage));
+        // How badly wrecked, and whether it is one of ours. A man pinned under
+        // a heap in the street is a different sight from a body in a ditch.
+        const wreck = incapacity(o) * (o.faction === a.faction ? 1.5 : 0.8);
+        const heap = Math.min(1, o.pileLoad / 90);
+        a.fear = Math.min(1, a.fear + (0.14 + wreck * 0.22 + heap * 0.2) * (1 - a.courage));
+        if (a.faction === "guard" && o.faction === "guard" && a.shoutCd <= 0) {
+          a.alert = 1;
+          a.shoutCd = 4;
+          w.emitSound(a.x, a.z, 1.0, "shout", a.id);
+          w.wanted = Math.min(1, w.wanted + 0.12);
+        }
       }
     }
     for (let i = 0; i < w.burning.length; i++) {
@@ -329,20 +424,38 @@ function stepPerception(w: World, dt: number) {
 
 function isThreat(a: Actor, o: Actor, w: World) {
   if (!o.alive) return false;
+  // Someone who cannot stand is not a threat. Guards still deal with them --
+  // see the securing branch in humanAI -- but not by squaring up to them.
+  if (isHelpless(o) && a.faction !== "wild") return false;
   if (a.known.includes(o.id)) return true;
   if (o.kind === "player") {
-    if (a.faction === "guard" && (w.wanted > 0.15 || (o.weapon !== "fist" && w.wanted > 0))) return true;
+    if (a.faction === "guard" && (w.wanted > 0.15 || (o.weapon !== "fist" && w.wanted > 0)))
+      return true;
     if (a.species === "wolf" || a.species === "bear") {
       if (o.bleed > 0.15 || o.blood < 0.85) return true;
       if (a.species === "bear" && dist2(a.x, a.z, o.x, o.z) < 36) return a.aggression > 0.3;
     }
-    if (a.faction === "civilian" && (o.strikeT > 0 || o.weapon !== "fist") && dist2(a.x, a.z, o.x, o.z) < 25) return true;
+    if (
+      a.faction === "civilian" &&
+      (o.strikeT > 0 || o.weapon !== "fist") &&
+      dist2(a.x, a.z, o.x, o.z) < 25
+    )
+      return true;
   }
-  if (a.species === "wolf" && (o.species === "deer" || o.species === "goat" || o.species === "pig" || o.species === "cow"))
+  if (
+    a.species === "wolf" &&
+    (o.species === "deer" || o.species === "goat" || o.species === "pig" || o.species === "cow")
+  )
     return true;
-  if (a.species === "bear" && (o.species === "deer" || o.species === "pig" || o.species === "cow" || o.kind === "human"))
+  if (
+    a.species === "bear" &&
+    (o.species === "deer" || o.species === "pig" || o.species === "cow" || o.kind === "human")
+  )
     return dist2(a.x, a.z, o.x, o.z) < 80;
-  if (a.species === "deer" && (o.kind === "human" || o.kind === "player" || o.species === "wolf" || o.species === "bear"))
+  if (
+    a.species === "deer" &&
+    (o.kind === "human" || o.kind === "player" || o.species === "wolf" || o.species === "bear")
+  )
     return true;
   if (a.faction === "guard" && o.faction === "wild" && o.species !== "deer") return true;
   if (o.lastHitBy === a.id) return false;
@@ -353,7 +466,13 @@ function isThreat(a: Actor, o: Actor, w: World) {
 function stepAI(w: World, dt: number) {
   for (const a of w.actors) {
     if (a.kind === "player" || !a.alive) continue;
-    if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup" || a.grabbedBy) {
+    if (
+      a.loco === "ragdoll" ||
+      a.loco === "down" ||
+      a.loco === "getup" ||
+      a.loco === "pin" ||
+      a.authority < 0.15
+    ) {
       a.intendSpeed = 0;
       continue;
     }
@@ -396,7 +515,13 @@ function closestFire(w: World, x: number, z: number) {
   return { x: bx, z: bz, d: best };
 }
 
-function seek(a: Actor, x: number, z: number, speed: number) {
+/**
+ * Steer toward a point, around whatever is lying between here and there.
+ *
+ * `w` is threaded through so the route can consult the bodies on the ground.
+ * Without it every agent walks into the heap it just helped make.
+ */
+function seek(w: World, a: Actor, x: number, z: number, speed: number, towardId = 0) {
   const dx = x - a.x;
   const dz = z - a.z;
   const m = Math.hypot(dx, dz);
@@ -404,8 +529,9 @@ function seek(a: Actor, x: number, z: number, speed: number) {
     a.intendSpeed = 0;
     return m;
   }
-  a.intendX = dx / m;
-  a.intendZ = dz / m;
+  const dir = avoidBodies(w, a, dx / m, dz / m, towardId);
+  a.intendX = dir.x;
+  a.intendZ = dir.z;
   a.intendSpeed = speed;
   a.yaw = lerpAng(a.yaw, Math.atan2(-a.intendX, -a.intendZ), 0.25);
   return m;
@@ -413,6 +539,9 @@ function seek(a: Actor, x: number, z: number, speed: number) {
 
 function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d: number } | null) {
   const player = w.player();
+  // Crouching is a combat decision, taken below; it must not persist into
+  // walking a beat or fleeing a fire.
+  a.crouch = false;
   const seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
   const hostile = a.known.includes(player.id) || (a.faction === "guard" && w.wanted > 0.2);
   const panic = a.fear > 0.55 + a.courage * 0.35;
@@ -422,7 +551,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     const awayX = a.x - player.x;
     const awayZ = a.z - player.z;
     const m = Math.hypot(awayX, awayZ) || 1;
-    seek(a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
+    seek(w, a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
     if (a.shoutCd <= 0) {
       w.emitSound(a.x, a.z, 0.9, "scream", a.id);
       a.shoutCd = 2.4;
@@ -433,13 +562,13 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
 
   if (fire && fire.d < 7 && a.faction !== "guard" && a.courage < 0.7) {
     a.ai = "flee";
-    seek(a, a.x + (a.x - fire.x), a.z + (a.z - fire.z), 4.5);
+    seek(w, a, a.x + (a.x - fire.x), a.z + (a.z - fire.z), 4.5);
     return;
   }
 
   if (fire && fire.d < 5 && a.faction === "guard" && a.courage > 0.5) {
     a.ai = "extinguish";
-    const d = seek(a, fire.x, fire.z, 3.5);
+    const d = seek(w, a, fire.x, fire.z, 3.5);
     if (d < 1.6) {
       const i = w.cell(fire.x, fire.z);
       w.heat[i] *= 0.85;
@@ -450,17 +579,91 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
   }
 
   if (a.faction === "guard" && hostile) {
-    if (seesPlayer) {
-      a.ai = "combat";
+    // A guard already hauling someone finishes the job rather than restarting a
+    // fight; the drag itself is what ends in a capture.
+    if (a.grabbedId === player.id) {
+      a.ai = "recover";
+      a.crouch = false;
+      secureTarget(w, a, player, dt);
+      return;
+    }
+    if (seesPlayer || (isHelpless(player) && dist2(a.x, a.z, player.x, player.z) < 36)) {
       const d = Math.hypot(player.x - a.x, player.z - a.z);
-      if (d > 1.5) seek(a, player.x, player.z, 5.2);
-      else a.intendSpeed = 0.4;
       a.targetId = player.id;
       if (a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 1.0, "shout", a.id);
         a.shoutCd = 3;
         callAllies(w, a, player);
       }
+
+      // A man on the ground is not fought, he is secured. Closing to take hold
+      // of him is a different behaviour from squaring up, and it is what turns
+      // "the player is down" into something that actually happens to them.
+      if (isHelpless(player)) {
+        a.ai = "recover";
+        a.crouch = false;
+        // One pair of hands. A crowd all closing on the same body walks into
+        // each other, knocks each other down and drops the prisoner between
+        // them; the rest stand off and keep the ring.
+        const holder = w.actors.find((o) => o.grabbedId === player.id && o.alive);
+        let nearer = holder ? holder.id !== a.id : false;
+        if (!holder) {
+          for (const o of w.nearby(player.x, player.z, d)) {
+            if (o.id === a.id || o.faction !== a.faction || !o.alive || isHelpless(o)) continue;
+            if (Math.hypot(o.x - player.x, o.z - player.z) < d - 0.15) nearer = true;
+          }
+        }
+        if (nearer) {
+          const away = Math.hypot(a.x - player.x, a.z - player.z) || 1;
+          const rx = player.x + ((a.x - player.x) / away) * 2.4;
+          const rz = player.z + ((a.z - player.z) / away) * 2.4;
+          seek(w, a, rx, rz, 2.2, player.id);
+          return;
+        }
+        // Stop beside the body and reach down for it, rather than walking on
+        // to it. A guard that closes all the way puts its feet on a ribcage,
+        // trips over what it came to collect, and drops the prisoner -- which
+        // is the trip test working correctly on a decision that was wrong.
+        const STANDOFF = 1.05;
+        if (d > STANDOFF + 0.2) {
+          const ux = (a.x - player.x) / (d || 1);
+          const uz = (a.z - player.z) / (d || 1);
+          // Close at a walk: a body on the ground is something you step around.
+          seek(
+            w,
+            a,
+            player.x + ux * STANDOFF,
+            player.z + uz * STANDOFF,
+            d > 2.8 ? 4.4 : 1.6,
+            player.id,
+          );
+        } else {
+          a.intendSpeed = 0;
+          a.yaw = lerpAng(a.yaw, Math.atan2(-(player.x - a.x), -(player.z - a.z)), 0.3);
+          takeHold(w, a, player);
+        }
+        return;
+      }
+
+      a.ai = "combat";
+      // Commit against a target that is already losing its footing: close hard
+      // and take hold rather than trading blows it could still recover from.
+      const commit = isOffBalance(player) && a.courage > 0.4;
+      if (d > 1.5) seek(w, a, player.x, player.z, commit ? 6.0 : 5.2);
+      else a.intendSpeed = commit ? 1.2 : 0.4;
+      if (commit && d < 1.25 && !a.grabbedId && a.aggression > 0.35) {
+        takeHold(w, a, player);
+        return;
+      }
+
+      // Aim where the target is weakest. Crouching lowers the guard's own hand,
+      // and the strike height is read from that hand, so this genuinely changes
+      // which region the blow lands on rather than labelling it.
+      // Drop into a low guard while closing, not only once already in range:
+      // committing to the legs is a decision about the whole approach.
+      const low = shouldStrikeLow(player);
+      a.crouch = low && d < WEAPON_STATS[a.weapon].reach * 1.6 + 0.5;
+
       if (d < WEAPON_STATS[a.weapon].reach + 0.4 && a.attackCd <= 0) {
         a.strikeT = 0.32;
         a.strikeCd = 0.7 / (0.7 + a.competence);
@@ -469,9 +672,10 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
       }
       return;
     }
+    a.crouch = false;
     if (w.time - a.lastSeenT < 8) {
       a.ai = "pursue";
-      const d = seek(a, a.lastSeenX, a.lastSeenZ, 5.4);
+      const d = seek(w, a, a.lastSeenX, a.lastSeenZ, 5.4);
       if (d < 1.2) {
         a.ai = "search";
         a.searchT = 7;
@@ -482,7 +686,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     if (a.ai === "search" || a.searchT > 0) {
       a.searchT -= dt;
       a.ai = "search";
-      const d = seek(a, a.searchX, a.searchZ, 3.2);
+      const d = seek(w, a, a.searchX, a.searchZ, 3.2);
       if (d < 1 || a.aiT <= 0) pickSearch(w, a);
       followTracks(w, a);
       if (a.searchT <= 0) a.ai = "wander";
@@ -494,28 +698,50 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     const mem = a.memories.find((m) => m.kind === "threat" || m.kind === "sound");
     if (mem) {
       a.ai = "investigate";
-      seek(a, mem.x, mem.z, 3.6);
+      seek(w, a, mem.x, mem.z, 3.6);
       return;
     }
   }
 
-  const ally = w.nearby(a.x, a.z, 8).find((o) => o.faction === a.faction && o.alive && o.blood < 0.55 && o.id !== a.id);
+  // Rescue. The wounded are found by how incapacitated they are, not by blood
+  // alone -- a man pinned under a beam with a broken leg needs hauling out as
+  // much as a bleeding one -- and they are hauled AWAY from whatever is burning
+  // rather than toward a doorstep that may be inside it.
+  const ally = w
+    .nearby(a.x, a.z, 9)
+    .find(
+      (o) =>
+        o.faction === a.faction &&
+        o.alive &&
+        o.id !== a.id &&
+        !o.grabbedBy &&
+        (o.blood < 0.6 || incapacity(o) > 0.6),
+    );
   if (ally && a.loyalty > 0.45 && a.fear < 0.6) {
     a.ai = "rescue";
-    const d = seek(a, ally.x, ally.z, 3.8);
-    if (d < 1.2 && a.grabbedId === 0) {
-      a.grabbedId = ally.id;
-      ally.grabbedBy = a.id;
-      a.carry = ally.mass * 0.5;
+    if (a.grabbedId === ally.id) {
+      let tx = a.homeX;
+      let tz = a.homeZ;
+      if (fire && fire.d < 16) {
+        const dx = a.x - fire.x;
+        const dz = a.z - fire.z;
+        const m = Math.hypot(dx, dz) || 1;
+        tx = a.x + (dx / m) * 12;
+        tz = a.z + (dz / m) * 12;
+      }
+      seek(w, a, tx, tz, 2.4);
+      return;
     }
-    if (a.grabbedId === ally.id) seek(a, a.homeX, a.homeZ, 2.4);
+    const d0 = Math.hypot(ally.x - a.x, ally.z - a.z);
+    const d = seek(w, a, ally.x, ally.z, d0 > 2.6 ? 3.8 : 1.5, ally.id);
+    if (d < 1.2) takeHold(w, a, ally);
     return;
   }
 
   if (a.routine.length) {
     a.ai = "work";
     const wp = a.routine[a.routineI % a.routine.length]!;
-    const d = seek(a, wp.x, wp.z, 1.7);
+    const d = seek(w, a, wp.x, wp.z, 1.7);
     if (d < 0.8) {
       a.routineI++;
       a.intendSpeed = 0;
@@ -530,7 +756,73 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     a.wayZ = a.homeZ + (w.rng() - 0.5) * 10;
     a.aiT = 3 + w.rng() * 4;
   }
-  seek(a, a.wayX, a.wayZ, 1.5);
+  seek(w, a, a.wayX, a.wayZ, 1.5);
+}
+
+/**
+ * Take hold of a target: the same physical grab the player uses, so the
+ * attachment constraint hauls on both bodies and the target's weight shows up
+ * in the holder's own balance.
+ */
+function takeHold(w: World, a: Actor, t: Actor) {
+  if (a.grabbedId || t.grabbedBy) return;
+  if (a.body < 0) return;
+  const B = w.bodies;
+  const grip = armMotor(a);
+  if (grip < 0.3) return;
+  // A struggling target is harder to get hold of than a limp one.
+  const resist = threatLevel(t) * (t.mass / (a.mass + t.mass));
+  if (resist > 0.34 + a.strength * 0.2) {
+    t.stanceAuth = Math.max(0.2, t.stanceAuth - 0.15);
+    return;
+  }
+  a.grabbedId = t.id;
+  t.grabbedBy = a.id;
+  a.grabNodeA = B.plan(a.body).grabHand;
+  a.grabNodeB = t.body >= 0 ? B.plan(t.body).chest : -1;
+  // Long enough to hold someone at arm's length beside you rather than under
+  // your feet.
+  a.grabRest = 0.9;
+  a.carry = t.mass * 0.5;
+  w.emitSound(a.x, a.z, 0.5, "grab", a.id);
+  if (t.kind === "player") w.whisper("A hand closes on you.");
+}
+
+/**
+ * Drag a held prisoner back to the barracks. Capture is the end of a haul that
+ * really happened -- across the ground, leaving a drag mark -- rather than a
+ * timer that fires because a guard stood near you.
+ */
+const GAOL_X = 9.5;
+const GAOL_Z = -8.2;
+
+function secureTarget(w: World, a: Actor, t: Actor, dt: number) {
+  if (!t.alive) {
+    releaseGrab(w, a);
+    return;
+  }
+  // Fighting free: a target that recovers its feet and its strength can break
+  // the hold, and the holder's grip is its own arm's motor authority.
+  if (threatLevel(t) > 0.45 && !isHelpless(t)) {
+    releaseGrab(w, a);
+    w.emitSound(a.x, a.z, 0.4, "grab", a.id);
+    return;
+  }
+  const d = seek(w, a, GAOL_X, GAOL_Z, 2.6, t.id);
+  if (t.kind === "player") {
+    w.captureT += dt;
+    // Capture is the end of a haul, so it takes a haul: reaching the barracks
+    // with a prisoner already in hand is not the same as having dragged one
+    // there, and a guard who happened to be standing at the door should not
+    // skip the part the player is supposed to experience.
+    if ((d < 2.2 && w.captureT > 1.6) || w.captureT > 14) {
+      w.phase = "captured";
+      w.captureT = 0;
+      releaseGrab(w, a);
+    }
+  } else if (d < 2.5) {
+    releaseGrab(w, a);
+  }
 }
 
 function pickSearch(w: World, a: Actor) {
@@ -583,7 +875,13 @@ function beastAI(w: World, a: Actor, _dt: number) {
   if (a.species === "deer" || a.species === "goat" || a.species === "pig" || a.species === "cow") {
     const threat = w.nearby(a.x, a.z, a.species === "deer" ? 14 : 8).find((o) => {
       if (o.id === a.id || !o.alive) return false;
-      return o.kind === "player" || o.kind === "human" || o.species === "wolf" || o.species === "bear" || o.strikeT > 0;
+      return (
+        o.kind === "player" ||
+        o.kind === "human" ||
+        o.species === "wolf" ||
+        o.species === "bear" ||
+        o.strikeT > 0
+      );
     });
     const fire = closestFire(w, a.x, a.z);
     if (threat || (fire && fire.d < 8) || a.fear > 0.4) {
@@ -591,7 +889,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.fear = Math.min(1, a.fear + 0.3);
       const tx = threat ? threat.x : fire ? fire.x : a.x;
       const tz = threat ? threat.z : fire ? fire.z : a.z;
-      seek(a, a.x + (a.x - tx) * 2, a.z + (a.z - tz) * 2, a.species === "cow" ? 4.2 : 6.5);
+      seek(w, a, a.x + (a.x - tx) * 2, a.z + (a.z - tz) * 2, a.species === "cow" ? 4.2 : 6.5);
       if (a.species !== "deer" && a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 0.7, "animal", a.id);
         a.shoutCd = 1.6;
@@ -605,7 +903,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * (a.species === "deer" ? 16 : 5);
       a.aiT = 2 + w.rng() * 4;
     }
-    seek(a, a.wayX, a.wayZ, 1.1);
+    seek(w, a, a.wayX, a.wayZ, 1.1);
     return;
   }
   if (a.species === "wolf") {
@@ -620,11 +918,19 @@ function beastAI(w: World, a: Actor, _dt: number) {
             o.species === "pig" ||
             (o.kind === "player" && (o.blood < 0.85 || o.bleed > 0.1))),
       )
-      .sort((b, c) => dist2(a.x, a.z, b.x, b.z) - dist2(a.x, a.z, c.x, c.z))[0];
+      // Nearest, but weighted by how badly the prey is already hurt: a wolf
+      // takes the animal that cannot run, not the one that happens to be
+      // closest. `incapacity` is the substrate's own number, so a limp a wolf
+      // reacts to is a limp the solver is producing.
+      .sort(
+        (b, c) =>
+          dist2(a.x, a.z, b.x, b.z) * (1 - incapacity(b) * 0.7) -
+          dist2(a.x, a.z, c.x, c.z) * (1 - incapacity(c) * 0.7),
+      )[0];
     if (prey) {
       a.ai = "hunt";
       a.targetId = prey.id;
-      const d = seek(a, prey.x, prey.z, 6.4);
+      const d = seek(w, a, prey.x, prey.z, 6.4 * (0.85 + incapacity(prey) * 0.3));
       if (d < 1.3 && a.attackCd <= 0) {
         a.strikeT = 0.28;
         a.strikeHit = 0;
@@ -638,18 +944,26 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * 18;
       a.aiT = 4;
     }
-    seek(a, a.wayX, a.wayZ, 2.4);
+    seek(w, a, a.wayX, a.wayZ, 2.4);
     return;
   }
   if (a.species === "bear") {
     const close = w
       .nearby(a.x, a.z, 16)
-      .filter((o) => o.alive && o.id !== a.id && (o.kind === "player" || o.kind === "human" || o.species === "cow" || o.species === "pig"))
+      .filter(
+        (o) =>
+          o.alive &&
+          o.id !== a.id &&
+          (o.kind === "player" || o.kind === "human" || o.species === "cow" || o.species === "pig"),
+      )
       .sort((b, c) => dist2(a.x, a.z, b.x, b.z) - dist2(a.x, a.z, c.x, c.z))[0];
-    if (close && (a.aggression > 0.3 || close.bleed > 0 || dist2(a.x, a.z, close.x, close.z) < 25)) {
+    if (
+      close &&
+      (a.aggression > 0.3 || close.bleed > 0 || dist2(a.x, a.z, close.x, close.z) < 25)
+    ) {
       a.ai = "hunt";
       a.targetId = close.id;
-      const d = seek(a, close.x, close.z, 5.6);
+      const d = seek(w, a, close.x, close.z, 5.6);
       if (d < 2 && a.attackCd <= 0) {
         a.strikeT = 0.4;
         a.strikeHit = 0;
@@ -663,7 +977,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
       a.wayZ = a.homeZ + (w.rng() - 0.5) * 14;
       a.aiT = 5;
     }
-    seek(a, a.wayX, a.wayZ, 1.8);
+    seek(w, a, a.wayX, a.wayZ, 1.8);
   }
 }
 
@@ -671,7 +985,7 @@ function breakFence(w: World, a: Actor) {
   for (const p of w.props) {
     if (p.kind !== "fence" && p.kind !== "gate") continue;
     if (dist2(a.x, a.z, p.x, p.z) > 2.2) continue;
-    p.hp -= 12 * (a.mass / 80);
+    p.hp -= 12 * (a.mass / 80) * (0.4 + legMotor(a) * 0.6);
     if (p.hp <= 0 && !p.collapsed) collapseProp(w, p, a.vx, a.vz);
   }
 }
@@ -715,7 +1029,7 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
           if (dot < 0.25) continue;
           a.strikeHit |= 1 << (o.id % 30);
           const speed = Math.hypot(a.vx, a.vz) + 2.2;
-          hitActor(w, a, o, st, speed, "strike");
+          hitActor(w, a, o, st, speed, "strike", strikeHeight(w, a, false));
         }
         for (const pr of w.props) {
           if (pr.collapsed || pr.heldBy) continue;
@@ -733,9 +1047,15 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
           const dx = o.x - a.x;
           const dz = o.z - a.z;
           if (dx * f.x + dz * f.z < 0) continue;
-          hitActor(w, a, o, { ...WEAPON_STATS.fist, blunt: 1.1, reach: 1.1 }, 3, "kick");
-          o.injuries.lleg.sprain += 0.15;
-          o.vy += 0.6;
+          hitActor(
+            w,
+            a,
+            o,
+            { ...WEAPON_STATS.fist, blunt: 1.1, reach: 1.1 },
+            3,
+            "kick",
+            strikeHeight(w, a, true),
+          );
         }
       }
     }
@@ -743,20 +1063,59 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
       a.shoveT -= dt;
       if (a.shoveT < 0.16) {
         const f = facing(a.yaw);
+        const push = a.mass * (1.6 + armMotor(a) * 2.2); // N*s
         for (const o of w.nearby(a.x, a.z, 1.25)) {
           if (o.id === a.id) continue;
-          const rel = a.mass / (a.mass + o.mass);
-          o.vx += f.x * 5.5 * rel;
-          o.vz += f.z * 5.5 * rel;
-          o.balance -= 0.45 * rel;
-          if (o.balance < 0.25) {
-            o.loco = "stumble";
-            o.locoT = 0.4;
+          const dx = o.x - a.x;
+          const dz = o.z - a.z;
+          if (dx * f.x + dz * f.z < 0) continue;
+          // Applied at the chest: the shove tips the body rather than sliding
+          // it, so whether it becomes a stagger or a fall is decided by the
+          // support-polygon test, not by a threshold here.
+          if (o.body >= 0) {
+            const plan = w.bodies.plan(o.body);
+            w.bodies.applyImpulse(o.body, plan.chest, f.x * push, push * 0.12, f.z * push, STEP);
+          } else {
+            const rel = a.mass / (a.mass + o.mass);
+            o.vx += f.x * 5.5 * rel;
+            o.vz += f.z * 5.5 * rel;
           }
+          w.emitSound(o.x, o.z, 0.3, "grab", a.id);
         }
       }
     }
   }
+}
+
+/**
+ * A strike is an impulse delivered to a node.
+ *
+ * The struck region is whichever node the weapon actually reached, so aiming
+ * low hits legs and a swing at a prone body hits whatever is uppermost. There
+ * is no random region roll and no separate "combat damage" model: the impulse
+ * goes through exactly the same `impulseDamage` law as a fall or a collapsing
+ * beam, with the weapon supplying sharpness and the target's own motor
+ * authority deciding how much of it the tissue absorbs.
+ *
+ *   J   = m_eff * v_swing * massTerm * strengthTerm        [N*s]
+ *   J_t = J * (cut + pierce fraction of the contact)       [N*s]
+ *
+ * `aimY` is the height above the attacker's feet the swing arrives at, m.
+ */
+/**
+ * Height above the attacker's feet that the swing actually arrives at, m.
+ *
+ * This is read from the attacker's solved hand (or foot) node, not from a
+ * constant, so a crouching attacker lands low, a mid-swing strike lands where
+ * the arm has got to, and an attacker whose arm has lost motor authority
+ * genuinely cannot lift the blow to head height.
+ */
+function strikeHeight(w: World, atk: Actor, kick: boolean) {
+  if (atk.body < 0) return atk.height * (kick ? 0.24 : 0.68);
+  const B = w.bodies;
+  const plan = B.plan(atk.body);
+  const node = kick ? plan.feet[1] : plan.grabHand;
+  return Math.max(0.05, B.py[B.base(atk.body) + node]! - atk.y);
 }
 
 function hitActor(
@@ -766,59 +1125,130 @@ function hitActor(
   st: (typeof WEAPON_STATS)[WeaponKind],
   speed: number,
   how: "strike" | "kick" | "throw",
+  aimY = -1,
 ) {
+  const B = w.bodies;
   const f = facing(atk.yaw);
-  const rel = atk.mass / (atk.mass + vic.mass);
-  const force = (0.6 + speed * 0.25) * (0.7 + st.mass * 0.25) * (0.8 + atk.strength * 0.4);
-  vic.vx += f.x * force * 3.2 * rel;
-  vic.vz += f.z * force * 3.2 * rel;
-  vic.balance -= 0.35 + st.blunt * 0.35 * rel;
-  const side = rightOf(atk.yaw).x * (vic.x - atk.x) + rightOf(atk.yaw).z * (vic.z - atk.z);
-  const region = how === "kick" ? (Math.random() < 0.5 ? "lleg" : "rleg") : regionFromHit(1.1 + Math.random() * 0.5, side);
+  const grip = how === "kick" ? legMotor(atk) : armMotor(atk);
+  // Effective striking mass: the weapon plus the fraction of the limb behind
+  // it. A limb with no motor authority cannot put its own mass behind a blow.
+  const mEff = st.mass + atk.mass * 0.045 * (0.4 + grip * 0.6);
+  // Swing speed, m/s: a base arm speed modified by how quick the weapon is,
+  // the wielder's strength and whatever the body is already carrying.
+  const vSwing =
+    (5.0 + speed * 0.5) *
+    (0.6 + st.speed * 0.45) *
+    (0.75 + atk.strength * 0.35) *
+    (0.35 + grip * 0.65);
+  const jn = mEff * vSwing; // N*s
+
+  // Which node did the swing reach? Fall back to the torso when the victim has
+  // no body (should not happen; the guard keeps the law total).
+  let node = -1;
+  let region: Region = "torso";
+  let nodeMass = vic.mass * 0.28;
+  if (vic.body >= 0) {
+    const reachY = aimY >= 0 ? atk.y + aimY : atk.y + vic.height * (how === "kick" ? 0.24 : 0.68);
+    const tx = atk.x + f.x * (st.reach * 0.72);
+    const tz = atk.z + f.z * (st.reach * 0.72);
+    node = B.nearestNode(vic.body, tx, reachY, tz, st.reach + 0.9);
+    if (node >= 0) {
+      region = B.regionOf(vic.body, node);
+      nodeMass = B.mass[B.base(vic.body) + node]!;
+    }
+  }
+
   const inj = vic.injuries[region];
-  inj.bruise += st.blunt * 0.28 * force;
-  inj.cut += st.cut * 0.32 * force;
-  inj.puncture += st.pierce * 0.3 * force;
+  // Sharp edges convert part of the blow into a sliding, tissue-cutting
+  // component; blunt weapons keep it normal.
+  const sharpFrac = clamp(st.cut * 0.5 + st.pierce * 0.2, 0, 0.75);
+  // Tissue at the contact deforms at the weapon's speed regardless of whether
+  // the whole limb recoils, so the damage path uses the swing speed directly.
+  // The limb's recoil is a separate consequence and is carried by the impulse
+  // below. Bracing still helps: a limb under control absorbs part of the blow.
+  const absorb = 1 - 0.5 * vic.motor[region]!;
+  const vHit = vSwing * absorb;
+  const got = impulseDamage(
+    inj,
+    vHit * (1 - sharpFrac),
+    vHit * sharpFrac,
+    hardnessOf(st.cut + st.pierce > 0.5 ? "metal" : st.mass > 1 ? "wood" : "flesh"),
+    boneTolOf(region),
+    contactFocus(st.blunt, st.pierce),
+    st.cut,
+    st.pierce,
+  );
+
+  if (node >= 0 && vic.body >= 0) {
+    B.applyImpulse(vic.body, node, f.x * jn, jn * 0.18, f.z * jn, STEP);
+  }
+  vic.vx += f.x * (jn / vic.mass) * 0.55;
+  vic.vz += f.z * (jn / vic.mass) * 0.55;
+
   if (st.fire > 0 || atk.torchLit) {
     inj.burn += 0.25;
     igniteAt(w, vic.x, vic.z, 0.35);
   }
-  if (st.cut + st.pierce > 0.4) vic.bleed += 0.08 + st.cut * 0.08;
-  if (region === "head") {
-    vic.consciousness -= 0.18 * force;
-    inj.bruise += 0.2;
+  if (st.cut + st.pierce > 0.4) vic.bleed += 0.08 + st.cut * 0.08 + got * 0.2;
+  // Concussion from the head node's change in velocity, the same law a fall or
+  // a falling beam goes through.
+  if (region === "head" && nodeMass > 0) {
+    vic.consciousness = clamp(vic.consciousness - concussion(jn / nodeMass), 0, 1);
   }
-  if (st.blunt > 1 && region === "head") inj.fracture += 0.12;
-  vic.pain = clamp(vic.pain + 0.2 * force, 0, 1);
+  vic.pain = clamp(vic.pain + got * 0.9, 0, 1);
+  vic.lastImpact = Math.max(vic.lastImpact, vHit);
+  vic.impactRegion = region;
   vic.lastHitBy = atk.id;
   vic.lastHitT = w.time;
   if (!vic.known.includes(atk.id) && vic.kind !== "player") vic.known.push(atk.id);
   if (atk.kind === "player" && vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.35);
   if (atk.kind === "player" && vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.2);
   vic.alert = 1;
-  if (vic.balance < 0.15 || force > 1.6) {
-    vic.loco = "ragdoll";
-    vic.locoT = 0.7 + (1 - vic.balance);
-    vic.vy += 1.2 * rel;
-  } else if (vic.balance < 0.45) {
-    vic.loco = "stumble";
-    vic.locoT = 0.45;
+
+  // Losing the stance is a physical outcome now: the impulse perturbs the body,
+  // and the support-polygon test in the next tick decides whether that became a
+  // stagger, a catch step or a fall. Only a blow big enough to overrun any
+  // possible catch drops authority outright.
+  const knock = jn / (vic.mass * (0.5 + legMotor(vic) * 0.9));
+  if (knock > 2.6 || vic.consciousness < 0.25) {
+    collapse(w, vic, 0.5 + knock * 0.12);
+    if (vic.body >= 0)
+      B.addVelocity(vic.body, f.x * knock * 0.9, knock * 0.5, f.z * knock * 0.9, STEP);
+  } else if (knock > 1.1) {
+    vic.stanceAuth = Math.max(0.15, vic.stanceAuth - knock * 0.3);
   }
-  w.emitSound(vic.x, vic.z, 0.55 + force * 0.2, "impact", atk.id);
+
+  w.emitSound(vic.x, vic.z, 0.45 + Math.min(0.9, jn / 60), "impact", atk.id);
   if (vic.kind === "human" || vic.kind === "player") {
-    if (vic.pain > 0.5 && Math.random() < 0.5) w.emitSound(vic.x, vic.z, 0.7, "scream", vic.id);
+    if (vic.pain > 0.5 && w.rng() < 0.5) w.emitSound(vic.x, vic.z, 0.7, "scream", vic.id);
     else w.emitSound(vic.x, vic.z, 0.4, "hurt", vic.id);
   }
-  w.shake = Math.max(w.shake, 0.18 + force * 0.12);
+  w.shake = Math.max(w.shake, 0.15 + Math.min(0.4, jn / 90));
   w.hitstop = Math.max(w.hitstop, 0.04);
   if (atk.kind === "player") w.hitstop = 0.055;
 }
 
+/**
+ * Grabbing.
+ *
+ * A grab is not a parent transform: it is a soft distance constraint between
+ * the grabber's hand node and a node of the target, solved with both bodies'
+ * real inverse masses. The consequences fall out of that rather than being
+ * scripted — a heavy body hauls back on the hauler, a strong animal drags a
+ * weak grabber along, an arm with no motor authority cannot keep its grip, and
+ * the load shifts the grabber's centre of mass so the support-polygon test can
+ * decide they have overbalanced.
+ */
 function stepGrab(w: World, dt: number, input: Actions | null) {
   const p = w.player();
+  const B = w.bodies;
   if (input && p.alive) {
-    if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll") {
+    if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll" && p.loco !== "down") {
       const f = facing(p.yaw);
+      const handY =
+        p.body >= 0 ? B.py[B.base(p.body) + B.plan(p.body).grabHand]! : p.y + p.height * 0.55;
+      const gx = p.x + f.x * 0.5;
+      const gz = p.z + f.z * 0.5;
       let best: Actor | Prop | null = null;
       let bd = 1.7;
       for (const o of w.nearby(p.x, p.z, 1.8)) {
@@ -847,16 +1277,21 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
         }
       }
       if (best) {
-        p.grabbedId = best.id;
         if ("species" in best) {
           const a = best as Actor;
-          const rel = p.mass / (p.mass + a.mass);
-          if (rel < 0.38 && a.balance > 0.6 && a.grounded) {
-            a.balance -= 0.3;
-            p.grabbedId = 0;
+          // A standing, balanced, heavier target shrugs the grab off; grip
+          // strength is the grabber's own arm motor authority.
+          const rel = (p.mass * (0.45 + armMotor(p) * 0.75)) / (p.mass + a.mass);
+          if (rel < 0.34 && a.balance > 0.6 && a.grounded && a.alive) {
+            a.stanceAuth = Math.max(0.2, a.stanceAuth - 0.25);
             w.emitSound(p.x, p.z, 0.3, "grab", p.id);
           } else {
+            p.grabbedId = a.id;
             a.grabbedBy = p.id;
+            p.grabNodeA = p.body >= 0 ? B.plan(p.body).grabHand : -1;
+            p.grabNodeB = a.body >= 0 ? B.nearestNode(a.body, gx, handY, gz, 1.6) : -1;
+            if (p.grabNodeB < 0 && a.body >= 0) p.grabNodeB = B.plan(a.body).chest;
+            p.grabRest = 0.34;
             p.carry = a.mass * 0.45;
             w.emitSound(p.x, p.z, 0.4, "grab", p.id);
           }
@@ -865,6 +1300,13 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
           pr.heldBy = p.id;
           pr.dynamic = true;
           pr.anchored = false;
+          // While held, the grab constraint moves it; a frame would fight that.
+          dropFrame(w.bodies, pr);
+          for (const c of w.colliders) if (c.propId === pr.id) c.solid = false;
+          p.grabbedId = pr.id;
+          p.grabNodeA = p.body >= 0 ? B.plan(p.body).grabHand : -1;
+          p.grabNodeB = -1;
+          p.grabRest = 0.22;
           p.carry = pr.mass;
           if (pr.weapon) p.weapon = pr.weapon;
           if (pr.kind === "lamp") p.weapon = "torch";
@@ -878,39 +1320,81 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
       dropHeld(w, p, clamp(spd / 6, 0.8, 1.8));
     }
   }
+
   for (const a of w.actors) {
     if (!a.grabbedId) continue;
     const t = w.actor(a.grabbedId);
     const pr = t ? null : w.prop(a.grabbedId);
-    const f = facing(a.yaw);
+    if (!t && !pr) {
+      releaseGrab(w, a);
+      continue;
+    }
     if (t) {
-      t.x = a.x + f.x * 0.55;
-      t.z = a.z + f.z * 0.55;
-      t.y = a.y + (a.loco === "ragdoll" ? 0.2 : 0.15);
-      t.vx = a.vx;
-      t.vz = a.vz;
-      t.vy = a.vy;
-      t.yaw = a.yaw;
-      if (!t.alive) {
-        a.carry = t.mass * 0.7;
-      }
+      // Held actors keep no motor authority in the grabbed limb chain; the
+      // solver's attachment constraint is what actually moves them.
+      t.grabbedBy = a.id;
+      a.carry = t.mass * (t.alive ? 0.45 : 0.7);
+      if (!t.alive || t.consciousness < 0.3) t.stanceAuth = 0;
+      // The load leans the hauler: reaction force through the arm shows up as a
+      // torso lean, which shifts the centre of mass inside writePose.
+      const dx = t.x - a.x;
+      const dz = t.z - a.z;
+      const back = -clamp(a.dragLoad / (a.mass * 22), 0, 0.22);
+      const fdir = facing(a.yaw);
+      a.leanZ =
+        a.leanZ +
+        (back * (fdir.x * dx + fdir.z * dz > 0 ? 1 : -1) - a.leanZ) * (1 - Math.exp(-dt * 6));
     } else if (pr) {
-      pr.x = a.x + f.x * 0.5;
-      pr.z = a.z + f.z * 0.5;
-      pr.y = a.y + a.height * 0.55;
-      pr.vx = a.vx;
-      pr.vz = a.vz;
+      pr.heldBy = a.id;
+      a.carry = pr.mass;
+      // The prop's own integration is suspended while held; the attachment
+      // constraint in the solver is its only mover.
+      pr.vx = pr.vy = pr.vz = 0;
       pr.yaw = a.yaw;
-    } else {
-      a.grabbedId = 0;
-      a.carry = 0;
+    }
+    // Grip failure: too heavy, too damaged, or the arm has been broken.
+    const capacity = a.mass * (0.55 + armMotor(a) * 1.5) * 26; // N*s the grip can hold
+    if (a.dragLoad > capacity) {
+      releaseGrab(w, a);
+      w.emitSound(a.x, a.z, 0.35, "grab", a.id);
+      if (a.kind === "player") w.whisper("Your grip tears loose.");
     }
   }
 }
 
+/**
+ * Dragging leaves a mark. `Track.kind === "drag"` was declared in the data model
+ * and never produced by anything; it is produced here, from real contact:
+ * a held body whose nodes are touching the ground while being moved.
+ */
+function stepDragTracks(w: World) {
+  const B = w.bodies;
+  for (const a of w.actors) {
+    if (!a.grabbedId) continue;
+    const t = w.actor(a.grabbedId);
+    if (!t || t.body < 0) continue;
+    const b = B.base(t.body);
+    const n = B.count[t.body]!;
+    let touching = false;
+    for (let i = 0; i < n && !touching; i++) if (B.touched[b + i]) touching = true;
+    if (!touching) continue;
+    if (Math.hypot(a.vx, a.vz) < 0.6) continue;
+    if (((w.time * 6) | 0) === (((w.time - STEP) * 6) | 0)) continue;
+    w.tracks.push({ x: t.x, z: t.z, t: w.time, actorId: t.id, kind: "drag", heading: a.yaw });
+    if (t.bleed > 0.05)
+      w.tracks.push({ x: t.x, z: t.z, t: w.time, actorId: t.id, kind: "blood", heading: a.yaw });
+  }
+}
+
+/**
+ * Locomotion state.
+ *
+ * Ragdoll, get-up and pin are no longer resolved here: they are outcomes of the
+ * substrate's balance test and are advanced in `physique.consume`. What is left
+ * is the gait classification and the timers that are genuinely kinematic.
+ */
 function stepLocomotion(w: World, dt: number) {
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
     if (a.vaultT > 0) {
       a.vaultT -= dt;
       if (a.vaultT <= 0) a.loco = "idle";
@@ -919,52 +1403,42 @@ function stepLocomotion(w: World, dt: number) {
       a.locoT -= dt;
       if (a.locoT <= 0) a.loco = "idle";
     }
-    if (a.loco === "getup") {
-      a.getupT -= dt;
+    // Substrate-owned states: authority, not a timer, decides when they end.
+    if (a.loco === "ragdoll" || a.loco === "getup" || a.loco === "pin" || a.loco === "down") {
       a.intendSpeed = 0;
-      if (a.getupT <= 0) {
-        a.loco = "idle";
-        a.balance = 0.6;
-      }
-      continue;
-    }
-    if (a.loco === "ragdoll") {
-      a.locoT -= dt;
-      if (a.grounded && Math.hypot(a.vx, a.vz) < 0.7 && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
-        a.loco = "getup";
-        a.getupT = 0.7 + (1 - a.consciousness) * 0.6;
-      }
       continue;
     }
     if (a.loco === "stumble") {
       a.locoT -= dt;
       a.intendSpeed *= 0.4;
-      if (a.locoT <= 0) a.loco = "idle";
-    }
-    if (a.loco === "down") {
-      a.intendSpeed = 0;
-      continue;
+      if (a.locoT <= 0 && a.catchT <= 0 && a.offBalT < 0.05) a.loco = "idle";
     }
     const spd = a.intendSpeed;
-    if (spd > 5.2) a.loco = "sprint";
-    else if (spd > 3.2) a.loco = "run";
-    else if (spd > 0.4) a.loco = a.crouch ? "crouch" : "walk";
-    else a.loco = a.crouch ? "crouch" : "idle";
+    if (a.loco !== "stumble") {
+      if (spd > 5.2) a.loco = "sprint";
+      else if (spd > 3.2) a.loco = "run";
+      else if (spd > 0.4) a.loco = a.crouch ? "crouch" : "walk";
+      else a.loco = a.crouch ? "crouch" : "idle";
+    }
     if (a.y < -0.05 && w.inWater(a.x, a.z, a.y + 0.4)) a.loco = "swim";
-    a.walkPhase += Math.hypot(a.vx, a.vz) * dt * 2.4;
   }
 }
 
 function stepPhysics(w: World, dt: number) {
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
+    // A body with no motor authority is moved by the solver, not by this
+    // controller; integrating it here too would fight the substrate.
+    if (a.authority < 0.02 && a.body >= 0) continue;
     const surf = surfaceAt(w, a.x, a.z);
     const water = w.inWater(a.x, a.z, a.y + 0.5);
     const fr = frictionFor(surf, w.wet[w.cell(a.x, a.z)]);
     const acc = accelFor(surf);
-    if (a.loco !== "ragdoll") {
-      const wishX = a.intendX * a.intendSpeed;
-      const wishZ = a.intendZ * a.intendSpeed;
+    if (a.loco !== "ragdoll" && a.loco !== "pin") {
+      // Traction scales with motor authority: you cannot push off a leg you
+      // have no control over, which is why a stumble slides.
+      const trac = 0.25 + a.authority * 0.75;
+      const wishX = a.intendX * a.intendSpeed * trac;
+      const wishZ = a.intendZ * a.intendSpeed * trac;
       a.vx += (wishX - a.vx) * (1 - Math.exp(-dt * acc * 0.25));
       a.vz += (wishZ - a.vz) * (1 - Math.exp(-dt * acc * 0.25));
       if (a.intendSpeed < 0.1) {
@@ -994,22 +1468,24 @@ function stepPhysics(w: World, dt: number) {
     }
     a.vy -= GRAVITY * dt * (water ? 0.35 : 1);
     integrateActor(w, a, dt);
-    a.balance = clamp(a.balance + dt * 0.55, 0, 1);
-    if (Math.hypot(a.vx, a.vz) > 4.5 && surf === "mud") {
-      a.balance -= dt * 0.2;
-      if (a.balance < 0.2 && a.loco !== "ragdoll") {
-        a.loco = "stumble";
-        a.locoT = 0.35;
-      }
+    // Slippery ground steals traction from the feet; the support-polygon test
+    // in the substrate is what turns that into a stumble or a fall.
+    if (Math.hypot(a.vx, a.vz) > 4.5 && (surf === "mud" || surf === "oil") && a.body >= 0) {
+      const plan = w.bodies.plan(a.body);
+      const slip = a.mass * dt * (surf === "oil" ? 2.6 : 1.3);
+      w.bodies.applyImpulse(a.body, plan.feet[0], a.vx * slip * 0.5, 0, a.vz * slip * 0.5, dt);
+      w.bodies.applyImpulse(a.body, plan.feet[1], a.vx * slip * 0.5, 0, a.vz * slip * 0.5, dt);
     }
   }
   separateBodies(w);
   for (const a of w.actors) {
-    if (a.grabbedBy) continue;
+    if (a.authority < 0.02 && a.body >= 0) continue;
     collideXZ(w, a);
   }
   for (const p of w.props) {
     if (p.heldBy || (!p.dynamic && p.anchored)) continue;
+    // Props with a frame are integrated by the solver, not here.
+    if (p.frame >= 0) continue;
     p.vy -= GRAVITY * dt;
     p.vx *= Math.exp(-dt * 1.8);
     p.vz *= Math.exp(-dt * 1.8);
@@ -1018,7 +1494,13 @@ function stepPhysics(w: World, dt: number) {
     p.z += p.vz * dt;
     resolveProp(w, p);
     if (p.y < 0.02 && Math.abs(p.vy) > 2.5) {
-      w.emitSound(p.x, p.z, 0.4 + Math.min(1, Math.abs(p.vy) * 0.1), p.material === "wood" ? "wood" : "impact", 0);
+      w.emitSound(
+        p.x,
+        p.z,
+        0.4 + Math.min(1, Math.abs(p.vy) * 0.1),
+        p.material === "wood" ? "wood" : "impact",
+        0,
+      );
       if (p.kind === "lamp" || p.oil) {
         spillOil(w, p);
         if (p.kind === "lamp") igniteAt(w, p.x, p.z, 0.8);
@@ -1033,7 +1515,7 @@ function stepPhysics(w: World, dt: number) {
 }
 
 function integrateActor(w: World, a: Actor, dt: number) {
-  const steps = 1 + ((Math.hypot(a.vx, a.vz, a.vy) * dt) / 0.25) | 0;
+  const steps = (1 + (Math.hypot(a.vx, a.vz, a.vy) * dt) / 0.25) | 0;
   const sdt = dt / steps;
   for (let i = 0; i < steps; i++) {
     a.x += a.vx * sdt;
@@ -1184,14 +1666,21 @@ export function unstickActor(w: World, a: Actor) {
   return true;
 }
 
+/**
+ * Capsule separation for bodies that are still standing up.
+ *
+ * Pairs where either body has lost motor authority are skipped: those are
+ * resolved node-against-node in the substrate, which is what lets them stack,
+ * drape and pin rather than sliding apart in the ground plane.
+ */
 function separateBodies(w: World) {
   const n = w.actors.length;
   for (let i = 0; i < n; i++) {
     const a = w.actors[i]!;
-    if (!a.alive && a.loco === "down") continue;
     for (let j = i + 1; j < n; j++) {
       const b = w.actors[j]!;
       if (a.grabbedId === b.id || b.grabbedId === a.id) continue;
+      if (a.authority <= 0.72 || b.authority <= 0.72) continue;
       const dx = b.x - a.x;
       const dz = b.z - a.z;
       const min = a.radius + b.radius;
@@ -1201,8 +1690,8 @@ function separateBodies(w: World) {
       const pen = min - d;
       const nx = dx / d;
       const nz = dz / d;
-      const invA = a.grabbedBy ? 0 : 1 / a.mass;
-      const invB = b.grabbedBy ? 0 : 1 / b.mass;
+      const invA = 1 / a.mass;
+      const invB = 1 / b.mass;
       const s = invA + invB || 1;
       a.x -= nx * pen * (invA / s);
       a.z -= nz * pen * (invA / s);
@@ -1223,7 +1712,8 @@ function separateBodies(w: World) {
 function resolveProp(w: World, p: Prop) {
   for (const c of w.colliders) {
     if (!c.solid || c.water || c.propId === p.id) continue;
-    if (p.x < c.minX - p.sx || p.x > c.maxX + p.sx || p.z < c.minZ - p.sz || p.z > c.maxZ + p.sz) continue;
+    if (p.x < c.minX - p.sx || p.x > c.maxX + p.sx || p.z < c.minZ - p.sz || p.z > c.maxZ + p.sz)
+      continue;
     if (p.y > c.maxY + 0.1 || p.y + p.sy < c.minY) continue;
     const cx = clamp(p.x, c.minX, c.maxX);
     const cz = clamp(p.z, c.minZ, c.maxZ);
@@ -1261,6 +1751,15 @@ function stepInjury(w: World, dt: number) {
     if (a.blood < 0.25) a.consciousness = Math.min(a.consciousness, a.blood * 2);
     if (a.breath <= 0) a.consciousness -= dt * 0.4;
     if (injurySum(a.injuries.head) > 1.6) a.consciousness -= dt * 0.15;
+    // Coming round. Consciousness could only ever fall, which made every
+    // knockdown terminal -- there was no state between standing and dead. A
+    // body that is breathing, not bleeding out and not concussed past saving
+    // comes back, slowly, and how slowly is what head trauma costs you.
+    if (a.alive && a.blood > 0.35 && a.breath > 0.25) {
+      const head = injurySum(a.injuries.head);
+      const rate = 0.055 * clamp(1 - head / 1.8, 0, 1) * clamp((a.blood - 0.35) / 0.5, 0, 1);
+      a.consciousness += rate * dt;
+    }
     a.consciousness = clamp(a.consciousness, 0, 1);
     if (a.alive && (a.blood <= 0.02 || a.consciousness <= 0 || a.y < -2.5)) {
       kill(w, a, a.blood <= 0.02 ? "bled out" : a.y < -2.5 ? "drowned" : "the body gave out");
@@ -1269,15 +1768,17 @@ function stepInjury(w: World, dt: number) {
     if (a.consciousness < 0.15) {
       a.loco = "down";
       a.intendSpeed = 0;
+      a.stanceAuth = 0;
       a.downT += dt;
       if (a.kind === "player") {
-        w.phase = "down";
-        const guards = w.nearby(a.x, a.z, 4).filter((g) => g.faction === "guard" && g.alive);
-        if (guards.length && a.downT > 1.6) {
-          w.phase = "captured";
-          w.captureT = 0;
-          w.whisper("They drag you.");
-        }
+        // Do not clobber a capture that has already happened: being unconscious
+        // is why they took you, not a reason to forget that they did.
+        if (w.phase !== "captured" && w.phase !== "dead") w.phase = "down";
+        // Capture is no longer a proximity timer. A guard has to reach you,
+        // take hold, and haul you across the ground to the barracks, which is
+        // why a doorway full of bodies is a real reason none of them gets to
+        // you. `secureTarget` ends it.
+        if (a.grabbedBy) w.whisper("They drag you.");
       }
     }
   }
@@ -1289,12 +1790,22 @@ function kill(w: World, a: Actor, cause: string) {
   a.loco = "down";
   a.consciousness = 0;
   a.intendSpeed = 0;
+  a.stanceAuth = 0;
+  a.authority = 0;
+  for (const r of REGIONS) a.motor[r] = 0;
+  releaseGrab(w, a);
   w.emitSound(a.x, a.z, 0.6, "impact", a.id);
   if (a.kind === "player") {
     w.phase = "dead";
     w.deadCause = cause;
   } else {
-    w.whisper(a.faction === "guard" ? "A guard goes still." : a.species === "human" ? "Someone falls and does not rise." : "The animal stills.");
+    w.whisper(
+      a.faction === "guard"
+        ? "A guard goes still."
+        : a.species === "human"
+          ? "Someone falls and does not rise."
+          : "The animal stills.",
+    );
     w.wanted = Math.min(1, w.wanted + (a.faction === "guard" ? 0.3 : 0.05));
     const carcass = w.addProp({
       kind: "carcass",
@@ -1314,6 +1825,9 @@ function kill(w: World, a: Actor, cause: string) {
       dynamic: false,
     });
     carcass.yaw = a.yaw;
+    carcass.dynamic = true;
+    carcass.anchored = false;
+    makeFrame(w.bodies, carcass);
   }
 }
 
@@ -1431,6 +1945,18 @@ function damageProp(w: World, p: Prop, dmg: number, vx: number, vz: number, by?:
   p.hp -= dmg;
   p.vx += vx * 0.3;
   p.vz += vz * 0.3;
+  // A hard enough knock takes a prop off its footing whether or not it breaks.
+  if (!p.collapsed && !p.heldBy && dmg > 10 && p.mass < 120 && p.kind !== "wall" && p.kind !== "roof") {
+    const slot = makeFrame(w.bodies, p);
+    if (slot >= 0) {
+      p.dynamic = true;
+      p.anchored = false;
+      for (const c of w.colliders) if (c.propId === p.id) c.solid = false;
+      w.bodies.addVelocity(slot, vx * 0.25, dmg * 0.6 / Math.max(1, p.mass), vz * 0.25, STEP);
+      w.bodies.addSpin(slot, vz * 0.4, 0, -vx * 0.4, STEP);
+      wakeFrame(w.bodies, slot);
+    }
+  }
   if (p.kind === "lamp" && dmg > 6) {
     spillOil(w, p);
     igniteAt(w, p.x, p.z, 0.7);
@@ -1449,6 +1975,25 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
   p.vy = 1.2;
   p.vx += vx * 0.4 + (w.rng() - 0.5);
   p.vz += vz * 0.4 + (w.rng() - 0.5);
+  // A prop that has started to move gets a body. It can tumble, rest on things,
+  // and land on people from here on, and it stops being a solid piece of the
+  // world the moment it stops holding still.
+  // Velocity accumulated while it was still a static box is bookkeeping, not
+  // momentum: nothing was integrating it and nothing was damping it either.
+  // Bounded here so a prop that took three knocks is not born at solver speed.
+  const birth = Math.hypot(p.vx, p.vy, p.vz);
+  if (birth > PROP_BIRTH_SPEED) {
+    const k = PROP_BIRTH_SPEED / birth;
+    p.vx *= k;
+    p.vy *= k;
+    p.vz *= k;
+  }
+  const slot = makeFrame(w.bodies, p);
+  if (slot >= 0) {
+    w.bodies.addVelocity(slot, p.vx, p.vy, p.vz, STEP);
+    // A little spin, so falling timber turns rather than sliding down flat.
+    w.bodies.addSpin(slot, (w.rng() - 0.5) * 2.4, 0, (w.rng() - 0.5) * 2.4, STEP);
+  }
   w.emitSound(p.x, p.z, p.sy > 1.5 ? 1.1 : 0.55, p.sy > 1.5 ? "collapse" : "break", 0);
   w.shake = Math.max(w.shake, p.sy > 1.5 ? 0.55 : 0.2);
   for (const c of w.colliders) {
@@ -1460,15 +2005,95 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
   }
 }
 
-function stepStructures(w: World, _dt: number) {
+/**
+ * Rates a building's supports against the load they were built to carry.
+ *
+ * A building that is standing is, by definition, within capacity, so the rating
+ * comes from its own design load rather than from the mass of a post -- which
+ * describes how hard the post is to throw, not what it can hold up. The margin
+ * is what decides how many you have to take out: at 1.9, losing one of four is
+ * survivable and losing two starts the cascade.
+ */
+const SUPPORT_MARGIN = 1.9;
+
+function rateSupports(w: World, b: Building) {
+  b.rated = true;
+  let carried = 0;
+  for (const id of b.parts) {
+    const p = w.prop(id);
+    if (p) carried += p.mass;
+  }
+  const live = b.supports.filter((id) => w.prop(id)).length;
+  if (!live) return;
+  const design = (carried / live) * SUPPORT_MARGIN;
+  for (const id of b.supports) {
+    const p = w.prop(id);
+    if (p) p.capacity = design;
+  }
+}
+
+/**
+ * Structural load, and what happens when it has nowhere to go.
+ *
+ * `Prop.load` and `Prop.capacity` were declared in the data model and read by
+ * nothing: a building stood until half its posts were gone and then vanished
+ * all at once. Load is now shared across the supports that are still standing,
+ * so cutting one raises the share on every other -- and if that share passes
+ * what a post can carry, it fails too, and the share rises again.
+ *
+ * That is the whole cascade: a building does not fall because a counter reached
+ * a threshold, it falls because the remaining posts could not carry what the
+ * missing ones were carrying. Which post you take first decides whether the
+ * roof comes down now, in a moment, or not at all.
+ */
+function stepStructures(w: World, dt: number) {
   for (const b of w.buildings) {
     if (b.collapsed) continue;
+    if (!b.rated) rateSupports(w, b);
     let live = 0;
+    let carried = 0;
+    for (const id of b.parts) {
+      const p = w.prop(id);
+      if (!p || p.collapsed) continue;
+      carried += p.mass;
+    }
+    // Anything heaped inside the footprint is weight the frame has to carry.
+    for (const p of w.props) {
+      if (p.collapsed || p.frame < 0) continue;
+      if (p.x > b.minX && p.x < b.maxX && p.z > b.minZ && p.z < b.maxZ) carried += p.mass * 0.5;
+    }
     for (const id of b.supports) {
       const p = w.prop(id);
       if (p && !p.collapsed && p.hp > 0) live++;
     }
-    if (live <= Math.max(1, (b.supports.length / 2) | 0) && b.supports.length) {
+    if (!b.supports.length) continue;
+
+    const share = live > 0 ? carried / live : Infinity;
+    let failed = 0;
+    for (const id of b.supports) {
+      const p = w.prop(id);
+      if (!p || p.collapsed || p.hp <= 0) continue;
+      p.load = share;
+      // Overload is not instant: timber groans, sags, and then goes. The margin
+      // above capacity sets how fast, so a post barely over holds for a while
+      // and one carrying twice its share does not.
+      if (EDGES.loadCascade && share > p.capacity) {
+        const over = share / p.capacity;
+        p.hp -= dt * 14 * over;
+        if (w.rng() < dt * 0.6 * over) w.emitSound(p.x, p.z, 0.5 + over * 0.2, "wood", 0);
+        if (p.hp <= 0) {
+          collapseProp(w, p, (w.rng() - 0.5) * 2, (w.rng() - 0.5) * 2);
+          failed++;
+        }
+      }
+    }
+    if (failed && live - failed > 0) w.whisper("Timber groans overhead.");
+
+    // Collapse when nothing is left holding it up. The old rule fired as soon
+    // as half the posts were gone, which pre-empted the cascade it was standing
+    // in for: with load doing the work, the last posts groan under the share the
+    // missing ones were carrying and go one after another.
+    if (live - failed <= 0) {
       b.collapsed = true;
       w.whisper(b.name + " gives way.");
       w.emitSound((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2, 1.4, "collapse", 0);
@@ -1477,17 +2102,13 @@ function stepStructures(w: World, _dt: number) {
         const p = w.prop(id);
         if (!p) continue;
         collapseProp(w, p, (w.rng() - 0.5) * 3, (w.rng() - 0.5) * 3);
-        p.vy += 2 + w.rng();
+        if (p.frame >= 0) w.bodies.addVelocity(p.frame, 0, 2 + w.rng(), 0, STEP);
       }
+      // The falling timber itself is what hurts anyone underneath now: the
+      // frames land on them, node against node, through the same contact and
+      // the same damage law as everything else. No blanket injury is applied
+      // here, because whether you are hit is a question about where you stood.
       for (const a of w.actors) {
-        if (a.x > b.minX && a.x < b.maxX && a.z > b.minZ && a.z < b.maxZ) {
-          a.injuries.torso.bruise += 0.5;
-          a.injuries.head.bruise += 0.25;
-          a.loco = "ragdoll";
-          a.vy = -1;
-          a.balance = 0;
-          a.consciousness -= 0.25;
-        }
         a.fear = Math.min(1, a.fear + 0.35);
       }
       w.wanted = Math.min(1, w.wanted + 0.15);
@@ -1517,6 +2138,22 @@ function cullSounds(w: World) {
 export function hintFor(w: World): string {
   const p = w.player();
   const f = facing(p.yaw);
+  if (p.loco === "pin") return "Pinned — something is on top of you";
+  if (p.loco === "getup") return "Getting up";
+  if (p.pileLoad > 12) return "Weight on you";
+  if (p.grabbedId && p.dragLoad > p.mass * 12) return "Heavy — you are being pulled off balance";
+  const dead = REGIONS.filter((r) => p.motor[r] < 0.25);
+  if (dead.length) {
+    const nice: Record<string, string> = {
+      head: "head",
+      torso: "body",
+      larm: "left arm",
+      rarm: "right arm",
+      lleg: "left leg",
+      rleg: "right leg",
+    };
+    return "Your " + nice[dead[0]!]! + " will not answer";
+  }
   for (const o of w.nearby(p.x, p.z, 1.6)) {
     if (o.id === p.id) continue;
     const dx = o.x - p.x;

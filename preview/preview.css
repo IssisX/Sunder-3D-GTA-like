@@ -1,0 +1,7 @@
+/*
+ * The preview build roots at `preview/`, so Tailwind's automatic source
+ * detection never sees the components in `src/`. Pointing it there explicitly
+ * is the whole difference between a styled HUD and a pile of unstyled text.
+ */
+@import "../src/styles.css";
+@source "../src";

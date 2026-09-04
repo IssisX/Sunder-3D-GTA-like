@@ -17,12 +17,17 @@ import {
   type WeaponKind,
   type Whisper,
   emptyInjury,
+  injurySum,
   FIRE_CELL,
   FIRE_RES,
   HALF,
   REGIONS,
   WORLD,
 } from "./types";
+import { Bodies, type PlanId } from "./body";
+
+/** Re-exported so existing call sites keep importing it from the world module. */
+export { injurySum };
 
 export class World {
   time = 0;
@@ -51,6 +56,8 @@ export class World {
   burning = new Uint8Array(FIRE_RES * FIRE_RES);
   indoor = new Uint8Array(FIRE_RES * FIRE_RES);
   hash = new Map<number, number[]>();
+  /** Articulated node bodies, indexed by Actor.body. The physical root state. */
+  bodies = new Bodies();
   events: { kind: string; x: number; z: number; a: number; mag: number; text?: string }[] = [];
   wanted = 0;
   fireCount = 0;
@@ -75,7 +82,10 @@ export class World {
   ixz(i: number) {
     const ix = i % FIRE_RES;
     const iz = (i / FIRE_RES) | 0;
-    return { x: ix * FIRE_CELL - HALF + FIRE_CELL * 0.5, z: iz * FIRE_CELL - HALF + FIRE_CELL * 0.5 };
+    return {
+      x: ix * FIRE_CELL - HALF + FIRE_CELL * 0.5,
+      z: iz * FIRE_CELL - HALF + FIRE_CELL * 0.5,
+    };
   }
 
   hashKey(x: number, z: number) {
@@ -253,6 +263,23 @@ export class World {
       lastHitBy: 0,
       lastHitT: -99,
       pinnedId: 0,
+      body: -1,
+      stanceAuth: 1,
+      authority: 1,
+      motor: { head: 1, torso: 1, larm: 1, rarm: 1, lleg: 1, rleg: 1 },
+      support: 1,
+      pileLoad: 0,
+      dragLoad: 0,
+      crouchAmt: 0,
+      offBalT: 0,
+      catchT: 0,
+      catchLeg: 0,
+      tripT: 0,
+      lastImpact: 0,
+      impactRegion: "torso",
+      grabNodeA: -1,
+      grabNodeB: -1,
+      grabRest: 0.4,
       ...partial,
     };
     a.px = a.x;
@@ -260,6 +287,8 @@ export class World {
     a.pz = a.z;
     a.homeX = a.homeX || a.x;
     a.homeZ = a.homeZ || a.z;
+    const plan: PlanId = a.species === "human" ? "humanoid" : "quadruped";
+    a.body = this.bodies.spawn(a.id, plan, a.height, a.mass, a.x, a.y, a.z, a.yaw);
     this.actors.push(a);
     return a;
   }
@@ -300,6 +329,11 @@ export class World {
       anchored: true,
       weapon: null,
       color: 0x5a4634,
+      frame: -1,
+      qx: 0,
+      qy: 0,
+      qz: 0,
+      qw: 1,
       ...partial,
     };
     p.px = p.x;
@@ -372,9 +406,17 @@ export class World {
 
 export function makeHumanStats(w: World, faction: Faction) {
   const courage =
-    faction === "guard" ? 0.72 + w.rng() * 0.2 : faction === "hunter" ? 0.6 + w.rng() * 0.2 : 0.28 + w.rng() * 0.35;
+    faction === "guard"
+      ? 0.72 + w.rng() * 0.2
+      : faction === "hunter"
+        ? 0.6 + w.rng() * 0.2
+        : 0.28 + w.rng() * 0.35;
   const aggression =
-    faction === "guard" ? 0.55 + w.rng() * 0.3 : faction === "hunter" ? 0.45 + w.rng() * 0.3 : 0.12 + w.rng() * 0.25;
+    faction === "guard"
+      ? 0.55 + w.rng() * 0.3
+      : faction === "hunter"
+        ? 0.45 + w.rng() * 0.3
+        : 0.12 + w.rng() * 0.25;
   return {
     courage,
     aggression,
@@ -428,10 +470,6 @@ export function regionFromHit(localY: number, side: number): Region {
 
 export function limbPenalty(a: Actor, region: Region) {
   return injurySum(a.injuries[region]);
-}
-
-export function injurySum(i: { bruise: number; cut: number; puncture: number; burn: number; fracture: number; sprain: number }) {
-  return i.bruise * 0.4 + i.cut * 0.8 + i.puncture * 0.9 + i.burn * 0.7 + i.fracture * 1.4 + i.sprain * 0.7;
 }
 
 export function worstRegion(a: Actor): { r: Region; v: number } {
