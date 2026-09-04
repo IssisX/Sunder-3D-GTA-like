@@ -57,6 +57,10 @@ const POSE_RATE = 62;
 const BAL_REF = 0.15;
 /** Margin, m, past which no catch step can save the fall. */
 const FALL_MARGIN = -0.34;
+/** How long the capture point may sit outside the base before it is a fall, s. */
+const OFF_BALANCE_GRACE = 0.16;
+/** Margin, m, deep enough to be a loss of balance the instant it happens. */
+const OFF_BALANCE_DEEP = -0.19;
 /**
  * Mean pose-tracking error, m, past which the body is judged to have been
  * physically overpowered and the stance is lost.
@@ -121,6 +125,29 @@ function restLen(plan: BodyPlan, i: number, j: number) {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+/**
+ * Half-stride amplitude, m: how far each foot travels fore and aft of the hips.
+ *
+ * Derived from the no-slip condition rather than picked. During stance the
+ * planted foot must move backward relative to the body at exactly the body's
+ * speed, so with a foot excursion `z = -A sin(phi)` and phase rate `w`, mid-
+ * stance gives `A*w = speed`. Choosing A from speed therefore also fixes the
+ * cadence, and the feet stop sliding along the ground.
+ *
+ * Getting this wrong is not cosmetic: a stride too short for the speed leaves
+ * the anticipated base of support permanently behind the capture point, and the
+ * balance test correctly -- and constantly -- reports a fall.
+ */
+export function strideAmp(speed: number, scale: number) {
+  return clamp(speed * 0.26, 0.02, 0.42) * scale;
+}
+
+/** Gait phase rate, rad/s, that keeps `strideAmp` no-slip at mid-stance. */
+export function gaitRate(speed: number, scale: number) {
+  const a = strideAmp(speed, scale);
+  return a > 1e-4 ? speed / a : 0;
+}
+
 /** Mean motor over the two legs: what gait speed and catch steps depend on. */
 export function legMotor(a: Actor) {
   return (a.motor.lleg + a.motor.rleg) * 0.5;
@@ -152,7 +179,7 @@ function groundMaterial(w: World, x: number, z: number): Material {
  * they could not affect anything. They are authoritative here: the solver is
  * the only thing that decides how much of this pose actually happens.
  */
-function writePose(w: World, a: Actor) {
+function writePose(w: World, a: Actor, dt: number) {
   const B = w.bodies;
   const slot = a.body;
   const plan = B.plan(slot);
@@ -161,6 +188,13 @@ function writePose(w: World, a: Actor) {
   // The raw crouch input is a boolean; smoothing it keeps an instant keypress
   // from asking the solver for a pose change no body could make.
   a.crouchAmt += ((a.crouch ? 1 : 0) - a.crouchAmt) * 0.22;
+  // The gait clock lives with the gait pose so the two cannot disagree. Damaged
+  // legs lengthen their own stance phase, which is what makes a limp read as a
+  // limp rather than as a slower walk.
+  a.walkPhase +=
+    gaitRate(Math.sqrt(a.vx * a.vx + a.vz * a.vz), B.scale[slot]!) *
+    dt *
+    (0.55 + legMotor(a) * 0.45);
   // Getting up is a squat that extends, not a body swinging over its own feet:
   // rotating the whole pose about the soles throws the centre of mass forward
   // past the toes, which the support test correctly reads as falling over. The
@@ -172,8 +206,8 @@ function writePose(w: World, a: Actor) {
   const flex = Math.max(a.crouchAmt * 0.55, rising);
   const spd = Math.sqrt(a.vx * a.vx + a.vz * a.vz);
   const ph = a.walkPhase;
-  const stride = Math.min(0.42, spd * 0.075) * s;
-  const lift = Math.min(0.13, spd * 0.022) * s;
+  const stride = strideAmp(spd, s);
+  const lift = Math.min(0.16, stride * 0.28);
   const humanoid = n === 11;
   for (let i = 0; i < n; i++) {
     const spec = plan.nodes[i]!;
@@ -261,12 +295,36 @@ function writePose(w: World, a: Actor) {
   }
 
   if (humanoid) {
-    // Knees and elbows are solved from the hips/shoulders and the end effectors
-    // rather than posed independently, so every target is reachable.
     const thigh = restLen(plan, 2, 7) * s;
     const shin = restLen(plan, 7, 8) * s;
     const upper = restLen(plan, 1, 3) * s;
     const fore = restLen(plan, 3, 4) * s;
+
+    // Hip dip.
+    //
+    // A standing pose has near-straight legs, so a stride long enough to keep
+    // up with the body puts the foot out of the leg's reach. A real walker
+    // answers that by dropping the hips; without this the IK answers it by
+    // lifting the FOOT instead, which takes the body off the ground every
+    // stride and launches it off the next contact. The dip is what a stride
+    // costs in height, and it is why walking has a vertical bob at all.
+    const legReach = (thigh + shin) * 0.985;
+    let dip = 0;
+    for (const f of plan.feet) {
+      const dx = lx[f]! - lx[2]!;
+      const dz = lz[f]! - lz[2]!;
+      const flat = Math.sqrt(dx * dx + dz * dz);
+      if (flat >= legReach) continue;
+      const maxDrop = Math.sqrt(legReach * legReach - flat * flat);
+      const need = ly[2]! - ly[f]! - maxDrop;
+      if (need > dip) dip = need;
+    }
+    if (dip > 0) {
+      for (const i of [0, 1, 2, 3, 4, 5, 6]) ly[i] = ly[i]! - dip;
+    }
+
+    // Knees and elbows are solved from the hips/shoulders and the end effectors
+    // rather than posed independently, so every target is reachable.
     // knees break forward and slightly outward, elbows backward and outward:
     // the directions a human joint actually bends.
     twoLink(2, 7, 8, thigh, shin, -0.24, -0.08, -0.97);
@@ -292,6 +350,23 @@ function writePose(w: World, a: Actor) {
     B.tx[k] = B.px[k]! + (wx - B.px[k]!) * reach;
     B.ty[k] = B.py[k]! + (wy - B.py[k]!) * reach;
     B.tz[k] = B.pz[k]! + (wz - B.pz[k]!) * reach;
+  }
+
+  // Publish the foothold this stride is committed to: one half-stride ahead of
+  // the hips, on the side of whichever foot is swinging. That, not the planted
+  // foot alone, is the base of support a walker is balancing against.
+  if (humanoid && spd > 0.4) {
+    const swingLeft = Math.sin(ph) > 0;
+    const lateral = (swingLeft ? -0.115 : 0.115) * s;
+    const fx = -Math.sin(a.yaw);
+    const fz = -Math.cos(a.yaw);
+    const rx = Math.cos(a.yaw);
+    const rz = -Math.sin(a.yaw);
+    B.stepX[slot] = a.x + fx * stride + rx * lateral;
+    B.stepZ[slot] = a.z + fz * stride + rz * lateral;
+    B.stepReady[slot] = 1;
+  } else {
+    B.stepReady[slot] = 0;
   }
 
   // The catch step overrides one foot target with the capture point: the place
@@ -560,7 +635,7 @@ export function stepBodies(w: World, dt: number) {
     B.groundMu[a.body] = frictionOf(mat);
     B.refreshNear(a.body, w.colliders, a.x, a.z, bodyReach(a));
     a.dragLoad = 0;
-    writePose(w, a);
+    writePose(w, a, dt);
   }
   gatherPairs(w);
   gatherAttachments(w);
@@ -711,7 +786,16 @@ function consume(w: World, a: Actor, dt: number) {
   }
 
   // --- balance from the support polygon ------------------------------------
-  const margin = EDGES.supportBalance ? B.supportMargin(slot) : 0.15;
+  // A body that is deliberately moving under its own power is judged against
+  // the foothold it is committed to, not only the foot currently down.
+  const striding = a.intendSpeed > 0.4 && a.authority > 0.35;
+  // Only a body with motor authority has intent to discount; a limp one is
+  // judged against its whole velocity, which is why a thrown body is never
+  // "balanced".
+  const iv = a.authority > 0.2 ? a.intendSpeed * a.authority : 0;
+  const margin = EDGES.supportBalance
+    ? B.supportMargin(slot, striding, a.intendX, a.intendZ, iv)
+    : 0.15;
   a.support = margin;
   a.balance = clamp(0.5 + margin / (2 * BAL_REF), 0, 1);
   a.grounded = a.grounded || footContact;
@@ -727,6 +811,12 @@ function consume(w: World, a: Actor, dt: number) {
 
   if (a.catchT > 0) a.catchT = Math.max(0, a.catchT - dt);
   if (a.tripT > 0) a.tripT = Math.max(0, a.tripT - dt);
+  // Flight is not a balance failure, so the airborne sentinel must not feed the
+  // off-balance timer: a running gait has both feet off the ground every stride.
+  const grounded = B.supportCount[slot]! > 0;
+  if (grounded && margin < 0) a.offBalT += dt;
+  else a.offBalT = Math.max(0, a.offBalT - dt * 2.5);
+  const losing = grounded && (a.offBalT > OFF_BALANCE_GRACE || margin < OFF_BALANCE_DEEP);
 
   const perr = poseError(B, slot);
   if (controllable) {
@@ -743,7 +833,7 @@ function consume(w: World, a: Actor, dt: number) {
       a.catchT = 0;
     } else if (peak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
       collapse(w, a, 0.35 + peak * 0.04);
-    } else if (margin < 0) {
+    } else if (losing) {
       if (margin < FALL_MARGIN || a.consciousness < 0.3) {
         collapse(w, a);
       } else if (a.catchT <= 0) {

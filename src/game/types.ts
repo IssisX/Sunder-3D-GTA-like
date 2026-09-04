@@ -256,6 +256,14 @@ export interface Actor {
   dragLoad: number;
   /** Smoothed crouch amount in [0,1]; the raw input is a boolean. */
   crouchAmt: number;
+  /**
+   * Time spent with the capture point outside the base of support, s.
+   *
+   * A transient excursion is normal gait -- every stride leaves the base for a
+   * moment. A sustained one is a fall. The distinction is duration, which is
+   * why this is a timer and not a boolean.
+   */
+  offBalT: number;
   /** Catch-step timer, s. */
   catchT: number;
   /** Which leg is swinging for the catch step: 0 left, 1 right. */

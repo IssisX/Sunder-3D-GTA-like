@@ -169,6 +169,16 @@ export class Game {
       this.cam.pitch = clamp(this.cam.pitch - input.lookY, -0.9, 0.55);
       input.lookX = 0;
       input.lookY = 0;
+      if (!this.input.locked && this.input.lockDenied) {
+        // Rate-based fallback aim. Scaled by elapsed time so it turns at the
+        // same speed whatever the refresh rate, with a dead zone so the middle
+        // of the screen is still.
+        const dead = 0.18;
+        const hx = Math.abs(input.hoverX) > dead ? input.hoverX : 0;
+        const hy = Math.abs(input.hoverY) > dead ? input.hoverY : 0;
+        this.cam.yaw -= hx * Math.abs(hx) * 2.6 * raw;
+        this.cam.pitch = clamp(this.cam.pitch - hy * Math.abs(hy) * 1.6 * raw, -0.9, 0.55);
+      }
     }
     if (simPlaying && input.pausePressed) this.pause(true);
     if (this.world.hitstop > 0 && simPlaying) {

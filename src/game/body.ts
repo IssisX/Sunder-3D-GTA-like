@@ -400,6 +400,13 @@ export class Bodies {
    * what separates "the same impact still settling" from "hit again".
    */
   vref = new Float32Array(this.cap * 6);
+  /**
+   * World XZ of the foothold this body is committed to, written by the
+   * controller each tick. `stepReady` is 0 when there is no committed step.
+   */
+  stepX = new Float32Array(this.cap);
+  stepZ = new Float32Array(this.cap);
+  stepReady = new Uint8Array(this.cap);
   /** Ground-plane material response under this body, written each tick by the sim. */
   groundHard = new Float32Array(this.cap);
   groundMu = new Float32Array(this.cap);
@@ -576,9 +583,10 @@ export class Bodies {
    * (Hof; Pratt). Returns the signed distance from x_cp to the convex hull of
    * the grounded contact nodes: positive inside, negative outside.
    */
-  supportMargin(slot: number) {
+  supportMargin(slot: number, anticipate: boolean, dirX: number, dirZ: number, maxIntend: number) {
     const b = this.base(slot);
     const n = this.count[slot]!;
+    const plan = this.plan(slot);
     let m = 0;
     let lowest = Infinity;
     let patch = 0;
@@ -591,23 +599,48 @@ export class Bodies {
       if (this.py[k]! < lowest) lowest = this.py[k]!;
       m++;
     }
-    this.supportCount[slot] = m;
     if (m === 0) {
       // Airborne. There is no base of support to be inside or outside of, so
       // this is not a balance failure -- it is flight, and the landing decides.
+      this.supportCount[slot] = 0;
       this.margin[slot] = -0.5;
       return -0.5;
     }
-    // The base of support is the hull of the contact PATCHES, not of the node
-    // centres: two feet are a line segment, and a body standing on a line would
-    // read as permanently falling. Adding the mean contact radius is the
-    // Minkowski sum of the hull with the patch, which is what a base of support
-    // actually is.
+    this.supportCount[slot] = m;
+    // Anticipated base of support.
+    //
+    // A walker is ALWAYS momentarily outside the base its planted foot defines
+    // -- that is what walking is. Judging a stride against the standing base
+    // makes every step read as a loss of balance. Dynamic balance is judged
+    // against the base the mover is committed to, so a swing foot whose target
+    // is about to reach the ground counts as support before it lands.
+    if (anticipate && this.stepReady[slot]) {
+      this.hullX[m] = this.stepX[slot]!;
+      this.hullZ[m] = this.stepZ[slot]!;
+      patch += this.patch[b + plan.feet[0]]!;
+      m++;
+    }
+
     patch /= m;
     const hCom = Math.max(0.2, this.comY[slot]! - lowest);
     const tau = Math.sqrt(hCom / GRAVITY); // s
-    const cx = this.comX[slot]! + this.comVX[slot]! * tau;
-    const cz = this.comZ[slot]! + this.comVZ[slot]! * tau;
+    // The capture point is built from the UNINTENDED part of the motion.
+    //
+    // Travelling forward on purpose is not a loss of balance -- a walker's
+    // centre of mass is ahead of their feet by design, and a runner's more so.
+    // What a balance test must catch is motion the mover did not ask for: a
+    // shove, a trip, a slip, a limb that failed to take its share.
+    //
+    // Only the forward component actually achieved is discounted, and only up to
+    // what was asked for. Moving slower than commanded is not credited as
+    // backward motion; being pushed faster than commanded, or sideways, or
+    // backward, is residual and counts in full.
+    const along = this.comVX[slot]! * dirX + this.comVZ[slot]! * dirZ;
+    const keep = Math.min(Math.max(along, 0), maxIntend);
+    const rvx = this.comVX[slot]! - dirX * keep;
+    const rvz = this.comVZ[slot]! - dirZ * keep;
+    const cx = this.comX[slot]! + rvx * tau;
+    const cz = this.comZ[slot]! + rvz * tau;
 
     let d: number;
     if (m === 1) {

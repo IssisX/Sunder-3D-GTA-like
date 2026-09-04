@@ -1183,13 +1183,12 @@ function stepLocomotion(w: World, dt: number) {
     // Substrate-owned states: authority, not a timer, decides when they end.
     if (a.loco === "ragdoll" || a.loco === "getup" || a.loco === "pin" || a.loco === "down") {
       a.intendSpeed = 0;
-      a.walkPhase += Math.hypot(a.vx, a.vz) * dt * 0.6;
       continue;
     }
     if (a.loco === "stumble") {
       a.locoT -= dt;
       a.intendSpeed *= 0.4;
-      if (a.locoT <= 0 && a.catchT <= 0 && a.support > 0) a.loco = "idle";
+      if (a.locoT <= 0 && a.catchT <= 0 && a.offBalT < 0.05) a.loco = "idle";
     }
     const spd = a.intendSpeed;
     if (a.loco !== "stumble") {
@@ -1199,11 +1198,6 @@ function stepLocomotion(w: World, dt: number) {
       else a.loco = a.crouch ? "crouch" : "idle";
     }
     if (a.y < -0.05 && w.inWater(a.x, a.z, a.y + 0.4)) a.loco = "swim";
-    // Gait phase advances with distance covered, scaled by the leg that is
-    // actually working: a damaged leg lengthens its own stance phase, which is
-    // what makes the limp read as a limp rather than a slower walk.
-    const gait = 0.55 + legMotor(a) * 0.45;
-    a.walkPhase += Math.hypot(a.vx, a.vz) * dt * 2.4 * gait;
   }
 }
 

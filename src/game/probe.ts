@@ -36,6 +36,8 @@ const IDLE: Actions = {
   moveY: 0,
   lookX: 0,
   lookY: 0,
+  hoverX: 0,
+  hoverY: 0,
   sprint: false,
   crouch: false,
   jump: false,
@@ -315,25 +317,26 @@ function measurePoseTracking() {
 /**
  * A sustained sideways push, and the question of what it produces.
  *
- * With the support polygon live, the push walks the capture point off the base
- * and the character throws a foot out to catch it -- a stagger. With that edge
- * severed there is no stagger available at all: the body resists rigidly until
- * the push overpowers the pose outright and it goes straight down. Counting
- * catch-step ticks measures exactly what the edge buys, which is the entire
- * middle ground between standing and falling.
+ * With the support polygon live, the push walks the capture point off the base,
+ * the character throws a foot out to catch it, and it stays on its feet. With
+ * that edge severed there is no corrective response available at all: the body
+ * resists rigidly, the pose error runs away, and it goes straight down. What is
+ * measured is how long it stays upright, because that is the whole of what the
+ * edge buys -- the entire middle ground between standing and falling.
  */
-function measureCatchSteps() {
+function measurePushSurvival() {
   const w = freshWorld(557);
   const a = stage(w);
   run(w, 20);
   const plan = w.bodies.plan(a.body);
-  let caught = 0;
+  let upright = 0;
   for (let i = 0; i < 90; i++) {
-    if (i < 26) w.bodies.applyImpulse(a.body, plan.chest, a.mass * 1.1, 0, 0, STEP);
+    if (i < 26) w.bodies.applyImpulse(a.body, plan.chest, a.mass * 0.45, 0, 0, STEP);
     run(w, 1);
-    if (a.catchT > 0 || a.loco === "stumble") caught++;
+    if (a.loco !== "ragdoll" && a.loco !== "getup" && a.loco !== "pin" && a.loco !== "down")
+      upright++;
   }
-  return caught;
+  return upright;
 }
 
 /**
@@ -411,6 +414,53 @@ function measureDragLoad() {
  * others to change. A phenomenon whose removal changes nothing else was never
  * part of the ensemble however well it was simulated.
  */
+/**
+ * The most basic invariant in the whole system, and the one the original
+ * falsifier set did not state: an actor must be able to WALK.
+ *
+ * Every phenomenon here -- balance, catch steps, motor authority, contact
+ * damage -- can look correct in isolation while ordinary locomotion silently
+ * collapses, because a stride legitimately leaves the base of support on every
+ * step. This walks across open ground and requires the actor to stay upright,
+ * keep its feet, and actually cover the commanded distance.
+ */
+function checkLocomotion(): CheckResult {
+  const runs: string[] = [];
+  let ok = true;
+  for (const mode of ["walk", "sprint", "broken leg"] as const) {
+    const w = freshWorld(4711);
+    const a = stage(w, -34, 34); // open ground, clear of the village
+    if (mode === "broken leg") a.injuries.lleg.fracture = 0.9;
+    const input = act({ moveY: 1, sprint: mode === "sprint" });
+    run(w, 20, input);
+    const z0 = a.z;
+    const x0 = a.x;
+    let fell = 0;
+    let supported = 0;
+    const TICKS = 300; // 5 s
+    for (let i = 0; i < TICKS; i++) {
+      run(w, 1, input);
+      if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup" || a.loco === "pin")
+        fell++;
+      if (w.bodies.supportCount[a.body]! > 0) supported++;
+    }
+    const dist = Math.hypot(a.x - x0, a.z - z0);
+    const footFrac = supported / TICKS;
+    // A limp is slower, but it is still locomotion.
+    const minDist = mode === "sprint" ? 18 : mode === "broken leg" ? 5 : 12;
+    const good = fell === 0 && dist >= minDist && footFrac > 0.6;
+    if (!good) ok = false;
+    runs.push(
+      `${mode}: ${dist.toFixed(1)} m in 5 s (need >= ${minDist}), ${fell} ticks down, feet on ground ${(footFrac * 100) | 0}%`,
+    );
+  }
+  return {
+    name: "locomotion",
+    pass: ok,
+    detail: runs.join("; "),
+  };
+}
+
 function checkAblation(): CheckResult {
   // A conscious subject, so motor authority has somewhere to fall from: the
   // point of the test is that removing the injury edge must also change how well
@@ -629,10 +679,11 @@ export function runFalsifiers(): CheckResult[] {
     checkLoopGain(),
     checkImpactLocality(),
     checkBudget(),
+    checkLocomotion(),
     severance("impulseInjury", "impulse->injury", measureFallInjury, 1e-4),
     severance("injuryMotor", "injury->motor", measureLimpGait, 1e-4),
     severance("motorPose", "motor->pose", measurePoseTracking, 1e-4),
-    severance("supportBalance", "support->catch step", measureCatchSteps, 0.5),
+    severance("supportBalance", "support->stays on its feet", measurePushSurvival, 5),
     severance("bodyPairs", "body-body drape", measureDrape, 0.05),
     severance("grabLoad", "grab->hauler load", measureDragLoad, 1e-3),
     checkAblation(),

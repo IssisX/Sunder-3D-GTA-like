@@ -271,6 +271,7 @@ export class World {
       pileLoad: 0,
       dragLoad: 0,
       crouchAmt: 0,
+      offBalT: 0,
       catchT: 0,
       catchLeg: 0,
       tripT: 0,
