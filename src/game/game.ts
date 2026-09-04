@@ -514,6 +514,10 @@ export class Game {
           pain: p.pain,
           rarm: injurySum(p.injuries.rarm) + p.injuries.rarm.fracture,
           cutR: p.injuries.rarm.cut,
+          chestW: (mesh?.userData?.parts?.torso as { scale?: { x: number } } | undefined)?.scale?.x ?? 0,
+          hands: !!(mesh?.userData?.parts?.lhand && mesh?.userData?.parts?.rhand),
+          feet: !!(mesh?.userData?.parts?.lfoot && mesh?.userData?.parts?.rfoot),
+          meshRev: mesh?.userData?.rev ?? 0,
         };
       },
       forceInjure: (region?: string, kind?: string) => {

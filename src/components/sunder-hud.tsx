@@ -46,6 +46,10 @@ export function SunderHud({
   useEffect(() => {
     const coarse = window.matchMedia("(pointer: coarse)").matches;
     setTouch(coarse || navigator.maxTouchPoints > 0);
+    (window as Window & { __forceTouchHud?: (on: boolean) => void }).__forceTouchHud = (on) => setTouch(!!on);
+    return () => {
+      delete (window as Window & { __forceTouchHud?: (on: boolean) => void }).__forceTouchHud;
+    };
   }, []);
 
   const hurt = Object.values(hud.injuries).some((v) => v > 0.08);
@@ -412,6 +416,7 @@ function Stick({ onStick }: { onStick: (x: number, y: number) => void }) {
   return (
     <div
       ref={baseRef}
+      data-stick
       className="pointer-events-auto relative h-36 w-36 rounded-full border border-border bg-surface/45 select-none"
       style={{ touchAction: "none" }}
       onPointerDown={(e) => {
@@ -430,11 +435,17 @@ function Stick({ onStick }: { onStick: (x: number, y: number) => void }) {
       onPointerCancel={end}
       onLostPointerCapture={end}
     >
-      <div className="absolute inset-6 rounded-full border border-border/70" />
-      <div
-        className="absolute top-1/2 left-1/2 h-14 w-14 -translate-x-1/2 -translate-y-1/2 rounded-full border border-accent/40 bg-accent/80"
-        style={{ transform: `translate(calc(-50% + ${knob.x}px), calc(-50% + ${knob.y}px))` }}
-      />
+      <div className="pointer-events-none absolute inset-6 rounded-full border border-border/70" />
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="h-1.5 w-1.5 rounded-full bg-fg/35" />
+      </div>
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div
+          data-stick-knob
+          className="h-14 w-14 rounded-full border border-accent/40 bg-accent/80"
+          style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
+        />
+      </div>
     </div>
   );
 }

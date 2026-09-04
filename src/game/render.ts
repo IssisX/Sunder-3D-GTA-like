@@ -1,9 +1,11 @@
 import * as THREE from "three";
 import type { Actor, Injury, Particle, Prop, WeaponKind } from "./types";
 import { FIRE_RES, HALF, WORLD } from "./types";
-import { World, facing, injurySum, lerpAng } from "./world";
+import { World, facing, injurySum, lerpAng, rightOf } from "./world";
 import type { Cam } from "./sim";
 import { P, weaponEnds } from "./physique";
+
+const MESH_REV = 4;
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
@@ -327,11 +329,17 @@ export class View {
   }
 
   private ensureActor(a: Actor) {
-    if (this.actorMap.has(a.id)) return;
+    const old = this.actorMap.get(a.id);
+    if (old && old.userData.rev === MESH_REV) return;
+    if (old) {
+      this.scene.remove(old);
+      this.actorMap.delete(a.id);
+    }
     const g =
       a.species === "human" || a.kind === "player"
         ? this.makeHumanoid(a)
         : this.makeBeast(a);
+    g.userData.rev = MESH_REV;
     this.scene.add(g);
     this.actorMap.set(a.id, g);
   }
@@ -341,8 +349,8 @@ export class View {
     const skin = mat(a.skin);
     const cloth = mat(a.cloth);
     const dark = mat(a.accent);
-    const mk = (material: THREE.Material, name: string) => {
-      const m = new THREE.Mesh(GEO.box, material);
+    const mk = (material: THREE.Material, name: string, geo: THREE.BufferGeometry = GEO.box) => {
+      const m = new THREE.Mesh(geo, material);
       m.name = name;
       m.castShadow = true;
       g.add(m);
@@ -350,27 +358,52 @@ export class View {
     };
     const pelvis = mk(dark, "pelvis");
     const torso = mk(cloth, "torso");
-    const neck = mk(skin, "neck");
+    const shoulders = mk(cloth, "shoulders");
+    const neck = mk(skin, "neck", GEO.cyl);
     const head = new THREE.Mesh(GEO.sphere, skin);
     head.name = "head";
     head.castShadow = true;
     g.add(head);
-    const luarm = mk(skin, "luarm");
-    const llarm = mk(skin, "llarm");
-    const ruarm = mk(skin, "ruarm");
-    const rlarm = mk(skin, "rlarm");
-    const lthigh = mk(dark, "lthigh");
-    const lshin = mk(dark, "lshin");
-    const rthigh = mk(dark, "rthigh");
-    const rshin = mk(dark, "rshin");
-    for (const m of [pelvis, torso, neck, head, luarm, llarm, ruarm, rlarm, lthigh, lshin, rthigh, rshin]) {
+    const hairCol = new THREE.Color(a.skin).multiplyScalar(0.32);
+    const hair = new THREE.Mesh(GEO.sphere, mat(hairCol.getHex()));
+    hair.name = "hair";
+    hair.scale.set(1.04, 0.7, 1.02);
+    hair.position.set(0, 0.14, -0.02);
+    hair.castShadow = true;
+    head.add(hair);
+    const eyeM = mat(0x1a1512);
+    for (const sx of [-1, 1]) {
+      const e = new THREE.Mesh(GEO.sphere, eyeM);
+      e.scale.set(0.14, 0.14, 0.08);
+      e.position.set(sx * 0.18, 0.06, -0.42);
+      head.add(e);
+    }
+    const nose = new THREE.Mesh(GEO.box, skin);
+    nose.scale.set(0.08, 0.1, 0.14);
+    nose.position.set(0, -0.02, -0.46);
+    head.add(nose);
+    const luarm = mk(skin, "luarm", GEO.cyl);
+    const llarm = mk(skin, "llarm", GEO.cyl);
+    const ruarm = mk(skin, "ruarm", GEO.cyl);
+    const rlarm = mk(skin, "rlarm", GEO.cyl);
+    const lhand = mk(skin, "lhand", GEO.sphere);
+    const rhand = mk(skin, "rhand", GEO.sphere);
+    const lthigh = mk(dark, "lthigh", GEO.cyl);
+    const lshin = mk(dark, "lshin", GEO.cyl);
+    const rthigh = mk(dark, "rthigh", GEO.cyl);
+    const rshin = mk(dark, "rshin", GEO.cyl);
+    const lfoot = mk(dark, "lfoot");
+    const rfoot = mk(dark, "rfoot");
+    const lshcap = mk(cloth, "lshcap", GEO.sphere);
+    const rshcap = mk(cloth, "rshcap", GEO.sphere);
+    for (const m of [pelvis, torso, neck, head, luarm, llarm, ruarm, rlarm, lthigh, lshin, rthigh, rshin, lhand, rhand]) {
       addWounds(m, a.id);
     }
     if (a.helmet) {
       const h = new THREE.Mesh(GEO.sphere, mat(0x4a4c50, { metalness: 0.5, roughness: 0.4 }));
       h.name = "helmet";
-      h.scale.set(1.05, 0.72, 1.05);
-      h.position.y = 0.12;
+      h.scale.set(1.08, 0.7, 1.08);
+      h.position.y = 0.14;
       head.add(h);
     }
     const wep = new THREE.Group();
@@ -381,6 +414,7 @@ export class View {
       neck,
       torso,
       pelvis,
+      shoulders,
       larm: luarm,
       rarm: ruarm,
       lleg: lthigh,
@@ -389,10 +423,16 @@ export class View {
       llarm,
       ruarm,
       rlarm,
+      lhand,
+      rhand,
       lthigh,
       lshin,
       rthigh,
       rshin,
+      lfoot,
+      rfoot,
+      lshcap,
+      rshcap,
       wep,
     };
     return g;
@@ -417,29 +457,52 @@ export class View {
       z: p.pz + (p.z - p.pz) * alpha,
     });
     const A = body.parts.map(lerpP);
+    const pel = A[P.pelvis]!;
     const sp = A[P.spine]!;
     const hd = A[P.head]!;
-    const nx = hd.x - sp.x;
-    const ny = hd.y - sp.y;
-    const nz = hd.z - sp.z;
-    const neckBase = { x: sp.x + nx * 0.38, y: sp.y + ny * 0.38, z: sp.z + nz * 0.38 };
-    const skull = { x: sp.x + nx * 0.78, y: sp.y + ny * 0.78, z: sp.z + nz * 0.78 };
-    placeSeg(parts.pelvis!, A[P.pelvis]!, sp, 0.22);
-    placeSeg(parts.torso!, sp, neckBase, 0.26);
-    if (parts.neck) placeSeg(parts.neck, neckBase, skull, 0.09);
-    parts.head!.position.set(hd.x, hd.y, hd.z);
-    parts.head!.scale.set(0.22, 0.24, 0.21);
-    const nl = Math.hypot(nx, ny, nz) || 1;
-    _dir.set(nx / nl, ny / nl, nz / nl);
-    parts.head!.quaternion.setFromUnitVectors(_up, _dir);
-    placeSeg(parts.luarm!, sp, A[P.uarmL]!, 0.1);
-    placeSeg(parts.llarm!, A[P.uarmL]!, A[P.larmL]!, 0.09);
-    placeSeg(parts.ruarm!, A[P.spine]!, A[P.uarmR]!, 0.1);
-    placeSeg(parts.rlarm!, A[P.uarmR]!, A[P.larmR]!, 0.09);
-    placeSeg(parts.lthigh!, A[P.pelvis]!, A[P.thighL]!, 0.13);
-    placeSeg(parts.lshin!, A[P.thighL]!, A[P.shinL]!, 0.11);
-    placeSeg(parts.rthigh!, A[P.pelvis]!, A[P.thighR]!, 0.13);
-    placeSeg(parts.rshin!, A[P.thighR]!, A[P.shinR]!, 0.11);
+    const rgt = rightOf(a.yaw);
+    const fwd = facing(a.yaw);
+    const limp =
+      a.loco === "ragdoll" || a.loco === "down" || body.mode === "ragdoll" || body.mode === "getup";
+    const chestA = { x: pel.x, y: pel.y + 0.05, z: pel.z };
+    const chestB = { x: sp.x, y: sp.y + 0.2, z: sp.z };
+    placeBody(parts.pelvis!, { x: pel.x, y: pel.y - 0.1, z: pel.z }, { x: pel.x, y: pel.y + 0.12, z: pel.z }, rgt, 0.38, 0.22);
+    placeBody(parts.torso!, chestA, chestB, rgt, 0.46, 0.26);
+    if (parts.shoulders) placeBody(parts.shoulders, A[P.uarmL]!, A[P.uarmR]!, fwd, 0.16, 0.18);
+    const nb = { x: chestB.x, y: chestB.y - 0.02, z: chestB.z };
+    const nt = limp
+      ? { x: hd.x, y: hd.y - 0.1, z: hd.z }
+      : {
+          x: nb.x * 0.72 + hd.x * 0.28,
+          y: Math.max(hd.y - 0.13, nb.y + 0.1),
+          z: nb.z * 0.72 + hd.z * 0.28,
+        };
+    if (parts.neck) placeSeg(parts.neck, nb, nt, 0.1);
+    const headR = 0.11;
+    if (limp) {
+      parts.head!.position.set(hd.x, hd.y, hd.z);
+      const nl = Math.hypot(hd.x - sp.x, hd.y - sp.y, hd.z - sp.z) || 1;
+      _dir.set((hd.x - sp.x) / nl, (hd.y - sp.y) / nl, (hd.z - sp.z) / nl);
+      parts.head!.quaternion.setFromUnitVectors(_up, _dir);
+    } else {
+      parts.head!.position.set(nt.x, nt.y + headR, nt.z);
+      parts.head!.rotation.set(0, a.yaw, 0);
+    }
+    parts.head!.scale.setScalar(0.22);
+    placeArm(parts.luarm!, parts.llarm!, parts.lhand, A[P.uarmL]!, A[P.larmL]!, fwd);
+    placeArm(parts.ruarm!, parts.rlarm!, parts.rhand, A[P.uarmR]!, A[P.larmR]!, fwd);
+    if (parts.lshcap) {
+      parts.lshcap.position.set(A[P.uarmL]!.x, A[P.uarmL]!.y, A[P.uarmL]!.z);
+      parts.lshcap.scale.setScalar(0.14);
+      parts.lshcap.quaternion.identity();
+    }
+    if (parts.rshcap) {
+      parts.rshcap.position.set(A[P.uarmR]!.x, A[P.uarmR]!.y, A[P.uarmR]!.z);
+      parts.rshcap.scale.setScalar(0.14);
+      parts.rshcap.quaternion.identity();
+    }
+    placeLeg(parts.lthigh!, parts.lshin!, parts.lfoot, pel, A[P.thighL]!, A[P.shinL]!, rgt, -1, fwd, a.yaw);
+    placeLeg(parts.rthigh!, parts.rshin!, parts.rfoot, pel, A[P.thighR]!, A[P.shinR]!, rgt, 1, fwd, a.yaw);
     let wep = parts.wep;
     if (wep && !(wep as THREE.Group).isGroup) {
       const g = new THREE.Group();
@@ -480,6 +543,8 @@ export class View {
     paintWounds(parts.llarm, a.injuries.larm);
     paintWounds(parts.rshin, a.injuries.rleg);
     paintWounds(parts.lshin, a.injuries.lleg);
+    paintWounds(parts.rhand, a.injuries.rarm);
+    paintWounds(parts.lhand, a.injuries.larm);
   }
 
   private makeBeast(a: Actor) {
@@ -754,6 +819,66 @@ function placeSeg(
   b: { x: number; y: number; z: number },
   thick: number,
 ) {
+  placeBody(mesh, a, b, { x: 1, z: 0 }, thick, thick);
+}
+
+function placeArm(
+  upper: THREE.Object3D,
+  lower: THREE.Object3D,
+  hand: THREE.Object3D | undefined,
+  shoulder: { x: number; y: number; z: number },
+  wrist: { x: number; y: number; z: number },
+  fwd: { x: number; z: number },
+) {
+  const elbow = {
+    x: shoulder.x * 0.52 + wrist.x * 0.48 - fwd.x * 0.055,
+    y: shoulder.y * 0.52 + wrist.y * 0.48 + 0.02,
+    z: shoulder.z * 0.52 + wrist.z * 0.48 - fwd.z * 0.055,
+  };
+  placeSeg(upper, shoulder, elbow, 0.13);
+  placeSeg(lower, elbow, wrist, 0.105);
+  if (hand) {
+    hand.position.set(wrist.x, wrist.y, wrist.z);
+    hand.scale.setScalar(0.085);
+    hand.quaternion.identity();
+  }
+}
+
+function placeLeg(
+  thigh: THREE.Object3D,
+  shin: THREE.Object3D,
+  foot: THREE.Object3D | undefined,
+  hip: { x: number; y: number; z: number },
+  knee: { x: number; y: number; z: number },
+  ankle: { x: number; y: number; z: number },
+  right: { x: number; z: number },
+  side: number,
+  fwd: { x: number; z: number },
+  yaw: number,
+) {
+  const hipP = {
+    x: hip.x + right.x * side * 0.11,
+    y: hip.y - 0.02,
+    z: hip.z + right.z * side * 0.11,
+  };
+  placeSeg(thigh, hipP, knee, 0.16);
+  placeSeg(shin, knee, ankle, 0.13);
+  if (foot) placeFoot(foot, ankle, fwd, yaw);
+}
+
+const _x = new THREE.Vector3();
+const _y = new THREE.Vector3();
+const _z = new THREE.Vector3();
+const _basis = new THREE.Matrix4();
+
+function placeBody(
+  mesh: THREE.Object3D,
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  right: { x: number; z: number },
+  width: number,
+  depth: number,
+) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const dz = b.z - a.z;
@@ -761,12 +886,45 @@ function placeSeg(
   const len = n < 0.04 ? 0.04 : n;
   mesh.position.set((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
   if (n < 1e-5) {
-    mesh.scale.set(thick, len, thick);
+    mesh.scale.set(width, len, depth);
     return;
   }
-  _dir.set(dx / n, dy / n, dz / n);
-  mesh.quaternion.setFromUnitVectors(_up, _dir);
-  mesh.scale.set(thick, len, thick);
+  const inv = 1 / n;
+  _y.set(dx * inv, dy * inv, dz * inv);
+  let rx = right.x;
+  let rz = right.z;
+  const d = rx * _y.x + rz * _y.z;
+  rx -= _y.x * d;
+  rz -= _y.z * d;
+  const rl = Math.hypot(rx, rz);
+  if (rl < 1e-5) {
+    _dir.set(_y.x, _y.y, _y.z);
+    mesh.quaternion.setFromUnitVectors(_up, _dir);
+  } else {
+    _x.set(rx / rl, 0, rz / rl);
+    _z.crossVectors(_x, _y);
+    if (_z.lengthSq() < 1e-8) {
+      _dir.set(_y.x, _y.y, _y.z);
+      mesh.quaternion.setFromUnitVectors(_up, _dir);
+    } else {
+      _z.normalize();
+      _x.crossVectors(_y, _z).normalize();
+      _basis.makeBasis(_x, _y, _z);
+      mesh.quaternion.setFromRotationMatrix(_basis);
+    }
+  }
+  mesh.scale.set(width, len, depth);
+}
+
+function placeFoot(
+  mesh: THREE.Object3D,
+  shin: { x: number; y: number; z: number },
+  fwd: { x: number; z: number },
+  yaw: number,
+) {
+  mesh.position.set(shin.x + fwd.x * 0.07, Math.max(0.035, shin.y - 0.03), shin.z + fwd.z * 0.07);
+  mesh.scale.set(0.1, 0.07, 0.2);
+  mesh.rotation.set(0, yaw + Math.PI, 0);
 }
 
 function placeHeldWeapon(

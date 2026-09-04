@@ -34,16 +34,16 @@ export const PART_REGION: Region[] = [
 
 const LOCAL: [number, number, number][] = [
   [0, 0.92, 0],
-  [0, 1.28, 0.02],
-  [0, 1.66, 0.03],
-  [-0.26, 1.38, 0],
-  [-0.28, 0.98, 0.02],
-  [0.26, 1.38, 0],
-  [0.28, 0.98, 0.02],
-  [-0.11, 0.52, 0.01],
-  [-0.12, 0.12, 0.05],
-  [0.11, 0.52, 0.01],
-  [0.12, 0.12, 0.05],
+  [0, 1.3, 0.02],
+  [0, 1.7, 0],
+  [-0.36, 1.42, 0],
+  [-0.38, 0.96, 0.03],
+  [0.36, 1.42, 0],
+  [0.38, 0.96, 0.03],
+  [-0.14, 0.52, 0.02],
+  [-0.14, 0.08, 0.05],
+  [0.14, 0.52, 0.02],
+  [0.14, 0.08, 0.05],
 ];
 
 const RAD = [0.15, 0.13, 0.11, 0.08, 0.07, 0.08, 0.07, 0.09, 0.08, 0.09, 0.08];
@@ -794,9 +794,9 @@ function poseCompliance(a: Actor, i: number) {
   }
   if (a.flinchT > 0 && a.body && i === a.body.lastHit) return 0.00008 * (1 + inj);
   if (i === P.pelvis) return 0.00000022;
-  if (i === P.spine) return 0.000018 * (1 + inj);
+  if (i === P.spine) return 0.000012 * (1 + inj);
   if (i === P.shinL || i === P.shinR) return 0.000012 * (1 + inj * 3 + frac * 12);
-  if (i === P.head) return 0.000008 * (1 + inj * 4 + frac * 22);
+  if (i === P.head) return 0.0000018 * (1 + inj * 4 + frac * 22);
   if (i === P.thighL || i === P.thighR) return 0.000022 * (1 + inj * 3 + frac * 12);
   let c = 0.00004 * (1 + inj * 3 + frac * 14);
   if (a.loco === "stumble") c *= 1.25;
