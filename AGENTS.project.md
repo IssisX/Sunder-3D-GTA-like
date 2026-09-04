@@ -2,6 +2,12 @@
 
 These instructions govern work on this repository in addition to `AGENTS.md`.
 
+## ADVANCED GAME MATH FIRST LAW
+
+For every substantive SUNDER development response, begin the technical reasoning from the canonical advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
+
+Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
+
 ## HANDOFF EXPOSURE LAW
 
 Never hide, blur, or euphemize the actual state of delivered work.
