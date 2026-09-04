@@ -207,7 +207,27 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     ly *= 0.72;
     lz += 0.08;
   }
-  if (!kicking) {
+  if (!kicking && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint")) {
+    const lift = Math.max(0, Math.abs(s)) * (a.loco === "sprint" ? 0.14 : 0.1);
+    if (i === P.shinL || i === P.thighL) {
+      const k = i === P.shinL ? 1 : 0.45;
+      if (s > 0) {
+        lz += s * amp * k;
+        ly += lift * (i === P.shinL ? 1 : 0.4);
+      } else {
+        lz += s * amp * 0.22 * k;
+      }
+    }
+    if (i === P.shinR || i === P.thighR) {
+      const k = i === P.shinR ? 1 : 0.45;
+      if (s < 0) {
+        lz -= s * amp * k;
+        ly += lift * (i === P.shinR ? 1 : 0.4);
+      } else {
+        lz -= s * amp * 0.22 * k;
+      }
+    }
+  } else if (!kicking) {
     if (i === P.shinL || i === P.thighL) lz += s * amp * (i === P.shinL ? 1 : 0.45);
     if (i === P.shinR || i === P.thighR) lz -= s * amp * (i === P.shinR ? 1 : 0.45);
   }
@@ -500,11 +520,74 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
 
 export function poseTargets(a: Actor): { x: number; y: number; z: number }[] {
   const out = [];
+  const plant = a.plantPart;
+  const pelT = worldPoint(a, ...poseLocal(a, P.pelvis));
   for (let i = 0; i < NPART; i++) {
+    if (plant === P.shinL && (i === P.shinL || i === P.thighL)) {
+      out.push(plantTarget(i === P.shinL, pelT, a.plantX, a.plantZ, a.y));
+      continue;
+    }
+    if (plant === P.shinR && (i === P.shinR || i === P.thighR)) {
+      out.push(plantTarget(i === P.shinR, pelT, a.plantX, a.plantZ, a.y));
+      continue;
+    }
     const [lx, ly, lz] = poseLocal(a, i);
     out.push(worldPoint(a, lx, ly, lz));
   }
   return out;
+}
+
+function plantTarget(
+  isShin: boolean,
+  pel: { x: number; y: number; z: number },
+  px: number,
+  pz: number,
+  ay: number,
+) {
+  const fy = ay + 0.08;
+  if (isShin) return { x: px, y: fy, z: pz };
+  return {
+    x: pel.x * 0.42 + px * 0.58,
+    y: pel.y * 0.52 + fy * 0.48,
+    z: pel.z * 0.42 + pz * 0.58,
+  };
+}
+
+function updatePlant(a: Actor) {
+  if (!a.body || a.body.mode !== "stance" || !a.alive) {
+    a.plantPart = -1;
+    return;
+  }
+  if (a.kickT > 0) {
+    const foot = a.body.parts[P.shinL]!;
+    if (a.plantPart !== P.shinL) {
+      a.plantPart = P.shinL;
+      a.plantX = foot.x;
+      a.plantZ = foot.z;
+    }
+    return;
+  }
+  const spd = Math.hypot(a.vx, a.vz);
+  const stepping =
+    a.grounded && spd > 0.32 && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint");
+  if (!stepping) {
+    a.plantPart = -1;
+    return;
+  }
+  const want = Math.sin(a.walkPhase) >= 0 ? P.shinR : P.shinL;
+  const foot = a.body.parts[want]!;
+  if (want !== a.plantPart) {
+    a.plantPart = want;
+    a.plantX = foot.x;
+    a.plantZ = foot.z;
+  }
+  const pel = a.body.parts[P.pelvis]!;
+  const reach = Math.hypot(pel.x - a.plantX, pel.z - a.plantZ);
+  if (reach > 0.62) {
+    const s = 0.62 / reach;
+    a.plantX = pel.x + (a.plantX - pel.x) * s;
+    a.plantZ = pel.z + (a.plantZ - pel.z) * s;
+  }
 }
 
 function snapToPose(body: Physique, a: Actor) {
@@ -795,7 +878,11 @@ function poseCompliance(a: Actor, i: number) {
   if (a.flinchT > 0 && a.body && i === a.body.lastHit) return 0.00008 * (1 + inj);
   if (i === P.pelvis) return 0.00000022;
   if (i === P.spine) return 0.000012 * (1 + inj);
-  if (i === P.shinL || i === P.shinR) return 0.000012 * (1 + inj * 3 + frac * 12);
+  if (i === P.shinL || i === P.shinR) {
+    const injC = 0.000012 * (1 + inj * 3 + frac * 12);
+    if (a.plantPart === i) return injC * 0.12;
+    return injC;
+  }
   if (i === P.head) return 0.0000018 * (1 + inj * 4 + frac * 22);
   if (i === P.thighL || i === P.thighR) return 0.000022 * (1 + inj * 3 + frac * 12);
   let c = 0.00004 * (1 + inj * 3 + frac * 14);
@@ -1107,11 +1194,36 @@ function solveGrab(w: World, a: Actor, h: number) {
       other.body.mode = "ragdoll";
     }
   }
-  const pull = g.myPart2 >= 0 ? 0.16 : 0.1;
-  other.vx += (pa.vx - other.vx) * pull;
-  other.vz += (pa.vz - other.vz) * pull;
-  a.vx -= (pa.vx - other.vx) * pull * 0.35 * (other.mass / (a.mass + other.mass));
-  a.vz -= (pa.vz - other.vz) * pull * 0.35 * (other.mass / (a.mass + other.mass));
+  const pull = g.myPart2 >= 0 ? 0.22 : 0.14;
+  const ma = Math.max(1, a.mass);
+  const mb = Math.max(1, other.mass);
+  const tot = ma + mb;
+  const cvx = (a.vx * ma + other.vx * mb) / tot;
+  const cvz = (a.vz * ma + other.vz * mb) / tot;
+  const mix = other.alive && other.body.mode === "stance" ? 0.5 : 0.78;
+  other.vx += (cvx - other.vx) * mix;
+  other.vz += (cvz - other.vz) * mix;
+  a.vx += (cvx - a.vx) * mix * (mb / tot);
+  a.vz += (cvz - a.vz) * mix * (mb / tot);
+  const hx = pb.x - pa.x;
+  const hz = pb.z - pa.z;
+  const hd = Math.hypot(hx, pb.y - pa.y, hz);
+  if (hd > g.rest + 0.06) {
+    const extra = hd - g.rest;
+    const nx = hx / (Math.hypot(hx, hz) || 1);
+    const nz = hz / (Math.hypot(hx, hz) || 1);
+    a.x += nx * extra * (mb / tot) * 0.5;
+    a.z += nz * extra * (mb / tot) * 0.5;
+    other.x -= nx * extra * (ma / tot) * 0.5;
+    other.z -= nz * extra * (ma / tot) * 0.5;
+  }
+  if (other.plantPart >= 0 && other.alive && other.body.mode === "stance") {
+    a.vx *= 0.97;
+    a.vz *= 0.97;
+  } else {
+    other.vx += (pa.vx - other.vx) * pull;
+    other.vz += (pa.vz - other.vz) * pull;
+  }
   if (other.body.parts[P.shinL]!.y < 0.22 && Math.hypot(other.vx, other.vz) > 1.2) {
     w.tracks.push({ x: other.x, z: other.z, t: w.time, actorId: other.id, kind: "drag", heading: a.yaw });
   }
@@ -1202,6 +1314,7 @@ export function stepBodies(w: World, dt: number) {
   for (const a of w.actors) {
     if (!a.body) continue;
     syncMode(a);
+    updatePlant(a);
     a.body.lastVn *= 0.85;
     if (a.body.mode === "stance") {
       const t = poseTargets(a);

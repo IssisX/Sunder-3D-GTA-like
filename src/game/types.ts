@@ -262,6 +262,9 @@ export interface Actor {
   hitNx: number;
   hitNz: number;
   pinnedId: number;
+  plantPart: number;
+  plantX: number;
+  plantZ: number;
   body?: Physique;
 }
 

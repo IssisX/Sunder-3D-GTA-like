@@ -257,6 +257,9 @@ export class World {
       hitNx: 0,
       hitNz: 0,
       pinnedId: 0,
+      plantPart: -1,
+      plantX: 0,
+      plantZ: 0,
       ...partial,
     };
     a.px = a.x;

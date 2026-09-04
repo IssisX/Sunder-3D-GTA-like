@@ -318,6 +318,7 @@ function TouchControls({
         </div>
         <div className="flex gap-2">
           <ActionBtn id="grab" label="Grab" onVirtual={onVirtual} />
+          <ActionBtn id="drop" label="Drop" onVirtual={onVirtual} />
           <ActionBtn id="attack" label="Strike" onVirtual={onVirtual} large />
         </div>
         <div className="flex gap-2">

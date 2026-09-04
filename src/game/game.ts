@@ -3,7 +3,7 @@ import { World, injurySum, clamp, facing, rightOf } from "./world";
 import { Input, isTouchDevice } from "./input";
 import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
-import { hintFor, stepWorld, type Cam } from "./sim";
+import { hintFor, stepWorld, dropHeld, ensureWeaponProp, dropWeapon, type Cam } from "./sim";
 import { View } from "./render";
 import { clearSave, loadSave, writeSave } from "./save";
 import { ensureBodies, reposeActor, applyImpulseToNearest, strikeDuration, KICK_DUR, GRAB_DUR, FLINCH_DUR, P, weaponEnds, setGrab } from "./physique";
@@ -397,9 +397,25 @@ export class Game {
       setWeapon: (kind: string) => {
         const p = self.world.player();
         if (kind === "fist" || kind === "knife" || kind === "club" || kind === "spear" || kind === "torch" || kind === "board" || kind === "pitchfork") {
-          p.weapon = kind;
-          p.torchLit = kind === "torch";
+          if (kind === "fist") dropWeapon(self.world, p, 0.2);
+          else {
+            p.weapon = kind;
+            p.torchLit = kind === "torch";
+            ensureWeaponProp(self.world, p);
+          }
         }
+      },
+      forceDrop: () => {
+        const p = self.world.player();
+        if (self.world.phase !== "playing") {
+          self.world.phase = "playing";
+          self.hud.phase = "playing";
+          self.input.enabled = true;
+        }
+        const id = p.weaponProp || p.grabbedId;
+        dropHeld(self.world, p, 1);
+        const pr = id ? self.world.prop(id) : undefined;
+        return { id, heldBy: pr?.heldBy ?? 0, weapon: p.weapon, x: pr?.x, y: pr?.y, z: pr?.z };
       },
       forceFlinch: (dir?: string) => {
         const p = self.world.player();
@@ -486,6 +502,12 @@ export class Game {
           hand && hn > 0.1 ? ((hand.x - p.x) * -p.hitNx + (hand.z - p.z) * -p.hitNz) / hn : 0;
         const mesh = self.view.actorMap.get(p.id);
         const wepMesh = mesh?.userData?.parts?.wep as { children?: unknown[]; userData?: { kind?: string } } | undefined;
+        let nearWep: { id: number; kind: string; d: number; heldBy: number; y: number } | null = null;
+        for (const pr of self.world.props) {
+          if (!pr.weapon) continue;
+          const d = Math.hypot(pr.x - p.x, pr.z - p.z);
+          if (!nearWep || d < nearWep.d) nearWep = { id: pr.id, kind: pr.weapon, d, heldBy: pr.heldBy, y: pr.y };
+        }
         return {
           strikeT: p.strikeT,
           kickT: p.kickT,
@@ -518,6 +540,16 @@ export class Game {
           hands: !!(mesh?.userData?.parts?.lhand && mesh?.userData?.parts?.rhand),
           feet: !!(mesh?.userData?.parts?.lfoot && mesh?.userData?.parts?.rfoot),
           meshRev: mesh?.userData?.rev ?? 0,
+          plant: p.plantPart,
+          plantDist: p.plantPart >= 0 ? Math.hypot(p.plantX - p.x, p.plantZ - p.z) : 0,
+          shinLY: p.body?.parts[8] ? p.body.parts[8]!.y - p.y : 0,
+          shinRY: p.body?.parts[10] ? p.body.parts[10]!.y - p.y : 0,
+          weaponProp: p.weaponProp,
+          wepHeldBy: p.weaponProp ? (self.world.prop(p.weaponProp)?.heldBy ?? 0) : 0,
+          wepOnGround: p.weaponProp ? !self.world.prop(p.weaponProp)?.heldBy : false,
+          carry: p.carry,
+          spd: Math.hypot(p.vx, p.vz),
+          nearWep,
         };
       },
       forceInjure: (region?: string, kind?: string) => {
@@ -610,6 +642,7 @@ declare global {
       forceInjure?: (region?: string, kind?: string) => void;
       forceVictim?: () => boolean;
       setWeapon?: (kind: string) => void;
+      forceDrop?: () => unknown;
       getCombat?: () => unknown;
       setKeys?: (codes: string[]) => void;
       setSteer?: (v: number) => void;

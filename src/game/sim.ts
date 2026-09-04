@@ -39,6 +39,7 @@ import {
   actionUnit,
   GRAB_DUR,
   FLINCH_DUR,
+  P,
 } from "./physique";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
@@ -79,6 +80,9 @@ function accelFor(s: string) {
 export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playing: boolean) {
   w.events.length = 0;
   ensureBodies(w);
+  for (const a of w.actors) {
+    if (a.weapon !== "fist") ensureWeaponProp(w, a);
+  }
   stepClock(w, dt);
   for (const a of w.actors) {
     a.px = a.x;
@@ -147,12 +151,16 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   const leg =
     1 -
     clamp(injurySum(p.injuries.lleg) + injurySum(p.injuries.rleg), 0, 1.6) * 0.35;
-  const load = 1 / (1 + p.carry / 90);
+  const load = 1 / (1 + p.carry / Math.max(40, p.mass));
   const mud = surfaceAt(w, p.x, p.z) === "mud" ? 0.72 : 1;
   let max = p.crouch ? 1.5 : 3.45;
   if (input.sprint && p.stamina > 0.08 && wishMag > 0.2 && !p.crouch) max = 6.6;
   max *= leg * load * mud * (0.55 + p.consciousness * 0.45) * (1 - p.fatigue * 0.35);
-  if (p.grabbedId) max *= 0.55;
+  if (p.grabbedId && w.actor(p.grabbedId)) {
+    const o = w.actor(p.grabbedId)!;
+    const plant = o.plantPart >= 0 && o.alive ? 1.15 : 0.75;
+    max *= p.mass / (p.mass + o.mass * plant);
+  } else if (p.grabbedId) max *= 0.55;
   p.intendSpeed = wishMag * max;
   if (p.strikeT > 0 || p.kickT > 0 || p.shoveT > 0 || p.grabT > 0) p.intendSpeed *= 0.32;
 
@@ -247,7 +255,7 @@ function tryIgnite(w: World, p: Actor) {
   }
 }
 
-function dropHeld(w: World, p: Actor, throwMul: number) {
+export function dropHeld(w: World, p: Actor, throwMul: number) {
   if (p.grabbedId) {
     const t = w.actor(p.grabbedId) || w.prop(p.grabbedId);
     if (t && "mass" in t) {
@@ -280,6 +288,107 @@ function dropHeld(w: World, p: Actor, throwMul: number) {
     w.emitSound(p.x, p.z, 0.5, "whoosh", p.id);
     return;
   }
+  if (p.weapon !== "fist") dropWeapon(w, p, throwMul);
+}
+
+function weaponKindOf(pr: Prop): WeaponKind | null {
+  if (pr.weapon) return pr.weapon;
+  if (pr.kind === "lamp") return "torch";
+  if (pr.kind === "board") return "board";
+  return null;
+}
+
+function wepPropDims(kind: WeaponKind) {
+  if (kind === "knife") return { sx: 0.06, sy: 0.04, sz: 0.34, mass: 0.5, color: 0x888480, material: "metal" as const };
+  if (kind === "club") return { sx: 0.1, sy: 0.1, sz: 0.95, mass: 2.4, color: 0x5a4430, material: "wood" as const };
+  if (kind === "spear") return { sx: 0.06, sy: 0.06, sz: 1.55, mass: 1.8, color: 0x6b4e32, material: "wood" as const };
+  if (kind === "pitchfork") return { sx: 0.08, sy: 0.08, sz: 1.4, mass: 2.2, color: 0x6b4e32, material: "wood" as const };
+  if (kind === "torch") return { sx: 0.08, sy: 0.08, sz: 0.62, mass: 1.1, color: 0x5a4430, material: "wood" as const };
+  if (kind === "board") return { sx: 0.22, sy: 0.05, sz: 0.92, mass: 2.0, color: 0x5a4434, material: "wood" as const };
+  return { sx: 0.1, sy: 0.1, sz: 0.6, mass: 1, color: 0x5a4430, material: "wood" as const };
+}
+
+export function ensureWeaponProp(w: World, a: Actor): Prop | null {
+  if (a.weapon === "fist") return null;
+  if (a.weaponProp) {
+    const pr = w.prop(a.weaponProp);
+    if (pr && (pr.weapon === a.weapon || weaponKindOf(pr) === a.weapon)) {
+      pr.heldBy = a.id;
+      pr.weapon = a.weapon;
+      return pr;
+    }
+  }
+  const d = wepPropDims(a.weapon);
+  const hold = a.body ? a.body.parts[6] : null;
+  const pr = w.addProp({
+    kind: a.weapon === "torch" ? "lamp" : a.weapon === "board" ? "board" : "weapon",
+    material: d.material,
+    x: hold ? hold.x : a.x,
+    y: hold ? hold.y : a.y + 1,
+    z: hold ? hold.z : a.z,
+    sx: d.sx,
+    sy: d.sy,
+    sz: d.sz,
+    mass: d.mass,
+    hp: 22,
+    weapon: a.weapon,
+    color: d.color,
+    flammable: a.weapon !== "knife",
+    fuel: a.weapon === "torch" ? 3 : 2,
+    oil: a.weapon === "torch",
+    anchored: false,
+    dynamic: true,
+    heldBy: a.id,
+  });
+  a.weaponProp = pr.id;
+  return pr;
+}
+
+export function dropWeapon(w: World, a: Actor, throwMul: number) {
+  if (a.weapon === "fist") return;
+  const pr = ensureWeaponProp(w, a);
+  a.weapon = "fist";
+  a.torchLit = false;
+  a.weaponProp = 0;
+  if (!pr) return;
+  const f = facing(a.yaw);
+  const hold = a.body ? a.body.parts[6] : null;
+  pr.heldBy = 0;
+  pr.dynamic = true;
+  pr.anchored = false;
+  if (hold) {
+    pr.x = hold.x + f.x * 0.12;
+    pr.y = hold.y;
+    pr.z = hold.z + f.z * 0.12;
+    pr.vx = hold.vx + f.x * 3.2 * throwMul + a.vx;
+    pr.vy = hold.vy + 1.6 * throwMul;
+    pr.vz = hold.vz + f.z * 3.2 * throwMul + a.vz;
+  } else {
+    pr.x = a.x + f.x * 0.45;
+    pr.y = a.y + 1.05;
+    pr.z = a.z + f.z * 0.45;
+    pr.vx = a.vx + f.x * 3.2 * throwMul;
+    pr.vy = 2.2 * throwMul;
+    pr.vz = a.vz + f.z * 3.2 * throwMul;
+  }
+  pr.yaw = a.yaw;
+  w.emitSound(pr.x, pr.z, 0.35, "weapon", a.id);
+}
+
+function equipWeapon(w: World, a: Actor, pr: Prop) {
+  const kind = weaponKindOf(pr);
+  if (!kind) return false;
+  if (a.weaponProp && a.weaponProp !== pr.id) dropWeapon(w, a, 0.15);
+  a.weapon = kind;
+  a.weaponProp = pr.id;
+  if (kind === "torch" && pr.kind === "lamp") a.torchLit = true;
+  pr.weapon = kind;
+  pr.heldBy = a.id;
+  pr.dynamic = true;
+  pr.anchored = false;
+  a.grabT = 0;
+  w.emitSound(a.x, a.z, 0.3, "grab", a.id);
+  return true;
 }
 
 function stepPerception(w: World, dt: number) {
@@ -1005,7 +1114,7 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
     const t = w.actor(a.grabbedId);
     const pr = t ? null : w.prop(a.grabbedId);
     if (t) {
-      if (!t.alive) a.carry = t.mass * 0.7;
+      if (!t.alive) a.carry = t.mass;
       if (t.body) {
         const two = t.mass > a.mass * 0.62 || !t.alive || t.body.mode !== "stance";
         if (!a.body?.grab || (two && a.body.grab.myPart2 < 0)) setGrab(a, t);
@@ -1073,6 +1182,21 @@ function stepGrab(w: World, dt: number, input: Actions | null) {
       clearGrab(a);
     }
   }
+  for (const a of w.actors) {
+    if (!a.weaponProp) continue;
+    const pr = w.prop(a.weaponProp);
+    if (!pr || pr.heldBy !== a.id) continue;
+    const hand = a.body?.parts[6];
+    if (hand) {
+      pr.x = hand.x;
+      pr.y = hand.y;
+      pr.z = hand.z;
+      pr.vx = hand.vx;
+      pr.vy = hand.vy;
+      pr.vz = hand.vz;
+      pr.yaw = a.yaw;
+    }
+  }
 }
 
 function tryLockGrab(w: World, a: Actor) {
@@ -1133,7 +1257,7 @@ function tryLockGrab(w: World, a: Actor) {
       o.hitNx = dx / d;
       o.hitNz = dz / d;
     }
-    a.carry = o.mass * (o.mass > a.mass * 0.62 || !o.alive ? 0.7 : 0.42);
+    a.carry = o.mass;
     setGrab(a, o);
     if (!o.alive || o.consciousness < 0.22) {
       o.loco = "ragdoll";
@@ -1143,14 +1267,12 @@ function tryLockGrab(w: World, a: Actor) {
     w.emitSound(a.x, a.z, 0.4, "grab", a.id);
   } else {
     const pr = best as Prop;
+    if (equipWeapon(w, a, pr)) return;
     a.grabbedId = pr.id;
     pr.heldBy = a.id;
     pr.dynamic = true;
     pr.anchored = false;
     a.carry = pr.mass;
-    if (pr.weapon) a.weapon = pr.weapon;
-    if (pr.kind === "lamp") a.weapon = "torch";
-    if (pr.kind === "board") a.weapon = "board";
     w.emitSound(a.x, a.z, 0.3, "grab", a.id);
   }
 }
@@ -1188,7 +1310,14 @@ function stepLocomotion(w: World, dt: number) {
       a.intendSpeed *= 0.4;
       if (a.locoT <= 0) a.loco = "idle";
     }
-    if (a.grabbedBy) a.intendSpeed *= 0.62;
+    if (a.grabbedBy) a.intendSpeed *= 0.22;
+    if (a.grabbedId) {
+      const o = w.actor(a.grabbedId);
+      if (o) {
+        const plant = o.plantPart >= 0 && o.alive ? 1.15 : 0.7;
+        a.intendSpeed *= a.mass / (a.mass + o.mass * plant);
+      } else a.intendSpeed *= 0.55;
+    }
     if (a.kind !== "player") {
       const limp = 1 - clamp(injurySum(a.injuries.lleg) + injurySum(a.injuries.rleg), 0, 1.8) * 0.28;
       a.intendSpeed *= limp;
@@ -1231,8 +1360,20 @@ function stepPhysics(w: World, dt: number) {
     if (a.loco !== "ragdoll") {
       const wishX = a.intendX * a.intendSpeed;
       const wishZ = a.intendZ * a.intendSpeed;
-      a.vx += (wishX - a.vx) * (1 - Math.exp(-dt * acc * 0.25));
-      a.vz += (wishZ - a.vz) * (1 - Math.exp(-dt * acc * 0.25));
+      let plantMul = 1;
+      if (a.body && a.body.mode === "stance") {
+        if (a.plantPart === P.shinL || a.plantPart === P.shinR) {
+          const inj =
+            a.plantPart === P.shinL
+              ? injurySum(a.injuries.lleg) + a.injuries.lleg.fracture
+              : injurySum(a.injuries.rleg) + a.injuries.rleg.fracture;
+          plantMul = 0.38 + 0.62 * (1 - clamp(inj, 0, 1));
+        } else if (a.grounded && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint")) {
+          plantMul = 0.42;
+        }
+      }
+      a.vx += (wishX - a.vx) * (1 - Math.exp(-dt * acc * 0.25 * plantMul));
+      a.vz += (wishZ - a.vz) * (1 - Math.exp(-dt * acc * 0.25 * plantMul));
       if (a.intendSpeed < 0.1) {
         a.vx *= Math.exp(-dt * fr);
         a.vz *= Math.exp(-dt * fr);
@@ -1559,6 +1700,7 @@ function kill(w: World, a: Actor, cause: string) {
   a.consciousness = 0;
   a.intendSpeed = 0;
   if (a.body) a.body.mode = "ragdoll";
+  dropWeapon(w, a, 0.25);
   w.emitSound(a.x, a.z, 0.6, "impact", a.id);
   if (a.kind === "player") {
     if (w.phase === "title") return;

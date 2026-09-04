@@ -6,6 +6,7 @@ import type { Cam } from "./sim";
 import { P, weaponEnds } from "./physique";
 
 const MESH_REV = 4;
+const PROP_REV = 2;
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
@@ -303,24 +304,36 @@ export class View {
   }
 
   private ensureProp(p: Prop) {
-    if (this.propMap.has(p.id)) return;
-    const color = p.color;
-    const mesh = new THREE.Mesh(GEO.box, mat(color, { map: p.material === "wood" || p.kind === "stall" ? this.woodTex : null }));
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.scale.set(p.sx, p.sy, p.sz);
-    const g = new THREE.Group();
-    mesh.position.y = p.sy * 0.5;
-    g.add(mesh);
-    if (p.kind === "lamp") {
-      const flame = new THREE.Mesh(GEO.sphere, new THREE.MeshBasicMaterial({ color: 0xffdd88 }));
-      flame.scale.set(0.12, 0.16, 0.12);
-      flame.position.y = p.sy + 0.12;
-      flame.name = "flame";
-      g.add(flame);
+    const old = this.propMap.get(p.id);
+    const wepKind = p.weapon;
+    if (old && old.userData.rev === PROP_REV && old.userData.kind === (wepKind ?? p.kind)) return;
+    if (old) {
+      this.scene.remove(old);
+      this.propMap.delete(p.id);
     }
-    if (p.kind === "chest") {
-      mesh.material = mat(0x3d2a14, { metalness: 0.15, roughness: 0.6 });
+    const g = new THREE.Group();
+    g.userData.rev = PROP_REV;
+    if (wepKind) {
+      rebuildHeldWeapon(g, wepKind, false, false);
+    } else {
+      const color = p.color;
+      const mesh = new THREE.Mesh(GEO.box, mat(color, { map: p.material === "wood" || p.kind === "stall" ? this.woodTex : null }));
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.scale.set(p.sx, p.sy, p.sz);
+      mesh.position.y = p.sy * 0.5;
+      g.add(mesh);
+      g.userData.kind = p.kind;
+      if (p.kind === "lamp") {
+        const flame = new THREE.Mesh(GEO.sphere, new THREE.MeshBasicMaterial({ color: 0xffdd88 }));
+        flame.scale.set(0.12, 0.16, 0.12);
+        flame.position.y = p.sy + 0.12;
+        flame.name = "flame";
+        g.add(flame);
+      }
+      if (p.kind === "chest") {
+        mesh.material = mat(0x3d2a14, { metalness: 0.15, roughness: 0.6 });
+      }
     }
     g.position.set(p.x, p.y, p.z);
     g.rotation.y = p.yaw;
@@ -514,8 +527,8 @@ export class View {
     }
     if (wep) {
       const hold = weaponEnds(a);
-      wep.visible = !!hold;
-      if (hold) {
+      wep.visible = !!hold && !a.weaponProp;
+      if (hold && !a.weaponProp) {
         if (wep.userData.kind !== a.weapon || wep.userData.lit !== a.torchLit) {
           rebuildHeldWeapon(wep, a.weapon, a.torchLit, a.kind === "player");
         }
@@ -594,10 +607,46 @@ export class View {
       const x = p.px + (p.x - p.px) * alpha;
       const y = p.py + (p.y - p.py) * alpha;
       const z = p.pz + (p.z - p.pz) * alpha;
+      const holder = p.heldBy ? w.actor(p.heldBy) : undefined;
+      const wepKind = p.weapon;
+      if (holder && wepKind && holder.weaponProp === p.id) {
+        const hold = weaponEnds(holder);
+        const lit = !!holder.torchLit && wepKind === "torch";
+        if (hold) {
+          if (m.userData.kind !== wepKind || m.userData.lit !== lit) {
+            rebuildHeldWeapon(m, wepKind, lit, holder.kind === "player");
+          }
+          placeHeldWeapon(m, hold);
+          m.visible = true;
+          const flame = m.getObjectByName("flame");
+          if (flame) {
+            const flick = 0.82 + Math.sin(performance.now() * 0.018 + p.id) * 0.2;
+            flame.scale.set(flick, flick * 1.15, flick);
+            flame.visible = lit;
+          }
+          continue;
+        }
+      }
+      if (wepKind) {
+        if (m.userData.kind !== wepKind) rebuildHeldWeapon(m, wepKind, false, false);
+        const len = Math.max(0.34, p.sz);
+        const fx = -Math.sin(p.yaw);
+        const fz = -Math.cos(p.yaw);
+        placeHeldWeapon(m, {
+          ax: x,
+          ay: Math.max(0.04, y + 0.03),
+          az: z,
+          bx: x + fx * len,
+          by: Math.max(0.04, y + 0.03),
+          bz: z + fz * len,
+        });
+        m.visible = !p.heldBy;
+        continue;
+      }
       m.position.set(x, y, z);
       m.rotation.y = p.yaw;
       m.rotation.z = p.collapsed ? 0.8 : 0;
-      m.visible = !p.heldBy;
+      m.visible = true;
       if (p.kind === "lamp") {
         const fl = m.getObjectByName("flame");
         if (fl) fl.visible = !p.collapsed;
