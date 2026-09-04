@@ -24,15 +24,15 @@ const MAX_DT = 1 / 30;
 // reaction from the ground into the pelvis/torso instead of simply sliding the
 // entire rig as one kinematic object.
 const DRIVE_WEIGHT = new Float32Array([
-  1.0, // pelvis
-  0.96, // chest
-  0.84, // head
-  0.86, 0.86, // shoulders
-  0.78, 0.78, // elbows
-  0.7, 0.7, // hands
-  0.92, 0.92, // hips
-  0.72, 0.72, // knees
-  0.58, 0.58, // feet; supported feet are reduced further below
+  1.14, // pelvis
+  1.08, // chest
+  0.9, // head
+  0.94, 0.94, // shoulders
+  0.84, 0.84, // elbows
+  0.74, 0.74, // hands
+  1.02, 1.02, // hips
+  0.78, 0.78, // knees
+  0.6, 0.6, // feet; supported feet are reduced further below
 ]);
 
 function clamp01(v: number) {
@@ -90,9 +90,9 @@ export class SupportMotionController {
     let targetVz = a.intendZ * Math.max(0, a.intendSpeed);
     const rootErrX = a.x - rig.x[BODY.pelvis]!;
     const rootErrZ = a.z - rig.z[BODY.pelvis]!;
-    const errGain = a.kind === "player" ? 7.5 : 5.2;
-    targetVx += clamp(rootErrX * errGain, -1.5 * scale, 1.5 * scale);
-    targetVz += clamp(rootErrZ * errGain, -1.5 * scale, 1.5 * scale);
+    const errGain = a.kind === "player" ? 9.5 : 6.2;
+    targetVx += clamp(rootErrX * errGain, -2.1 * scale, 2.1 * scale);
+    targetVz += clamp(rootErrZ * errGain, -2.1 * scale, 2.1 * scale);
 
     // A bare-fist strike recruits a small legitimate ground reaction into the
     // punch. This is not an animation shove: it is available only through
@@ -122,27 +122,31 @@ export class SupportMotionController {
     }
     if (handReach > 0) {
       const recruitment = clamp01(handReach / (0.58 * scale));
-      targetVx += fx * recruitment * 0.34 * scale;
-      targetVz += fz * recruitment * 0.34 * scale;
+      targetVx += fx * recruitment * 0.42 * scale;
+      targetVz += fz * recruitment * 0.42 * scale;
     }
 
+    // The player already requests a normal 3.45 m/s walk in sim.ts. The prior
+    // support envelope was too weak to let the physical COM actually reach that
+    // request. This response is intentionally quicker while remaining limited
+    // by real support, grip, leg integrity and control authority.
     const response =
       mode === "stumble"
-        ? 0.2
+        ? 0.16
         : mode === "recover"
-          ? 0.16
+          ? 0.13
           : a.kind === "player"
-            ? 0.095
-            : 0.14;
+            ? 0.055
+            : 0.085;
     let ax = (targetVx - this.state.velX) / response;
     let az = (targetVz - this.state.velZ) / response;
 
-    const supportFactor = supportCount >= 2 ? 1 : 0.74;
+    const supportFactor = supportCount >= 2 ? 1 : 0.78;
     const fatigue = 1 - clamp01(a.fatigue) * 0.34;
     const control = 0.5 + this.state.consciousness * 0.5;
     const traction =
       GRAVITY *
-      (0.34 + this.state.grip * 0.74) *
+      (0.62 + this.state.grip * 1.48) *
       supportFactor *
       this.state.legIntegrity *
       fatigue *
@@ -170,8 +174,8 @@ export class SupportMotionController {
 
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
       let weight = DRIVE_WEIGHT[node]!;
-      if (node === BODY.lFoot && this.state.leftSupported) weight = 0.06;
-      else if (node === BODY.rFoot && this.state.rightSupported) weight = 0.06;
+      if (node === BODY.lFoot && this.state.leftSupported) weight = 0.045;
+      else if (node === BODY.rFoot && this.state.rightSupported) weight = 0.045;
 
       rig.px[node] -= dvx * h * weight;
       rig.pz[node] -= dvz * h * weight;
