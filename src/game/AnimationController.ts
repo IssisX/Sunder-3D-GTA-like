@@ -1,10 +1,20 @@
-import * as THREE from "three";
 import type { Actions } from "./input";
 import type { Actor } from "./types";
+import { GRAVITY } from "./types";
 import type { World } from "./world";
 import { BODY, type BodyRig } from "./body";
-import { bodyScale } from "./body-model";
+import { bodyScale, nodeRadius } from "./body-model";
+import { supportHeight } from "./body-contacts";
 import { AnimatedPhysicalBodies } from "./body-actions";
+import {
+  bodyTaskTargets,
+  TASK_PRIORITY,
+} from "./body-task-targets";
+import {
+  makeMechanicalState,
+  sampleMechanicalState,
+  type MechanicalState,
+} from "./mechanical-state";
 
 const TAU = Math.PI * 2;
 const MAX_DT = 1 / 30;
@@ -55,6 +65,14 @@ function calmCrowdAI(a: Actor) {
   );
 }
 
+/**
+ * Locomotion/task generator only.
+ *
+ * This class no longer moves articulated nodes after physics. It observes the
+ * solved body, advances gait phase from actual root displacement, and writes
+ * pre-solve whole-body targets. ActiveBodyControl is the sole consumer that
+ * turns those targets into bounded physical actuation.
+ */
 export class AnimationController extends AnimatedPhysicalBodies {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
   private readonly phase = new Float32Array(ANIM_CAP);
@@ -74,16 +92,14 @@ export class AnimationController extends AnimatedPhysicalBodies {
   private readonly rAnchorX = new Float32Array(ANIM_CAP);
   private readonly rAnchorY = new Float32Array(ANIM_CAP);
   private readonly rAnchorZ = new Float32Array(ANIM_CAP);
+  private readonly lPoleX = new Float32Array(ANIM_CAP);
+  private readonly lPoleZ = new Float32Array(ANIM_CAP);
+  private readonly rPoleX = new Float32Array(ANIM_CAP);
+  private readonly rPoleZ = new Float32Array(ANIM_CAP);
 
+  private readonly mech: MechanicalState = makeMechanicalState();
   private slotCount = 0;
   private playerActionBlockT = 0;
-
-  private readonly v0 = new THREE.Vector3();
-  private readonly v1 = new THREE.Vector3();
-  private readonly v2 = new THREE.Vector3();
-  private readonly v3 = new THREE.Vector3();
-  private readonly q0 = new THREE.Quaternion();
-  private readonly e0 = new THREE.Euler(0, 0, 0, "XYZ");
 
   constructor() {
     super();
@@ -92,6 +108,7 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
   override bootstrap(w: World) {
     super.bootstrap(w);
+    bodyTaskTargets.bootstrap(w);
     this.slotById.fill(-1);
     this.slotCount = 0;
     for (let i = 0; i < w.actors.length; i++) {
@@ -103,6 +120,7 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
   override clear() {
     super.clear();
+    bodyTaskTargets.clear();
     this.slotById.fill(-1);
     this.slotCount = 0;
     this.playerActionBlockT = 0;
@@ -144,12 +162,36 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
   prepareStep(w: World, dt: number) {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
+    bodyTaskTargets.beginStep();
 
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
       if (!human(a)) continue;
-      const slot = this.slot(a.id);
-      if (slot < 0 || !locomotionEligible(a)) continue;
+      let slot = this.slot(a.id);
+      if (slot < 0) {
+        this.register(a);
+        slot = this.slot(a.id);
+      }
+      if (slot < 0) continue;
+
+      // Gait phase is driven by the displacement the authoritative body really
+      // achieved last step, not by elapsed animation time.
+      const traveled = Math.hypot(
+        a.x - this.lastX[slot]!,
+        a.z - this.lastZ[slot]!,
+      );
+      this.lastX[slot] = a.x;
+      this.lastZ[slot] = a.z;
+      const oldStride = lerp(0.54, 1.08, this.runBlend[slot]!) * bodyScale(a);
+      if (traveled > 1e-5 && oldStride > 1e-5) {
+        const adv = Math.min(1.15, (traveled / oldStride) * TAU);
+        let p = this.phase[slot]! + adv;
+        if (p >= TAU) p -= TAU * Math.floor(p / TAU);
+        this.phase[slot] = p;
+      }
+      a.walkPhase = this.phase[slot]!;
+
+      if (!locomotionEligible(a)) continue;
 
       let desiredX = a.intendX;
       let desiredZ = a.intendZ;
@@ -159,34 +201,28 @@ export class AnimationController extends AnimatedPhysicalBodies {
       if (calmCrowdAI(a)) {
         let avoidX = 0;
         let avoidZ = 0;
-
         for (let j = 0; j < w.actors.length; j++) {
           if (j === i) continue;
           const b = w.actors[j]!;
           if (!human(b) || !b.alive || b.grabbedBy) continue;
-
           let dx = a.x - b.x;
           let dz = a.z - b.z;
           const personal = (a.radius + b.radius) * 1.65;
           let d2 = dx * dx + dz * dz;
           if (d2 >= personal * personal) continue;
-
           if (d2 < 1e-8) {
-            const s = ((a.id * 73856093) ^ (b.id * 19349663)) & 1 ? 1 : -1;
-            dx = s;
+            const sign = ((a.id * 73856093) ^ (b.id * 19349663)) & 1 ? 1 : -1;
+            dx = sign;
             dz = ((a.id + b.id) & 1) ? 0.5 : -0.5;
             d2 = dx * dx + dz * dz;
           }
-
           const d = Math.sqrt(d2);
-          const inv = 1 / d;
           const q = 1 - d / personal;
           const wgt = q * q;
-          avoidX += dx * inv * wgt;
-          avoidZ += dz * inv * wgt;
+          avoidX += (dx / d) * wgt;
+          avoidZ += (dz / d) * wgt;
           pressure += wgt;
         }
-
         if (pressure > 0) {
           const am = Math.hypot(avoidX, avoidZ);
           if (am > 1e-6) {
@@ -196,15 +232,10 @@ export class AnimationController extends AnimatedPhysicalBodies {
             desiredX = desiredX * (1 - steer) + avoidX * steer;
             desiredZ = desiredZ * (1 - steer) + avoidZ * steer;
           }
-
-          const crowdBrake = clamp01(pressure * 0.72);
-          desiredSpeed *= 1 - crowdBrake * 0.86;
-          if (a.ai === "work" && pressure > 0.28) {
-            desiredSpeed = Math.min(desiredSpeed, 0.32);
-          }
+          desiredSpeed *= 1 - clamp01(pressure * 0.72) * 0.86;
+          if (a.ai === "work" && pressure > 0.28) desiredSpeed = Math.min(desiredSpeed, 0.32);
         }
       }
-
       this.crowdPressure[slot] = pressure;
 
       let dm = Math.hypot(desiredX, desiredZ);
@@ -216,8 +247,7 @@ export class AnimationController extends AnimatedPhysicalBodies {
         desiredZ = this.dirZ[slot]!;
       }
 
-      const dirRate = a.kind === "player" ? 20 : 9;
-      const dk = 1 - Math.exp(-h * dirRate);
+      const dk = 1 - Math.exp(-h * (a.kind === "player" ? 20 : 9));
       let sx = this.dirX[slot]! + (desiredX - this.dirX[slot]!) * dk;
       let sz = this.dirZ[slot]! + (desiredZ - this.dirZ[slot]!) * dk;
       dm = Math.hypot(sx, sz);
@@ -232,136 +262,37 @@ export class AnimationController extends AnimatedPhysicalBodies {
       const speedRate = desiredSpeed > current
         ? (a.kind === "player" ? 24 : 12)
         : (a.kind === "player" ? 30 : 17);
-      const sk = 1 - Math.exp(-h * speedRate);
-      const root = current + (Math.max(0, desiredSpeed) - current) * sk;
+      const root = current + (Math.max(0, desiredSpeed) - current) *
+        (1 - Math.exp(-h * speedRate));
       this.rootSpeed[slot] = root;
-
       const rbTarget = clamp01((root - 1.55) / 3.65);
-      this.runBlend[slot] +=
-        (rbTarget - this.runBlend[slot]!) *
+      this.runBlend[slot] += (rbTarget - this.runBlend[slot]!) *
         (1 - Math.exp(-h * 9));
 
       a.intendX = sx;
       a.intendZ = sz;
       a.intendSpeed = root;
 
-      const recentlyHit = w.time - a.lastHitT < 0.18;
-      const actionLocked =
-        a.strikeT > 0 ||
-        a.kickT > 0 ||
-        a.shoveT > 0 ||
-        Boolean(a.grabbedId);
-
-      if (!recentlyHit && !actionLocked) {
-        const vk = 1 - Math.exp(-h * (a.kind === "player" ? 18 : 11));
-        a.vx += (sx * root - a.vx) * vk;
-        a.vz += (sz * root - a.vz) * vk;
-      }
+      const rig = this.get(a);
+      if (!rig?.initialized || rig.mode !== "follow") continue;
+      this.writeLocomotionTasks(w, a, rig, slot);
     }
   }
 
   override step(w: World, dt: number) {
     const h = dt < MIN_DT ? MIN_DT : dt > MAX_DT ? MAX_DT : dt;
+    // PhysicalBodies consumes all targets through ActiveBodyControl here.
+    // No locomotion pose or IK may touch solved nodes after this call.
     super.step(w, h);
     this.playerActionBlockT = Math.max(0, this.playerActionBlockT - h);
-
-    for (let i = 0; i < w.actors.length; i++) {
-      const a = w.actors[i]!;
-      if (!human(a)) continue;
-      const slot = this.slot(a.id);
-      if (slot < 0) continue;
-
-      const dx = a.x - this.lastX[slot]!;
-      const dz = a.z - this.lastZ[slot]!;
-      const traveled = Math.hypot(dx, dz);
-      this.lastX[slot] = a.x;
-      this.lastZ[slot] = a.z;
-
-      const rb = this.runBlend[slot]!;
-      const stride = lerp(0.54, 1.08, rb) * bodyScale(a);
-      if (traveled > 1e-5 && stride > 1e-5) {
-        const adv = Math.min(1.15, (traveled / stride) * TAU);
-        let p = this.phase[slot]! + adv;
-        if (p >= TAU) p -= TAU * Math.floor(p / TAU);
-        this.phase[slot] = p;
-      }
-      a.walkPhase = this.phase[slot]!;
-
-      if (calmCrowdAI(a) && this.crowdPressure[slot]! > 0.2) {
-        const speed = Math.hypot(a.vx, a.vz);
-        if (speed < 0.42) {
-          a.vx *= 0.38;
-          a.vz *= 0.38;
-          if (Math.abs(a.vx) < 0.018) a.vx = 0;
-          if (Math.abs(a.vz) < 0.018) a.vz = 0;
-        }
-      }
-
-      const rig = this.get(a);
-      if (!rig?.initialized || rig.mode !== "follow") continue;
-
-      const explicitAction =
-        a.strikeT > 0 ||
-        a.kickT > 0 ||
-        a.shoveT > 0 ||
-        Boolean(a.grabbedId) ||
-        Boolean(a.grabbedBy) ||
-        (a.kind === "player" && this.playerActionBlockT > 0);
-
-      if (!locomotionEligible(a) || explicitAction) continue;
-      this.applyLocomotionPose(a, rig, slot);
-    }
   }
 
-  private register(a: Actor) {
-    if (
-      a.id < 0 ||
-      a.id >= ENTITY_ID_CAP ||
-      this.slotCount >= ANIM_CAP
-    ) {
-      return;
-    }
-    const slot = this.slotCount++;
-    this.slotById[a.id] = slot;
-    this.phase[slot] = ((a.id * 0.61803398875) % 1) * TAU;
-    this.lastX[slot] = a.x;
-    this.lastZ[slot] = a.z;
-
-    const fx = -Math.sin(a.yaw);
-    const fz = -Math.cos(a.yaw);
-    this.dirX[slot] = fx;
-    this.dirZ[slot] = fz;
-  }
-
-  private slot(id: number) {
-    if (id < 0 || id >= ENTITY_ID_CAP) return -1;
-    return this.slotById[id]!;
-  }
-
-  private setLocal(
+  private writeLocomotionTasks(
+    w: World,
     a: Actor,
     rig: BodyRig,
-    node: number,
-    lx: number,
-    ly: number,
-    lz: number,
-    strength: number,
+    slot: number,
   ) {
-    if (strength <= 0) return;
-    const scale = bodyScale(a);
-    const fx = -Math.sin(a.yaw);
-    const fz = -Math.cos(a.yaw);
-    const rx = Math.cos(a.yaw);
-    const rz = -Math.sin(a.yaw);
-    const tx = a.x + rx * lx * scale + fx * lz * scale;
-    const ty = a.y + ly * scale;
-    const tz = a.z + rz * lx * scale + fz * lz * scale;
-    rig.x[node] += (tx - rig.x[node]!) * strength;
-    rig.y[node] += (ty - rig.y[node]!) * strength;
-    rig.z[node] += (tz - rig.z[node]!) * strength;
-  }
-
-  private applyLocomotionPose(a: Actor, rig: BodyRig, slot: number) {
     const scale = bodyScale(a);
     const p = this.phase[slot]!;
     const rb = this.runBlend[slot]!;
@@ -387,40 +318,108 @@ export class AnimationController extends AnimatedPhysicalBodies {
     const localSide = moveX * rx + moveZ * rz;
     const bob = Math.cos(p * 2) * lerp(0.008, 0.024, rb) * speedN;
     const sway = Math.sin(p) * lerp(0.012, 0.035, rb) * speedN;
-
     const pitch = -localForward * lerp(0.025, 0.11, rb) * speedN;
     const roll = -localSide * lerp(0.035, 0.1, rb) * speedN;
-    this.e0.set(pitch, 0, roll, "XYZ");
-    this.q0.setFromEuler(this.e0);
-    this.v0.set(sway, 0, lerp(0.015, 0.07, rb) * speedN);
-    this.v0.applyQuaternion(this.q0);
 
-    this.setLocal(a, rig, BODY.pelvis, this.v0.x, 0.82 + bob, this.v0.z * 0.25, 0.68);
-    this.setLocal(a, rig, BODY.chest, -this.v0.x * 0.55, 1.2 + bob * 0.45 + this.v0.y, this.v0.z, 0.64);
-    this.setLocal(a, rig, BODY.head, -this.v0.x * 0.25, 1.58 + bob * 0.18, this.v0.z * 0.42, 0.42);
+    bodyTaskTargets.offerLocal(a, BODY.pelvis, sway + roll * 0.18, 0.82 + bob, pitch * 0.22, 1, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.chest, -sway * 0.55 - roll * 0.12, 1.2 + bob * 0.45, -pitch + localSide * 0.025 * speedN, 1, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.head, -sway * 0.25, 1.58 + bob * 0.18, -pitch * 0.35, 0.82, TASK_PRIORITY.LOCOMOTION);
 
     const hipTwist = Math.sin(p) * 0.045 * speedN;
-    this.setLocal(a, rig, BODY.lHip, -0.13, 0.76 + bob, hipTwist, 0.54);
-    this.setLocal(a, rig, BODY.rHip, 0.13, 0.76 + bob, -hipTwist, 0.54);
+    bodyTaskTargets.offerLocal(a, BODY.lHip, -0.13, 0.76 + bob, hipTwist, 0.9, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.rHip, 0.13, 0.76 + bob, -hipTwist, 0.9, TASK_PRIORITY.LOCOMOTION);
+
+    sampleMechanicalState(w, a, rig, 1 / 60, this.mech);
+    const corrected = this.offerCorrectiveStep(w, a, rig, slot, moveX, moveZ, rb, speedN);
 
     const lU = p / TAU;
     let rU = lU + 0.5;
     if (rU >= 1) rU -= 1;
-
-    this.placeFoot(a, rig, slot, true, lU, moveX, moveZ, rb, speedN);
-    this.placeFoot(a, rig, slot, false, rU, moveX, moveZ, rb, speedN);
+    if (corrected !== 1) this.offerFootTask(w, a, rig, slot, true, lU, moveX, moveZ, rb, speedN);
+    if (corrected !== 2) this.offerFootTask(w, a, rig, slot, false, rU, moveX, moveZ, rb, speedN);
 
     const arm = Math.sin(p) * lerp(0.14, 0.42, rb) * speedN;
     const sideCounter = localSide * 0.08 * speedN;
-    this.setLocal(a, rig, BODY.lShoulder, -0.27, 1.31 + bob * 0.35, -hipTwist - sideCounter, 0.52);
-    this.setLocal(a, rig, BODY.rShoulder, 0.27, 1.31 + bob * 0.35, hipTwist + sideCounter, 0.52);
-    this.setLocal(a, rig, BODY.lElbow, -0.36, 1.04 + Math.abs(arm) * 0.035, -arm * 0.52, 0.62);
-    this.setLocal(a, rig, BODY.lHand, -0.35, 0.81 + Math.abs(arm) * 0.04, -arm, 0.68);
-    this.setLocal(a, rig, BODY.rElbow, 0.36, 1.04 + Math.abs(arm) * 0.035, arm * 0.52, 0.62);
-    this.setLocal(a, rig, BODY.rHand, 0.35, 0.81 + Math.abs(arm) * 0.04, arm, 0.68);
+    bodyTaskTargets.offerLocal(a, BODY.lShoulder, -0.27, 1.31 + bob * 0.35, -hipTwist - sideCounter, 0.82, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.rShoulder, 0.27, 1.31 + bob * 0.35, hipTwist + sideCounter, 0.82, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.lElbow, -0.36, 1.04 + Math.abs(arm) * 0.035, -arm * 0.52, 0.8, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.lHand, -0.35, 0.81 + Math.abs(arm) * 0.04, -arm, 0.78, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.rElbow, 0.36, 1.04 + Math.abs(arm) * 0.035, arm * 0.52, 0.8, TASK_PRIORITY.LOCOMOTION);
+    bodyTaskTargets.offerLocal(a, BODY.rHand, 0.35, 0.81 + Math.abs(arm) * 0.04, arm, 0.78, TASK_PRIORITY.LOCOMOTION);
   }
 
-  private placeFoot(
+  /** Capture-point recovery: x_cp = x_com + v_com / sqrt(g / h). */
+  private offerCorrectiveStep(
+    w: World,
+    a: Actor,
+    rig: BodyRig,
+    slot: number,
+    moveX: number,
+    moveZ: number,
+    runBlend: number,
+    speedN: number,
+  ) {
+    if (this.mech.supportCount <= 0) return 0;
+    const scale = bodyScale(a);
+    let supportX = 0;
+    let supportZ = 0;
+    if (this.mech.leftSupported) {
+      supportX += rig.x[BODY.lFoot]!;
+      supportZ += rig.z[BODY.lFoot]!;
+    }
+    if (this.mech.rightSupported) {
+      supportX += rig.x[BODY.rFoot]!;
+      supportZ += rig.z[BODY.rFoot]!;
+    }
+    supportX /= this.mech.supportCount;
+    supportZ /= this.mech.supportCount;
+
+    const supportY = Math.min(rig.y[BODY.lFoot]!, rig.y[BODY.rFoot]!);
+    const comH = Math.max(0.42 * scale, this.mech.comY - supportY);
+    const omega0 = Math.sqrt(GRAVITY / comH);
+    const captureX = this.mech.comX + this.mech.velX / Math.max(1e-5, omega0);
+    const captureZ = this.mech.comZ + this.mech.velZ / Math.max(1e-5, omega0);
+    let ex = captureX - supportX;
+    let ez = captureZ - supportZ;
+    const err = Math.hypot(ex, ez);
+    const trigger = (0.22 + this.mech.supportScore * 0.08) * scale;
+    if (err <= trigger && this.mech.disturbance < 0.3) return 0;
+
+    if (err > 1e-5) {
+      ex /= err;
+      ez /= err;
+    } else {
+      ex = moveX;
+      ez = moveZ;
+    }
+
+    let foot: 1 | 2;
+    if (this.mech.leftSupported && !this.mech.rightSupported) foot = 2;
+    else if (this.mech.rightSupported && !this.mech.leftSupported) foot = 1;
+    else {
+      const rx = Math.cos(a.yaw);
+      const rz = -Math.sin(a.yaw);
+      const lateral = ex * rx + ez * rz;
+      if (Math.abs(lateral) > 0.18) foot = lateral > 0 ? 2 : 1;
+      else foot = (this.phase[slot]! / TAU) < 0.5 ? 1 : 2;
+    }
+
+    const maxStep = lerp(0.42, 0.76, runBlend) * scale;
+    const step = Math.min(maxStep, Math.max(0.28 * scale, err + speedN * 0.12 * scale));
+    const tx = supportX + ex * step + moveX * speedN * 0.08 * scale;
+    const tz = supportZ + ez * step + moveZ * speedN * 0.08 * scale;
+    const node = foot === 1 ? BODY.lFoot : BODY.rFoot;
+    const currentY = rig.y[node]!;
+    const floor = supportHeight(w, tx, currentY + 0.65 * scale, tz);
+    const ty = floor + nodeRadius(a, node) + 0.045 * scale;
+    this.solveLegTask(a, rig, foot === 1, tx, ty, tz, 1, ex, ez, TASK_PRIORITY.CORRECTIVE_STEP);
+    if (foot === 1) this.lLocked[slot] = 0;
+    else this.rLocked[slot] = 0;
+    return foot;
+  }
+
+  private offerFootTask(
+    w: World,
     a: Actor,
     rig: BodyRig,
     slot: number,
@@ -435,7 +434,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
     const side = left ? -1 : 1;
     const swing = u < SWING_PORTION;
     const scale = bodyScale(a);
-
     let tx: number;
     let ty: number;
     let tz: number;
@@ -455,43 +453,34 @@ export class AnimationController extends AnimatedPhysicalBodies {
           this.rAnchorZ[slot] = rig.z[footNode]!;
         }
       }
-
-      if (left) {
-        tx = this.lAnchorX[slot]!;
-        ty = this.lAnchorY[slot]!;
-        tz = this.lAnchorZ[slot]!;
-      } else {
-        tx = this.rAnchorX[slot]!;
-        ty = this.rAnchorY[slot]!;
-        tz = this.rAnchorZ[slot]!;
-      }
+      tx = left ? this.lAnchorX[slot]! : this.rAnchorX[slot]!;
+      ty = left ? this.lAnchorY[slot]! : this.rAnchorY[slot]!;
+      tz = left ? this.lAnchorZ[slot]! : this.rAnchorZ[slot]!;
     } else {
       if (left) this.lLocked[slot] = 0;
       else this.rLocked[slot] = 0;
-
       const rx = Math.cos(a.yaw);
       const rz = -Math.sin(a.yaw);
       const lateral = side * 0.13 * scale;
-
       if (speedN <= 0.035) {
         tx = a.x + rx * lateral;
-        ty = a.y + 0.08 * scale;
         tz = a.z + rz * lateral;
+        ty = supportHeight(w, tx, a.y + 0.5 * scale, tz) + nodeRadius(a, footNode);
       } else {
         const s = smooth01(u / SWING_PORTION);
         const stride = lerp(0.34, 0.78, runBlend) * scale;
         const along = (-0.5 + s) * stride;
         const lift = Math.sin(Math.PI * s) * lerp(0.075, 0.17, runBlend) * scale;
         tx = a.x + rx * lateral + moveX * along;
-        ty = a.y + (0.08 * scale) + lift;
         tz = a.z + rz * lateral + moveZ * along;
+        const floor = supportHeight(w, tx, a.y + 0.6 * scale, tz);
+        ty = floor + nodeRadius(a, footNode) + lift;
       }
     }
-
-    this.solveLegIK(a, rig, left, tx, ty, tz, 0.9, moveX, moveZ);
+    this.solveLegTask(a, rig, left, tx, ty, tz, 1, moveX, moveZ, TASK_PRIORITY.LOCOMOTION);
   }
 
-  private solveLegIK(
+  private solveLegTask(
     a: Actor,
     rig: BodyRig,
     left: boolean,
@@ -501,22 +490,26 @@ export class AnimationController extends AnimatedPhysicalBodies {
     strength: number,
     moveX: number,
     moveZ: number,
+    priority: number,
   ) {
     const hipNode = left ? BODY.lHip : BODY.rHip;
     const kneeNode = left ? BODY.lKnee : BODY.rKnee;
     const footNode = left ? BODY.lFoot : BODY.rFoot;
+    const slot = this.slot(a.id);
     const scale = bodyScale(a);
     const upper = 0.34 * scale;
     const lower = 0.34 * scale;
-
-    this.v0.set(rig.x[hipNode]!, rig.y[hipNode]!, rig.z[hipNode]!);
-    this.v1.set(tx, ty, tz);
-    this.v2.subVectors(this.v1, this.v0);
-
-    let d = this.v2.length();
+    const hx = rig.x[hipNode]!;
+    const hy = rig.y[hipNode]!;
+    const hz = rig.z[hipNode]!;
+    let dx = tx - hx;
+    let dy = ty - hy;
+    let dz = tz - hz;
+    let d = Math.hypot(dx, dy, dz);
     if (d < 1e-6) return;
-    this.v2.multiplyScalar(1 / d);
-
+    dx /= d;
+    dy /= d;
+    dz /= d;
     const minReach = Math.abs(upper - lower) + 0.015 * scale;
     const maxReach = (upper + lower) * 0.985;
     const reach = d < minReach ? minReach : d > maxReach ? maxReach : d;
@@ -524,32 +517,90 @@ export class AnimationController extends AnimatedPhysicalBodies {
     const bend = Math.sqrt(Math.max(0, upper * upper - along * along));
 
     const side = left ? -1 : 1;
-    const rx = Math.cos(a.yaw);
-    const rz = -Math.sin(a.yaw);
-
-    this.v3.set(moveX * 0.92 + rx * side * 0.18, -0.18, moveZ * 0.92 + rz * side * 0.18);
-    const proj = this.v3.dot(this.v2);
-    this.v3.addScaledVector(this.v2, -proj);
-    d = this.v3.length();
-    if (d < 1e-6) {
-      this.v3.set(rx * side, 0, rz * side);
-      d = this.v3.length() || 1;
+    const rx = Math.cos(a.yaw) * side;
+    const rz = -Math.sin(a.yaw) * side;
+    let desiredPoleX = moveX * 0.92 + rx * 0.18;
+    let desiredPoleZ = moveZ * 0.92 + rz * 0.18;
+    let pm = Math.hypot(desiredPoleX, desiredPoleZ);
+    if (pm < 1e-5) {
+      desiredPoleX = rx;
+      desiredPoleZ = rz;
+      pm = Math.hypot(rx, rz) || 1;
     }
-    this.v3.multiplyScalar(1 / d);
+    desiredPoleX /= pm;
+    desiredPoleZ /= pm;
+    if (slot >= 0) {
+      const poleX = left ? this.lPoleX : this.rPoleX;
+      const poleZ = left ? this.lPoleZ : this.rPoleZ;
+      if (Math.abs(poleX[slot]!) + Math.abs(poleZ[slot]!) < 1e-5) {
+        poleX[slot] = desiredPoleX;
+        poleZ[slot] = desiredPoleZ;
+      } else {
+        poleX[slot] += (desiredPoleX - poleX[slot]!) * 0.22;
+        poleZ[slot] += (desiredPoleZ - poleZ[slot]!) * 0.22;
+      }
+      desiredPoleX = poleX[slot]!;
+      desiredPoleZ = poleZ[slot]!;
+    }
 
-    const kx = this.v0.x + this.v2.x * along + this.v3.x * bend;
-    const ky = this.v0.y + this.v2.y * along + this.v3.y * bend;
-    const kz = this.v0.z + this.v2.z * along + this.v3.z * bend;
+    let px = desiredPoleX;
+    let py = -0.18;
+    let pz = desiredPoleZ;
+    const proj = px * dx + py * dy + pz * dz;
+    px -= dx * proj;
+    py -= dy * proj;
+    pz -= dz * proj;
+    pm = Math.hypot(px, py, pz);
+    if (pm < 1e-6) {
+      px = rx;
+      py = 0;
+      pz = rz;
+      pm = Math.hypot(px, pz) || 1;
+    }
+    px /= pm;
+    py /= pm;
+    pz /= pm;
 
-    rig.x[kneeNode] += (kx - rig.x[kneeNode]!) * strength;
-    rig.y[kneeNode] += (ky - rig.y[kneeNode]!) * strength;
-    rig.z[kneeNode] += (kz - rig.z[kneeNode]!) * strength;
+    bodyTaskTargets.offerWorld(
+      a,
+      kneeNode,
+      hx + dx * along + px * bend,
+      hy + dy * along + py * bend,
+      hz + dz * along + pz * bend,
+      strength,
+      priority,
+    );
+    bodyTaskTargets.offerWorld(
+      a,
+      footNode,
+      hx + dx * reach,
+      hy + dy * reach,
+      hz + dz * reach,
+      strength,
+      priority,
+    );
+  }
 
-    const fx = this.v0.x + this.v2.x * reach;
-    const fy = this.v0.y + this.v2.y * reach;
-    const fz = this.v0.z + this.v2.z * reach;
-    rig.x[footNode] += (fx - rig.x[footNode]!) * strength;
-    rig.y[footNode] += (fy - rig.y[footNode]!) * strength;
-    rig.z[footNode] += (fz - rig.z[footNode]!) * strength;
+  private register(a: Actor) {
+    if (a.id < 0 || a.id >= ENTITY_ID_CAP || this.slotCount >= ANIM_CAP) return;
+    const existing = this.slotById[a.id]!;
+    if (existing >= 0) return;
+    const slot = this.slotCount++;
+    this.slotById[a.id] = slot;
+    this.phase[slot] = ((a.id * 0.61803398875) % 1) * TAU;
+    this.lastX[slot] = a.x;
+    this.lastZ[slot] = a.z;
+    const fx = -Math.sin(a.yaw);
+    const fz = -Math.cos(a.yaw);
+    this.dirX[slot] = fx;
+    this.dirZ[slot] = fz;
+    this.lPoleX[slot] = fx;
+    this.lPoleZ[slot] = fz;
+    this.rPoleX[slot] = fx;
+    this.rPoleZ[slot] = fz;
+  }
+
+  private slot(id: number) {
+    return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
 }
