@@ -14,7 +14,6 @@ import {
   sampleMechanicalState,
   type MechanicalState,
 } from "./mechanical-state";
-import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
@@ -65,10 +64,11 @@ export class SupportMotionController {
     if (supportCount <= 0) return;
 
     const scale = bodyScale(a);
-    const fx = -Math.sin(a.yaw);
-    const fz = -Math.cos(a.yaw);
 
-    // Intent speed is shared by gait, posture and ground reaction.
+    // External horizontal support follows translation intent and reconciles the
+    // compatibility Actor root with the authoritative pelvis. Combat does not
+    // get an extra target-velocity term: punch/kick weight transfer reaches the
+    // ground through the actual constrained feet and anatomical chain instead.
     const requestedSpeed = Math.max(0, a.intendSpeed);
     let targetVx = a.intendX * requestedSpeed;
     let targetVz = a.intendZ * requestedSpeed;
@@ -77,39 +77,6 @@ export class SupportMotionController {
     const errGain = a.kind === "player" ? 9.5 : 6.2;
     targetVx += clamp(rootErrX * errGain, -2.1 * scale, 2.1 * scale);
     targetVz += clamp(rootErrZ * errGain, -2.1 * scale, 2.1 * scale);
-
-    // Bare-fist striking can recruit additional forward ground reaction, but
-    // only while a real support contact exists and only inside the same traction
-    // envelope as locomotion. This gives the fist more body mass without adding
-    // a fake impact multiplier.
-    let handReach = 0;
-    if (a.weapon === "fist") {
-      if (bodyTaskTargets.priorityFor(a, BODY.lHand) >= TASK_PRIORITY.ACTION) {
-        handReach = Math.max(
-          handReach,
-          Math.hypot(
-            bodyTaskTargets.targetXFor(a, BODY.lHand) - rig.x[BODY.lHand]!,
-            bodyTaskTargets.targetYFor(a, BODY.lHand) - rig.y[BODY.lHand]!,
-            bodyTaskTargets.targetZFor(a, BODY.lHand) - rig.z[BODY.lHand]!,
-          ),
-        );
-      }
-      if (bodyTaskTargets.priorityFor(a, BODY.rHand) >= TASK_PRIORITY.ACTION) {
-        handReach = Math.max(
-          handReach,
-          Math.hypot(
-            bodyTaskTargets.targetXFor(a, BODY.rHand) - rig.x[BODY.rHand]!,
-            bodyTaskTargets.targetYFor(a, BODY.rHand) - rig.y[BODY.rHand]!,
-            bodyTaskTargets.targetZFor(a, BODY.rHand) - rig.z[BODY.rHand]!,
-          ),
-        );
-      }
-    }
-    if (handReach > 0) {
-      const recruitment = clamp01(handReach / (0.58 * scale));
-      targetVx += fx * recruitment * 0.78 * scale;
-      targetVz += fz * recruitment * 0.78 * scale;
-    }
 
     const response =
       mode === "stumble"
@@ -146,8 +113,7 @@ export class SupportMotionController {
 
     // Vertical support work is authorized only by the explicit jump input edge.
     // Pelvis motion produced by punches, kicks, recovery or posture is measured
-    // body state, not a command. Treating that difference as jump intent created
-    // a positive feedback loop that launched grounded fighters.
+    // body state, not a command.
     let dvy = 0;
     if (jumpRequested && a.vy > this.state.velY + 0.7 && a.vy > 1.2) {
       const requested = Math.min(7.2 * scale, a.vy - this.state.velY);
