@@ -9,6 +9,7 @@ import { BodyCausality } from "./body-causality";
 import { activeBodyControl } from "./active-body-control";
 import { bodyMode } from "./body-model";
 import { supportMotion } from "./support-motion";
+import { supportWrench } from "./support-wrench";
 import { WholeBodyCoupling } from "./whole-body-coupling";
 import { bodyTaskTargets } from "./body-task-targets";
 import { HumanRootAuthority } from "./human-root-authority";
@@ -25,7 +26,7 @@ import { CentroidalLocomotion } from "./centroidal-locomotion";
  *   whole-body coupling: support / COM / stance tasks derived from actions
  *   centroidal coupling: acceleration/braking/turning posture from real COM state
  *   task finalization: position + target-velocity field
- *   pre-integration: bounded joint actuation + friction-limited support reaction
+ *   pre-integration: bounded joint actuation + support translation/yaw wrench
  *   body solve: integration -> posture control -> joint constraints -> contacts
  *   post-solve: real effector contact -> impulse -> stability outcome -> Actor root
  */
@@ -75,8 +76,6 @@ export class ProceduralAnimationController extends AnimationController {
   }
 
   override prepareStep(w: World, dt: number) {
-    // The root at entry is the previous fixed step's solved pelvis projection.
-    // Preserve it before legacy stepWorld performs its compatibility transport.
     this.rootAuthority.capture(w);
     this.social.beginStep(w);
     super.prepareStep(w, dt);
@@ -84,25 +83,12 @@ export class ProceduralAnimationController extends AnimationController {
 
   override step(w: World, dt: number) {
     this.social.endStep(w);
-
-    // Normal humanoid translation is owned by the articulated body. The legacy
-    // capsule may still predict during stepWorld for compatibility, but that
-    // temporary translation must never become the frame used by body tasks.
     this.rootAuthority.restoreBodyOwnedRoots(w);
 
     super.prepareBodyStep(w, dt);
     this.melee.prepareStep(w, dt);
-
-    // Isolated end-effector requests become support/COM/stance requirements.
     this.coupling.prepare(w);
-
-    // Measured COM velocity error supplies acceleration/braking/turning posture.
-    // Corrective steps and combat remain higher-priority than this layer.
     this.centroidal.prepare(w, dt);
-
-    // Compute target velocity only after every producer has written its final
-    // winning task for this fixed step. This prevents intermediate task layers
-    // from creating synthetic feed-forward spikes.
     bodyTaskTargets.finalizeStep(dt);
 
     for (let i = 0; i < w.actors.length; i++) {
@@ -113,10 +99,10 @@ export class ProceduralAnimationController extends AnimationController {
       const mode = bodyMode(a);
       activeBodyControl.driveTasksPreIntegration(w, a, rig, dt, mode);
       supportMotion.drive(w, a, rig, dt, mode);
+      supportWrench.drive(w, a, rig, dt, mode);
     }
 
     super.step(w, dt);
-
     this.melee.step(w, dt);
     impactDynamics.step(w, dt);
     this.causality.step(w, dt);
