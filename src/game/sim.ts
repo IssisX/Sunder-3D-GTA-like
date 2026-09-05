@@ -339,9 +339,28 @@ function dropHeld(w: World, p: Actor, throwMul: number) {
     // whatever is under it, and what it lands on is hurt where it was hit.
     const slot = makeFrame(w.bodies, pr);
     if (slot >= 0) {
-      w.bodies.addVelocity(slot, pr.vx, pr.vy, pr.vz, STEP);
-      // Thrown flat spins about the vertical, so it turns as it flies.
-      w.bodies.addSpin(slot, 0, (f.z * pr.vx - f.x * pr.vz) * 0.5, 0, STEP);
+      const B = w.bodies;
+      // The thrower's own motion and the throw's lift are the platform the
+      // object leaves from -- uniform across every node, no rotation implied.
+      B.addVelocity(slot, p.vx, dv * 0.5, p.vz, STEP);
+      // The throw's own impulse is delivered through the grip, not through
+      // the object's centre. Applying it at the node nearest the hand,
+      // instead of folding it into that same uniform velocity and then
+      // inventing a spin to compensate, is what makes a beam thrown from one
+      // end tumble end over end while something held near its middle mostly
+      // just flies: the constraint solve turns an off-centre impulse into
+      // real rotation on its own, the same way it already does for every
+      // other contact in the game.
+      const gb = B.base(p.body);
+      const gplan = B.plan(p.body);
+      const node = B.nearestNode(
+        slot,
+        B.px[gb + gplan.grabHand]!,
+        B.py[gb + gplan.grabHand]!,
+        B.pz[gb + gplan.grabHand]!,
+        4,
+      );
+      B.applyImpulse(slot, node >= 0 ? node : 0, f.x * j, 0, f.z * j, STEP);
     }
   }
   releaseGrab(w, p);
@@ -2031,8 +2050,32 @@ function damageProp(w: World, p: Prop, dmg: number, vx: number, vz: number, by?:
       p.dynamic = true;
       p.anchored = false;
       for (const c of w.colliders) if (c.propId === p.id) c.solid = false;
-      w.bodies.addVelocity(slot, vx * 0.25, dmg * 0.6 / Math.max(1, p.mass), vz * 0.25, STEP);
-      w.bodies.addSpin(slot, vz * 0.4, 0, -vx * 0.4, STEP);
+      const B = w.bodies;
+      // Same fix as a thrown object: the blow's impulse belongs at the node
+      // nearest where it actually landed, not spread over the whole frame
+      // with a velocity-shaped guess at how much it should spin. This frame
+      // did not exist a moment ago -- damageProp is what just created it --
+      // so there is no pre-existing geometry to sweep the strike against;
+      // the striker's own solved hand is the closest real fact about where
+      // the blow landed that exists yet. Total momentum imparted is
+      // unchanged from before (mass * 0.25 * v); only where it is applied is.
+      let node = -1;
+      if (by && by.body >= 0) {
+        const hb = B.base(by.body);
+        const hplan = B.plan(by.body);
+        node = B.nearestNode(
+          slot,
+          B.px[hb + hplan.grabHand]!,
+          B.py[hb + hplan.grabHand]!,
+          B.pz[hb + hplan.grabHand]!,
+          Math.max(p.sx, p.sy, p.sz) + 1,
+        );
+      }
+      if (node >= 0) {
+        B.applyImpulse(slot, node, p.mass * vx * 0.25, dmg * 0.6, p.mass * vz * 0.25, STEP);
+      } else {
+        B.addVelocity(slot, vx * 0.25, (dmg * 0.6) / Math.max(1, p.mass), vz * 0.25, STEP);
+      }
       wakeFrame(w.bodies, slot);
     }
   }
@@ -2069,9 +2112,24 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
   }
   const slot = makeFrame(w.bodies, p);
   if (slot >= 0) {
-    w.bodies.addVelocity(slot, p.vx, p.vy, p.vz, STEP);
-    // A little spin, so falling timber turns rather than sliding down flat.
-    w.bodies.addSpin(slot, (w.rng() - 0.5) * 2.4, 0, (w.rng() - 0.5) * 2.4, STEP);
+    const B = w.bodies;
+    B.addVelocity(slot, p.vx, p.vy, p.vz, STEP);
+    // A structural member starts falling because one side gave way, not
+    // because it was pushed from its own centre, so the force that starts
+    // it moving belongs at an edge. Which edge is not known here -- that
+    // would mean threading the failed support's position through from
+    // stepStructures, a real follow-up -- but (vx, vz) already carries
+    // whatever direction the caller does know (the blow that broke it, or
+    // upstream jitter standing in for the side that let go). Projecting to
+    // the real node in that direction and pushing there, instead of
+    // injecting an angular velocity that was never a force anywhere, is
+    // what actually needs to be true even when the input to it is a guess.
+    const m = Math.hypot(vx, vz);
+    if (m > 1e-4) {
+      const reach = Math.max(p.sx, p.sy, p.sz) + 1;
+      const node = B.nearestNode(slot, p.x + (vx / m) * reach, p.y + p.sy * 0.5, p.z + (vz / m) * reach, reach);
+      if (node >= 0) B.applyImpulse(slot, node, vx * p.mass * 0.06, 0, vz * p.mass * 0.06, STEP);
+    }
   }
   w.emitSound(p.x, p.z, p.sy > 1.5 ? 1.1 : 0.55, p.sy > 1.5 ? "collapse" : "break", 0);
   w.shake = Math.max(w.shake, p.sy > 1.5 ? 0.55 : 0.2);

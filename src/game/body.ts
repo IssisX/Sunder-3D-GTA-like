@@ -782,44 +782,6 @@ export class Bodies {
     }
   }
 
-  /**
-   * Adds a rigid angular velocity [rad/s] about the slot's centre of mass.
-   *
-   * Kicking one node to make a prop tumble asks the distance constraints to
-   * redistribute the whole impulse in a single substep, and they answer with a
-   * transient the speed clamp then has to catch. A rigid rotation violates no
-   * constraint at all, which is why the tumble it produces is the one intended.
-   */
-  addSpin(slot: number, wx: number, wy: number, wz: number, h: number) {
-    const b = this.base(slot);
-    const n = this.count[slot]!;
-    let mx = 0;
-    let my = 0;
-    let mz = 0;
-    let mt = 0;
-    for (let i = 0; i < n; i++) {
-      const k = b + i;
-      const m = this.mass[k]!;
-      mx += this.px[k]! * m;
-      my += this.py[k]! * m;
-      mz += this.pz[k]! * m;
-      mt += m;
-    }
-    if (mt <= 0) return;
-    mx /= mt;
-    my /= mt;
-    mz /= mt;
-    for (let i = 0; i < n; i++) {
-      const k = b + i;
-      const rx = this.px[k]! - mx;
-      const ry = this.py[k]! - my;
-      const rz = this.pz[k]! - mz;
-      this.ox[k] = this.ox[k]! - (wy * rz - wz * ry) * h;
-      this.oy[k] = this.oy[k]! - (wz * rx - wx * rz) * h;
-      this.oz[k] = this.oz[k]! - (wx * ry - wy * rx) * h;
-    }
-  }
-
   /** Node whose contact sphere is nearest to a world point, or -1 past maxDist. */
   nearestNode(slot: number, x: number, y: number, z: number, maxDist: number) {
     const b = this.base(slot);
