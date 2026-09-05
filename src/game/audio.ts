@@ -1,5 +1,3 @@
-type Bus = "master" | "sfx" | "music";
-
 export class GameAudio {
   ctx: AudioContext | null = null;
   master: GainNode | null = null;
@@ -9,9 +7,6 @@ export class GameAudio {
   volume = 0.85;
   private noise: AudioBuffer | null = null;
   private last: Record<string, number> = {};
-  private rain: GainNode | null = null;
-  private fire: GainNode | null = null;
-  private drone: GainNode | null = null;
 
   unlock() {
     if (!this.ctx) {
@@ -25,9 +20,11 @@ export class GameAudio {
       this.master.connect(this.ctx.destination);
       this.master.gain.value = this.muted ? 0 : this.volume * this.volume;
       this.sfx.gain.value = 0.9;
-      this.music.gain.value = 0.28;
+      this.music.gain.value = 0;
       this.noise = this.makeNoise();
-      this.startBeds();
+      // No continuous synthetic ambience until the soundscape has enough
+      // variation/material identity to justify occupying the player's ears.
+      // Event-driven impacts, movement, voices and world sounds remain active.
     }
     if (this.ctx.state === "suspended") void this.ctx.resume();
   }
@@ -59,59 +56,15 @@ export class GameAudio {
     return buf;
   }
 
-  private startBeds() {
-    if (!this.ctx || !this.music || !this.noise) return;
-    const ctx = this.ctx;
-    const drone = ctx.createGain();
-    drone.gain.value = 0.0;
-    drone.connect(this.music);
-    const o1 = ctx.createOscillator();
-    o1.type = "sine";
-    o1.frequency.value = 46;
-    const o2 = ctx.createOscillator();
-    o2.type = "triangle";
-    o2.frequency.value = 69.5;
-    const g2 = ctx.createGain();
-    g2.gain.value = 0.35;
-    o1.connect(drone);
-    o2.connect(g2).connect(drone);
-    o1.start();
-    o2.start();
-    this.drone = drone;
-
-    const rain = ctx.createGain();
-    rain.gain.value = 0;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    src.loop = true;
-    const f = ctx.createBiquadFilter();
-    f.type = "bandpass";
-    f.frequency.value = 1400;
-    f.Q.value = 0.5;
-    src.connect(f).connect(rain).connect(this.sfx!);
-    src.start();
-    this.rain = rain;
-
-    const fire = ctx.createGain();
-    fire.gain.value = 0;
-    const fs = ctx.createBufferSource();
-    fs.buffer = this.noise;
-    fs.loop = true;
-    const ff = ctx.createBiquadFilter();
-    ff.type = "lowpass";
-    ff.frequency.value = 800;
-    fs.connect(ff).connect(fire).connect(this.sfx!);
-    fs.start();
-    this.fire = fire;
-  }
-
   setBeds(rain: number, fire: number, danger: number, timeOfDay: number) {
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    this.rain?.gain.setTargetAtTime(Math.min(0.22, rain * 0.22), t, 0.4);
-    this.fire?.gain.setTargetAtTime(Math.min(0.16, fire * 0.05), t, 0.3);
-    const night = timeOfDay < 0.22 || timeOfDay > 0.78 ? 0.08 : 0.03;
-    this.drone?.gain.setTargetAtTime(night + danger * 0.1, t, 0.6);
+    // Deliberately disabled. The previous continuous rain/fire beds were filtered
+    // looped white noise and the drone was too thin to justify a permanent bed.
+    // Keep the API because Game owns this call site; re-enable only when a richer
+    // state-derived soundscape exists.
+    void rain;
+    void fire;
+    void danger;
+    void timeOfDay;
   }
 
   play(kind: string, mag = 1, pan = 0) {
