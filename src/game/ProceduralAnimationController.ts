@@ -14,12 +14,14 @@ import { WholeBodyCoupling } from "./whole-body-coupling";
 import { bodyTaskTargets } from "./body-task-targets";
 import { HumanRootAuthority } from "./human-root-authority";
 import { CentroidalLocomotion } from "./centroidal-locomotion";
+import { legacyHumanMeleeFirewall } from "./legacy-human-melee-firewall";
 
 /**
  * Canonical runtime body/action orchestrator.
  *
  * Fixed-step ownership:
  *   pre-world: snapshot solved humanoid root + input/action/AI intent shaping
+ *   legacy melee firewall: old timer/range combat cannot damage humanoids
  *   world sim: compatibility prediction for legacy game systems
  *   root firewall: discard temporary capsule translation for body-owned humans
  *   post-world/pre-body: locomotion + melee end-effector task generation
@@ -28,7 +30,7 @@ import { CentroidalLocomotion } from "./centroidal-locomotion";
  *   task finalization: position + target-velocity field
  *   pre-integration: bounded joint actuation + support translation/yaw wrench
  *   body solve: integration -> posture control -> joint constraints -> contacts
- *   post-solve: real effector contact -> impulse -> stability outcome -> Actor root
+ *   post-solve: real swept effector contact -> impulse -> stability outcome -> Actor root
  */
 export class ProceduralAnimationController extends AnimationController {
   private readonly melee = new MeleeKinematics(this);
@@ -46,6 +48,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.bootstrap(w);
     this.coupling.bootstrap(w);
     this.rootAuthority.clear();
+    legacyHumanMeleeFirewall.clear();
     this.social.reset();
     this.playerJumpRequested = false;
   }
@@ -56,6 +59,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.clear();
     this.coupling.clear();
     this.rootAuthority.clear();
+    legacyHumanMeleeFirewall.clear();
     this.social.reset();
     this.playerJumpRequested = false;
   }
@@ -86,10 +90,14 @@ export class ProceduralAnimationController extends AnimationController {
   override prepareStep(w: World, dt: number) {
     this.rootAuthority.capture(w);
     this.social.beginStep(w);
+    legacyHumanMeleeFirewall.beforeWorld(w, dt);
     super.prepareStep(w, dt);
   }
 
   override step(w: World, dt: number) {
+    // stepWorld has finished. Restore real AI cooldown ownership before the
+    // articulated controller decides whether an attack can begin.
+    legacyHumanMeleeFirewall.afterWorld(w, dt);
     this.social.endStep(w);
     this.rootAuthority.restoreBodyOwnedRoots(w);
 
