@@ -144,7 +144,9 @@ export class MeleeKinematics {
         this.kind[slot] === NONE &&
         a.faction === "guard" &&
         a.attackCd <= 0 &&
-        a.known.includes(player.id) &&
+        a.ai === "combat" &&
+        a.targetId === player.id &&
+        w.time - a.lastSeenT < 0.7 &&
         canAct(a)
       ) {
         const dx = player.x - a.x;

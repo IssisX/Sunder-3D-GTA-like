@@ -57,11 +57,10 @@ function registerWitnesses(w: World, atk: Actor, vic: Actor) {
     o.alert = Math.max(o.alert, 0.75);
 
     if (o.faction === "guard") {
-      addKnown(o, atk.id);
-      o.targetId = atk.id;
-      o.lastSeenX = atk.x;
-      o.lastSeenZ = atk.z;
-      o.lastSeenT = w.time;
+      // A witness reports a local incident; only the victim has direct
+      // evidence to start a fight. Nearby guards investigate instead of
+      // inheriting a permanent hostile target as a radio broadcast.
+      o.alert = Math.max(o.alert, 0.6);
     } else {
       o.fear = Math.min(1, o.fear + 0.18 * (1 - o.courage));
     }

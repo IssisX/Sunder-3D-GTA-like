@@ -331,26 +331,68 @@ function stepPerception(w: World, dt: number) {
   }
 }
 
+function recentDirectHarm(a: Actor, o: Actor, w: World, window = 12) {
+  return a.lastHitBy === o.id && w.time - a.lastHitT < window;
+}
+
+function recentThreatMemory(a: Actor, o: Actor, w: World) {
+  return a.memories.some(
+    (m) =>
+      m.kind === "threat" &&
+      m.who === o.id &&
+      w.time - m.t < 8 &&
+      m.certainty > 0.35,
+  );
+}
+
+function activeThreatEvidence(a: Actor, o: Actor, w: World) {
+  if (recentDirectHarm(a, o, w)) return true;
+  return (
+    a.targetId === o.id &&
+    w.time - a.lastSeenT < 8 &&
+    recentThreatMemory(a, o, w)
+  );
+}
+
+function herdThreat(a: Actor, o: Actor, w: World) {
+  if (o.species === "wolf" || o.species === "bear") return true;
+  if (recentDirectHarm(a, o, w)) return true;
+  if (o.strikeT > 0 || o.kickT > 0 || o.shoveT > 0) {
+    return dist2(a.x, a.z, o.x, o.z) < 16;
+  }
+  // Mere proximity is not danger. A fast close charge is.
+  return (
+    (o.kind === "player" || o.kind === "human") &&
+    Math.hypot(o.vx, o.vz) > 5.2 &&
+    dist2(a.x, a.z, o.x, o.z) < 2.4 * 2.4
+  );
+}
+
 function isThreat(a: Actor, o: Actor, w: World) {
   if (!o.alive) return false;
-  if (a.known.includes(o.id)) return true;
+  if (activeThreatEvidence(a, o, w)) return true;
   if (o.kind === "player") {
-    if (a.faction === "guard" && (w.wanted > 0.15 || (o.weapon !== "fist" && w.wanted > 0))) return true;
     if (a.species === "wolf" || a.species === "bear") {
       if (o.bleed > 0.15 || o.blood < 0.85) return true;
-      if (a.species === "bear" && dist2(a.x, a.z, o.x, o.z) < 36) return a.aggression > 0.3;
     }
-    if (a.faction === "civilian" && (o.strikeT > 0 || o.weapon !== "fist") && dist2(a.x, a.z, o.x, o.z) < 25) return true;
+    if (a.faction === "civilian" && (o.strikeT > 0 || o.kickT > 0 || o.shoveT > 0)) {
+      return dist2(a.x, a.z, o.x, o.z) < 16;
+    }
   }
   if (a.species === "wolf" && (o.species === "deer" || o.species === "goat" || o.species === "pig" || o.species === "cow"))
     return true;
-  if (a.species === "bear" && (o.species === "deer" || o.species === "pig" || o.species === "cow" || o.kind === "human"))
+  if (a.species === "bear" && (o.species === "deer" || o.species === "pig" || o.species === "cow"))
     return dist2(a.x, a.z, o.x, o.z) < 80;
-  if (a.species === "deer" && (o.kind === "human" || o.kind === "player" || o.species === "wolf" || o.species === "bear"))
-    return true;
+  if (a.species === "bear" && o.kind === "human") {
+    return recentDirectHarm(a, o, w) ||
+      (a.aggression > 0.78 && (o.bleed > 0.15 || o.blood < 0.85));
+  }
+  if (a.species === "deer" || a.species === "goat" || a.species === "pig" || a.species === "cow") {
+    return herdThreat(a, o, w);
+  }
   if (a.faction === "guard" && o.faction === "wild" && o.species !== "deer") return true;
   if (o.lastHitBy === a.id) return false;
-  if (a.lastHitBy === o.id && w.time - a.lastHitT < 20) return true;
+  if (recentDirectHarm(a, o, w, 20)) return true;
   return false;
 }
 
@@ -401,6 +443,38 @@ function closestFire(w: World, x: number, z: number) {
   return { x: bx, z: bz, d: best };
 }
 
+function panicSource(
+  w: World,
+  a: Actor,
+  fire: { x: number; z: number; d: number } | null,
+) {
+  let bestX = 0;
+  let bestZ = 0;
+  let bestScore = 0;
+  if (fire) {
+    bestX = fire.x;
+    bestZ = fire.z;
+    bestScore = 1.25 / (1 + fire.d * 0.18);
+  }
+  for (const m of a.memories) {
+    if (m.who === a.id || w.time - m.t > 12) continue;
+    const urgency =
+      m.kind === "threat" ? 1.25 :
+      m.kind === "fire" ? 1.15 :
+      m.kind === "body" ? 0.82 :
+      m.kind === "sound" ? 0.66 : 0;
+    if (urgency <= 0) continue;
+    const d = Math.hypot(m.x - a.x, m.z - a.z);
+    const score = m.certainty * urgency / (1 + d * 0.18);
+    if (score > bestScore) {
+      bestScore = score;
+      bestX = m.x;
+      bestZ = m.z;
+    }
+  }
+  return bestScore > 0 ? { x: bestX, z: bestZ } : null;
+}
+
 function seek(a: Actor, x: number, z: number, speed: number) {
   const dx = x - a.x;
   const dz = z - a.z;
@@ -419,13 +493,14 @@ function seek(a: Actor, x: number, z: number, speed: number) {
 function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d: number } | null) {
   const player = w.player();
   const seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
-  const hostile = a.known.includes(player.id) || (a.faction === "guard" && w.wanted > 0.2);
+  const hostile = activeThreatEvidence(a, player, w);
   const panic = a.fear > 0.55 + a.courage * 0.35;
+  const danger = panic ? panicSource(w, a, fire) : null;
 
-  if (panic && a.faction !== "guard") {
+  if (panic && danger && a.faction !== "guard") {
     a.ai = "flee";
-    const awayX = a.x - player.x;
-    const awayZ = a.z - player.z;
+    const awayX = a.x - danger.x;
+    const awayZ = a.z - danger.z;
     const m = Math.hypot(awayX, awayZ) || 1;
     seek(a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
     if (a.shoutCd <= 0) {
@@ -464,7 +539,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
       if (a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 1.0, "shout", a.id);
         a.shoutCd = 3;
-        callAllies(w, a, player);
+        callAllies(w, a);
       }
       if (d < WEAPON_STATS[a.weapon].reach + 0.4 && a.attackCd <= 0) {
         a.strikeT = 0.32;
@@ -496,7 +571,9 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
   }
 
   if (a.faction === "guard" && a.alert > 0.4) {
-    const mem = a.memories.find((m) => m.kind === "threat" || m.kind === "sound");
+    const mem = a.memories.find(
+      (m) => m.kind === "threat" || m.kind === "sound" || m.kind === "theft",
+    );
     if (mem) {
       a.ai = "investigate";
       seek(a, mem.x, mem.z, 3.6);
@@ -563,24 +640,22 @@ function followTracks(w: World, a: Actor) {
   }
 }
 
-function callAllies(w: World, a: Actor, player: Actor) {
-  for (const o of w.nearby(a.x, a.z, 22)) {
+function callAllies(w: World, a: Actor) {
+  for (const o of w.nearby(a.x, a.z, 14)) {
     if (o.faction !== a.faction || o.id === a.id) continue;
-    w.addMemory(o, "threat", player.x, player.z, player.id, 0.7);
-    if (!o.known.includes(player.id)) o.known.push(player.id);
-    o.alert = Math.max(o.alert, 0.8);
-    o.lastSeenX = a.lastSeenX;
-    o.lastSeenZ = a.lastSeenZ;
-    o.lastSeenT = w.time;
+    const d = Math.hypot(o.x - a.x, o.z - a.z);
+    w.addMemory(o, "sound", a.x, a.z, a.id, clamp(0.62 - d / 32, 0.22, 0.56));
+    o.alert = Math.max(o.alert, 0.48);
   }
-  w.wanted = Math.min(1, w.wanted + 0.25);
   w.whisper("A shout carries.");
 }
 
 function spreadFear(w: World, a: Actor) {
   for (const o of w.nearby(a.x, a.z, 12)) {
     if (o.id === a.id || o.kind === "player") continue;
-    o.fear = Math.min(1, o.fear + 0.2 * (1 - o.courage));
+    const d = Math.hypot(o.x - a.x, o.z - a.z);
+    const exposure = clamp(1 - d / 12, 0, 1);
+    o.fear = Math.min(1, o.fear + 0.14 * exposure * exposure * (1 - o.courage));
   }
 }
 
@@ -588,7 +663,7 @@ function beastAI(w: World, a: Actor, _dt: number) {
   if (a.species === "deer" || a.species === "goat" || a.species === "pig" || a.species === "cow") {
     const threat = w.nearby(a.x, a.z, a.species === "deer" ? 14 : 8).find((o) => {
       if (o.id === a.id || !o.alive) return false;
-      return o.kind === "player" || o.kind === "human" || o.species === "wolf" || o.species === "bear" || o.strikeT > 0;
+      return herdThreat(a, o, w);
     });
     const fire = closestFire(w, a.x, a.z);
     if (threat || (fire && fire.d < 8) || a.fear > 0.4) {
@@ -651,7 +726,15 @@ function beastAI(w: World, a: Actor, _dt: number) {
       .nearby(a.x, a.z, 16)
       .filter((o) => o.alive && o.id !== a.id && (o.kind === "player" || o.kind === "human" || o.species === "cow" || o.species === "pig"))
       .sort((b, c) => dist2(a.x, a.z, b.x, b.z) - dist2(a.x, a.z, c.x, c.z))[0];
-    if (close && (a.aggression > 0.3 || close.bleed > 0 || dist2(a.x, a.z, close.x, close.z) < 25)) {
+    const provoked = Boolean(close && recentDirectHarm(a, close, w, 20));
+    const distressed = Boolean(close && (close.bleed > 0.15 || close.blood < 0.85));
+    const animalPrey = Boolean(close && (close.species === "cow" || close.species === "pig"));
+    const predatory = Boolean(close && (
+      animalPrey
+        ? a.aggression > 0.3
+        : a.aggression > 0.78 && distressed
+    ));
+    if (close && (provoked || predatory)) {
       a.ai = "hunt";
       a.targetId = close.id;
       const d = seek(a, close.x, close.z, 5.6);
@@ -1422,7 +1505,6 @@ function stepProps(w: World, _dt: number) {
           if (a.faction === "civilian" || a.faction === "guard") {
             w.addMemory(a, "theft", p.x, p.z, player.id, 0.9);
             if (a.faction === "guard") {
-              a.known.push(player.id);
               a.alert = 1;
             }
           }

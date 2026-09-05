@@ -574,9 +574,14 @@ export class AnimatedPhysicalBodies extends PhysicalBodies {
     if (this.playerGrabPressed && !p.grabbedId && !kick.active) {
       this.playerGrabPressed = false;
       const target = findGrabTarget(w, p);
-      motion.phase = "reach"; motion.t = 0; motion.recoverFrom = "reach";
-      motion.contactIssued = false; motion.releaseQueued = false;
-      motion.targetId = target?.id ?? 0; motion.targetActor = target?.actor ?? false; motion.targetNode = -1;
+      // An empty-space grab has no external contact to reach for. Starting the
+      // full two-hand pose anyway lets the articulated body solve against an
+      // invented target and can turn a button tap into vertical motion.
+      if (target) {
+        motion.phase = "reach"; motion.t = 0; motion.recoverFrom = "reach";
+        motion.contactIssued = false; motion.releaseQueued = false;
+        motion.targetId = target.id; motion.targetActor = target.actor; motion.targetNode = -1;
+      }
     }
 
     if (this.playerGrabReleased) {
