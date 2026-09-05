@@ -848,7 +848,7 @@ function addPlayer(w: World) {
     strength: 1.05,
     courage: 0.7,
     skin: 0xb89272,
-    cloth: 0x2c241c,
+    cloth: 0x5c5044,
     accent: 0x6a3828,
     weapon: "fist",
   });

@@ -1,6 +1,8 @@
 import type { Actor, Collider, Joint, Particle, Physique, Region } from "./types";
 import { GRAVITY, WEAPON_STATS } from "./types";
 import { World, clamp, facing, injurySum, rightOf } from "./world";
+import { REST } from "./profile";
+import { updatePlant } from "./gait";
 
 export const P = {
   pelvis: 0,
@@ -32,19 +34,7 @@ export const PART_REGION: Region[] = [
   "rleg",
 ];
 
-const LOCAL: [number, number, number][] = [
-  [0, 0.94, 0],
-  [0, 1.36, 0.04],
-  [0, 1.64, 0.03],
-  [-0.18, 1.46, 0.02],
-  [-0.22, 0.86, 0.06],
-  [0.18, 1.46, 0.02],
-  [0.22, 0.86, 0.06],
-  [-0.1, 0.52, 0.03],
-  [-0.11, 0.08, 0.05],
-  [0.1, 0.52, 0.03],
-  [0.11, 0.08, 0.05],
-];
+const LOCAL: [number, number, number][] = REST;
 
 const RAD = [0.14, 0.13, 0.11, 0.09, 0.075, 0.09, 0.075, 0.11, 0.09, 0.11, 0.09];
 const MASSW = [18, 14, 6, 4, 3, 4, 3, 8, 5, 8, 5];
@@ -234,8 +224,8 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     lz += 0.08;
   }
   if (!kicking && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint")) {
-    const lift = a.loco === "sprint" ? 0.11 : 0.085;
-    const step = Math.min(0.2, 0.1 + spd * 0.032);
+    const lift = a.loco === "sprint" ? 0.2 : 0.16;
+    const step = Math.min(0.3, 0.17 + spd * 0.038);
     if (i === P.shinL || i === P.thighL) {
       const k = i === P.shinL ? 1 : 0.48;
       if (s > 0) {
@@ -251,8 +241,8 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
       }
     }
     if (i === P.pelvis) {
-      ly += Math.abs(s) * 0.01;
-      lx += (s > 0 ? 0.028 : -0.028) * Math.min(1, Math.abs(s) * 1.3);
+      ly += Math.abs(s) * 0.022;
+      lx += (s > 0 ? 0.03 : -0.03) * Math.min(1, Math.abs(s) * 1.3);
     }
   } else if (!kicking) {
     if (i === P.shinL || i === P.thighL) lz += s * Math.min(0.05, amp) * (i === P.shinL ? 1 : 0.45);
@@ -683,60 +673,6 @@ function plantTarget(
     y: pel.y * 0.62 + fy * 0.38,
     z: pel.z * 0.72 + pz * 0.28,
   };
-}
-
-function updatePlant(a: Actor) {
-  if (!a.body || a.body.mode !== "stance" || !a.alive) {
-    a.plantPart = -1;
-    return;
-  }
-  if (!a.grounded || a.vy > 0.4 || a.loco === "vault" || a.loco === "climb") {
-    a.plantPart = -1;
-    return;
-  }
-  if (a.kickT > 0) {
-    const foot = a.body.parts[P.shinL]!;
-    if (a.plantPart !== P.shinL) {
-      a.plantPart = P.shinL;
-      a.plantX = foot.x;
-      a.plantZ = foot.z;
-    }
-    capPlant(a, 0.3);
-    return;
-  }
-  const spd = Math.hypot(a.vx, a.vz);
-  const stepping =
-    a.grounded && spd > 0.28 && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint");
-  if (!stepping) {
-    a.plantPart = -1;
-    return;
-  }
-  const want = Math.sin(a.walkPhase) >= 0 ? P.shinR : P.shinL;
-  const foot = a.body.parts[want]!;
-  if (want !== a.plantPart) {
-    a.plantPart = want;
-    a.plantX = foot.x;
-    a.plantZ = foot.z;
-  }
-  capPlant(a, 0.28);
-}
-
-function capPlant(a: Actor, maxReach: number) {
-  if (!a.body || a.plantPart < 0) return;
-  const pel = a.body.parts[P.pelvis]!;
-  const reach = Math.hypot(pel.x - a.plantX, pel.z - a.plantZ);
-  if (reach <= maxReach) return;
-  const next = a.plantPart === P.shinL ? P.shinR : P.shinL;
-  const nf = a.body.parts[next]!;
-  a.plantPart = next;
-  a.plantX = nf.x;
-  a.plantZ = nf.z;
-  const r2 = Math.hypot(pel.x - a.plantX, pel.z - a.plantZ);
-  if (r2 > maxReach) {
-    const s = maxReach / r2;
-    a.plantX = pel.x + (a.plantX - pel.x) * s;
-    a.plantZ = pel.z + (a.plantZ - pel.z) * s;
-  }
 }
 
 function snapToPose(body: Physique, a: Actor) {

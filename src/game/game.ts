@@ -579,6 +579,9 @@ export class Game {
           combo: p.combo,
           punch: punchKind(p),
           leftPunch: p.weapon === "fist" && punchKind(p) !== "cross",
+          walkPhase: p.walkPhase,
+          belly: !!(mesh?.userData?.parts as { belly?: unknown } | undefined)?.belly,
+          hipD: (mesh?.userData?.parts?.pelvis as { scale?: { z: number } } | undefined)?.scale?.z ?? 0,
         };
       },
       forceInjure: (region?: string, kind?: string) => {

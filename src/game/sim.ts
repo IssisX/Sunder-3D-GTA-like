@@ -42,6 +42,7 @@ import {
   P,
   punchKind,
 } from "./physique";
+import { stepCadence } from "./gait";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.32;
@@ -1378,7 +1379,7 @@ function stepLocomotion(w: World, dt: number) {
     else if (spd > 0.4) a.loco = a.crouch ? "crouch" : "walk";
     else a.loco = a.crouch ? "crouch" : "idle";
     if (a.y < -0.05 && w.inWater(a.x, a.z, a.y + 0.4)) a.loco = "swim";
-    a.walkPhase += Math.hypot(a.vx, a.vz) * dt * 2.4;
+    stepCadence(a, dt);
   }
 }
 
