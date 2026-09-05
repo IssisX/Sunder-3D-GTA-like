@@ -6,6 +6,7 @@ import { BODY, type BodyRig, type PhysicalBodies } from "./body";
 import { CONTACT_NODES, NODE_REGION, bodyScale, nodeRadius } from "./body-model";
 import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 import { applyActorMeleeContact, applyPropMeleeContact } from "./melee-contact";
+import { chooseKickAttackLeft } from "./action-support";
 
 const ENTITY_ID_CAP = 8192;
 const ACTION_CAP = 128;
@@ -69,6 +70,7 @@ export class MeleeKinematics {
   private readonly supportZ = new Float32Array(ACTION_CAP);
   private readonly punchRight = new Uint8Array(ACTION_CAP);
   private readonly nextPunchRight = new Uint8Array(ACTION_CAP);
+  private readonly kickAttackLeft = new Uint8Array(ACTION_CAP);
   private slotCount = 0;
   private playerPunchQueued = false;
   private playerKickQueued = false;
@@ -89,14 +91,14 @@ export class MeleeKinematics {
   clear() {
     this.slotById.fill(-1); this.actorId.fill(0); this.kind.fill(0); this.time.fill(0);
     this.duration.fill(0); this.hitId.fill(-1); this.hasPrev.fill(0);
-    this.punchRight.fill(0); this.nextPunchRight.fill(0);
+    this.punchRight.fill(0); this.nextPunchRight.fill(0); this.kickAttackLeft.fill(0);
     this.slotCount = 0; this.playerPunchQueued = false; this.playerKickQueued = false;
   }
 
   reset(a: Actor) {
     const slot = this.slot(a.id); if (slot < 0) return;
     this.kind[slot] = NONE; this.time[slot] = 0; this.duration[slot] = 0;
-    this.hitId[slot] = -1; this.hasPrev[slot] = 0;
+    this.hitId[slot] = -1; this.hasPrev[slot] = 0; this.kickAttackLeft[slot] = 0;
   }
 
   captureInput(input: Actions) {
@@ -113,8 +115,8 @@ export class MeleeKinematics {
     let slot = this.slot(p.id);
     if (slot < 0 && human(p)) slot = this.register(p);
     if (slot >= 0 && this.kind[slot] === NONE && canAct(p)) {
-      if (this.playerKickQueued && p.grounded) this.begin(p, slot, KICK);
-      else if (this.playerPunchQueued && p.strikeCd <= 0) this.begin(p, slot, PUNCH);
+      if (this.playerKickQueued && p.grounded) this.begin(w, p, slot, KICK);
+      else if (this.playerPunchQueued && p.strikeCd <= 0) this.begin(w, p, slot, PUNCH);
     }
     this.playerPunchQueued = false;
     this.playerKickQueued = false;
@@ -149,7 +151,7 @@ export class MeleeKinematics {
         const dz = player.z - a.z;
         const reach = WEAPON_STATS[a.weapon].reach + player.radius + 0.35;
         if (dx * dx + dz * dz <= reach * reach) {
-          this.begin(a, slot, PUNCH);
+          this.begin(w, a, slot, PUNCH);
           a.attackCd = 0.7 / (0.7 + a.competence);
           a.targetId = player.id;
         }
@@ -193,7 +195,7 @@ export class MeleeKinematics {
     return slot >= 0 && this.kind[slot] !== NONE;
   }
 
-  private begin(a: Actor, slot: number, kind: number) {
+  private begin(w: World, a: Actor, slot: number, kind: number) {
     this.kind[slot] = kind;
     this.time[slot] = 0;
     this.hitId[slot] = -1;
@@ -219,9 +221,12 @@ export class MeleeKinematics {
       a.stamina = Math.max(0, a.stamina - 0.075);
       const rig = this.bodies.get(a);
       if (rig?.initialized) {
-        this.supportX[slot] = rig.x[BODY.lFoot]!;
-        this.supportY[slot] = rig.y[BODY.lFoot]!;
-        this.supportZ[slot] = rig.z[BODY.lFoot]!;
+        const attackLeft = chooseKickAttackLeft(w, a, rig);
+        this.kickAttackLeft[slot] = attackLeft ? 1 : 0;
+        const supportFoot = attackLeft ? BODY.rFoot : BODY.lFoot;
+        this.supportX[slot] = rig.x[supportFoot]!;
+        this.supportY[slot] = rig.y[supportFoot]!;
+        this.supportZ[slot] = rig.z[supportFoot]!;
       }
     }
   }
@@ -505,18 +510,17 @@ export class MeleeKinematics {
   }
 
   private offerKickTasks(a: Actor, rig: BodyRig, slot: number, u: number) {
-    // Lift on the input edge, chamber across the body, then drive the
-    // heel through the target. Coupling owns the supporting body geometry.
-    // Anchor action height to the captured support surface. Using the solved
-    // pelvis-derived Actor height here feeds every pose lift into the next
-    // target and makes a stationary kick climb away from the ground.
-    const floor = this.supportY[slot]! - nodeRadius(a, BODY.lFoot);
+    const attackLeft = this.kickAttackLeft[slot] !== 0;
+    const attackFoot = attackLeft ? BODY.lFoot : BODY.rFoot;
+    const supportLeft = !attackLeft;
+    const supportFoot = supportLeft ? BODY.lFoot : BODY.rFoot;
+    const floor = this.supportY[slot]! - nodeRadius(a, supportFoot);
     const heightOffset = (floor - a.y) / bodyScale(a);
     this.offerLocal(a, BODY.pelvis, 0, 0.82 + heightOffset, 0, 1);
     this.offerLocal(a, BODY.chest, 0, 1.2 + heightOffset, 0, 1);
     this.offerLocal(a, BODY.head, 0, 1.58 + heightOffset, 0, 0.9);
     this.solveLegTask(
-      a, rig, true,
+      a, rig, supportLeft,
       this.supportX[slot]!, this.supportY[slot]!,
       this.supportZ[slot]!, 1, 0.56,
     );
@@ -538,11 +542,11 @@ export class MeleeKinematics {
       lift = 1 - smoother01((u - 0.82) / 0.18);
       extension = 0;
     }
-    this.offerLocal(a, BODY.rFoot,
-      0.13 + 0.12 * lift - 0.2 * extension,
+    const side = attackLeft ? -1 : 1;
+    this.offerLocal(a, attackFoot,
+      side * (0.13 + 0.12 * lift - 0.2 * extension),
       0.1 + 0.56 * lift + 0.22 * extension + heightOffset,
       -0.03 + 0.16 * lift + 0.65 * extension, 1);
-    // Guard rises immediately; final arm IK follows the coupled shoulders.
     this.solveArmTaskLocal(a, rig, false,
       -0.22, 1.48 + heightOffset, 0.22, 1, 0.94);
     this.solveArmTaskLocal(a, rig, true,
@@ -555,8 +559,6 @@ export class MeleeKinematics {
       if (slot < 0 || this.kind[slot] !== KICK) continue;
       const rig = this.bodies.get(a);
       if (!rig?.initialized) continue;
-      // Use the final turned shoulder frame, not Actor.yaw. That yaw is
-      // the player's chosen attack direction, which remains unchanged.
       const lx = bodyTaskTargets.targetXFor(a, BODY.lShoulder);
       const lz = bodyTaskTargets.targetZFor(a, BODY.lShoulder);
       const rx = bodyTaskTargets.targetXFor(a, BODY.rShoulder);
@@ -590,8 +592,9 @@ export class MeleeKinematics {
 
     let cx: number, cy: number, cz: number, radius: number;
     if (kind === KICK) {
-      cx = rig.x[BODY.rFoot]!; cy = rig.y[BODY.rFoot]!; cz = rig.z[BODY.rFoot]!;
-      radius = nodeRadius(a, BODY.rFoot) * 1.08;
+      const foot = this.kickAttackLeft[slot] ? BODY.lFoot : BODY.rFoot;
+      cx = rig.x[foot]!; cy = rig.y[foot]!; cz = rig.z[foot]!;
+      radius = nodeRadius(a, foot) * 1.08;
     } else {
       const handNode = fist && !right ? BODY.lHand : BODY.rHand;
       const elbowNode = fist && !right ? BODY.lElbow : BODY.rElbow;
