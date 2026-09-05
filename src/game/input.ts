@@ -162,6 +162,8 @@ export class Input {
     if (!on) {
       this.joyX = 0;
       this.joyY = 0;
+      this.lookTouchX = 0;
+      this.lookTouchY = 0;
     }
   }
 
@@ -276,6 +278,12 @@ export class Input {
     moveX += this.joyX;
     moveY += this.joyY;
     const pads = typeof navigator !== "undefined" ? navigator.getGamepads?.() ?? [] : [];
+    let padJump = false;
+    let padAttack = false;
+    let padGrab = false;
+    let padKick = false;
+    let padSprint = false;
+    let padPause = false;
     for (const pad of pads) {
       if (!pad) continue;
       const any = pad.buttons.some((b) => b.pressed);
@@ -287,12 +295,12 @@ export class Input {
       const look = radial(pad.axes[2] ?? 0, pad.axes[3] ?? 0, 0.22);
       this.mouseDx += look.x * 14;
       this.mouseDy += look.y * 14;
-      if (pad.buttons[0]?.pressed) this.heldButtons.add("jump");
-      if (pad.buttons[2]?.pressed) this.heldButtons.add("attack");
-      if (pad.buttons[5]?.pressed || pad.buttons[7]?.pressed) this.heldButtons.add("grab");
-      if (pad.buttons[1]?.pressed) this.heldButtons.add("kick");
-      if (pad.buttons[4]?.pressed || pad.buttons[10]?.pressed) this.heldButtons.add("sprint");
-      if (pad.buttons[9]?.pressed) this.heldButtons.add("pause");
+      padJump ||= Boolean(pad.buttons[0]?.pressed);
+      padAttack ||= Boolean(pad.buttons[2]?.pressed);
+      padGrab ||= Boolean(pad.buttons[5]?.pressed || pad.buttons[7]?.pressed);
+      padKick ||= Boolean(pad.buttons[1]?.pressed);
+      padSprint ||= Boolean(pad.buttons[4]?.pressed || pad.buttons[10]?.pressed);
+      padPause ||= Boolean(pad.buttons[9]?.pressed);
     }
     const mag = Math.hypot(moveX, moveY);
     if (mag > 1) {
@@ -306,15 +314,15 @@ export class Input {
     this.lookTouchX = 0;
     this.lookTouchY = 0;
 
-    const attack = this.heldButtons.has("attack");
-    const grab = this.heldButtons.has("grab") || down("KeyQ");
-    const jump = down("Space") || this.heldButtons.has("jump");
-    const kick = down("KeyF") || this.heldButtons.has("kick");
+    const attack = this.heldButtons.has("attack") || padAttack;
+    const grab = this.heldButtons.has("grab") || down("KeyQ") || padGrab;
+    const jump = down("Space") || this.heldButtons.has("jump") || padJump;
+    const kick = down("KeyF") || this.heldButtons.has("kick") || padKick;
     const shove = down("KeyE") || this.heldButtons.has("shove");
     const drop = down("KeyG") || this.heldButtons.has("drop");
     const ignite = down("KeyR") || this.heldButtons.has("ignite");
-    const pause = down("Escape") || this.heldButtons.has("pause");
-    const sprint = down("ShiftLeft") || down("ShiftRight") || this.heldButtons.has("sprint");
+    const pause = down("Escape") || this.heldButtons.has("pause") || padPause;
+    const sprint = down("ShiftLeft") || down("ShiftRight") || this.heldButtons.has("sprint") || padSprint;
 
     const a: Actions = {
       moveX,

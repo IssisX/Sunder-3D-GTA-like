@@ -109,6 +109,8 @@ export function SunderHud({
             <div className="pointer-events-auto flex items-center gap-2">
               <button
                 type="button"
+                aria-pressed={!muted}
+                aria-label={muted ? "Turn sound on" : "Turn sound off"}
                 className="h-11 rounded-md border border-border bg-surface/80 px-3 text-sm text-muted backdrop-blur-sm hover:text-fg"
                 onClick={() => {
                   setMuted((m) => {
@@ -117,7 +119,7 @@ export function SunderHud({
                   });
                 }}
               >
-                {muted ? "Sound off" : "Sound on"}
+                {muted ? "Sound: off" : "Sound: on"}
               </button>
               <button
                 type="button"

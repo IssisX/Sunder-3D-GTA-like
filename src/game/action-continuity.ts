@@ -408,7 +408,7 @@ export class ActionContinuity {
         sy = a.y + this.lastY[q]!;
         sz = a.z + rz * this.lastX[q]! + fz * this.lastZ[q]!;
       }
-      let priority = TASK_PRIORITY.ACTION;
+      let priority: number = TASK_PRIORITY.ACTION;
       if ((node === BODY.lFoot || node === BODY.rFoot) && Math.abs(this.locoY[q]! - sy) < 0.05 * scale && blend < 0.62) {
         priority = TASK_PRIORITY.CONTACT_CRITICAL;
       }

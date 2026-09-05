@@ -236,7 +236,11 @@ export class Game {
     this.pushHud();
     const p = this.world.player();
     if (p && Math.hypot(p.vx, p.vz) > 1.4 && p.grounded && simPlaying) {
-      if (((this.world.time * (p.loco === "sprint" ? 5 : 3)) | 0) !== (((this.world.time - raw) * 3) | 0)) {
+      const footstepCadence = p.loco === "sprint" ? 5 : 3;
+      if (
+        ((this.world.time * footstepCadence) | 0) !==
+        (((this.world.time - raw) * footstepCadence) | 0)
+      ) {
         this.audio.play(p.loco === "sprint" ? "sprint" : "step", 0.35, 0);
       }
     }
