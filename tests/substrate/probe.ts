@@ -12,8 +12,6 @@ import { supportMotion } from '../../src/game/support-motion';
 import { bodyTaskTargets as tasks, TASK_PRIORITY as priority }
   from '../../src/game/body-task-targets';
 
-// Isolated fixtures use the production world, controller and body solver.
-// No replacement physics or renderer. Full-world timing is separate.
 function fixture(full = false) {
   const w = new World();
   w.seed = 12345;
@@ -59,11 +57,8 @@ function walk(cut = false, sprint = false) {
   const drive = supportMotion.drive;
   if (cut) supportMotion.drive = () => {};
   try {
-    for (let i = 0; i < 120; i++) {
-      tick({ moveY: 1, sprint });
-    }
-    return { speed: (z - p.z) / 2, alive: p.alive,
-      balance: p.balance };
+    for (let i = 0; i < 120; i++) tick({ moveY: 1, sprint });
+    return { speed: (z - p.z) / 2, alive: p.alive, balance: p.balance };
   } finally { supportMotion.drive = drive; }
 }
 const walking = walk();
@@ -78,38 +73,104 @@ assert(walking.alive && sprinting.alive, 'movement killed player');
 console.log('PASS locomotion', { walking, cutWalking, sprinting });
 
 {
+  const { p, tick } = fixture();
+  const positions: number[] = [];
+  let stalls = 0;
+  let correctiveTicks = 0;
+  let minWindowSpeed = Infinity;
+  for (let i = 0; i < 600; i++) {
+    tick({ moveY: 1 });
+    positions.push(p.z);
+    if (
+      tasks.priorityFor(p, BODY.lFoot) === priority.CORRECTIVE_STEP ||
+      tasks.priorityFor(p, BODY.rFoot) === priority.CORRECTIVE_STEP
+    ) correctiveTicks++;
+    if (i >= 66) {
+      const speed = Math.abs(p.z - positions[i - 6]!) / (6 * STEP);
+      minWindowSpeed = Math.min(minWindowSpeed, speed);
+      if (speed < 1.2) stalls++;
+    }
+  }
+  assert(stalls < 8,
+    'clear-ground walk still contains repeated stop/start windows');
+  console.log('PASS walk continuity', { minWindowSpeed, stalls, correctiveTicks });
+}
+
+{
   const { w, p, b } = fixture();
   const rig = b.get(p)!;
   tasks.beginStep();
   tasks.offerWorld(p, BODY.chest,
-    rig.x[1]! + 0.2, rig.y[1]!, rig.z[1]! - 0.25,
+    rig.x[1]! + 0.2, rig.y[1]! + 0.18, rig.z[1]! - 0.25,
     1, priority.ACTION);
   tasks.finalizeStep(STEP);
-  const px = Array.from(rig.px), pz = Array.from(rig.pz);
-  activeBodyControl.driveTasksPreIntegration(
-    w, p, rig, STEP, 'follow');
-  let netX = 0, netZ = 0, local = 0;
+  const px = Array.from(rig.px);
+  const py = Array.from(rig.py);
+  const pz = Array.from(rig.pz);
+  activeBodyControl.driveTasksPreIntegration(w, p, rig, STEP, 'follow');
+  let netX = 0, netY = 0, netZ = 0, local = 0;
   for (let i = 0; i < rig.x.length; i++) {
     const dx = (px[i]! - rig.px[i]!) / STEP;
+    const dy = (py[i]! - rig.py[i]!) / STEP;
     const dz = (pz[i]! - rig.pz[i]!) / STEP;
     netX += dx / NODE_INV_MASS[i]!;
+    netY += dy / NODE_INV_MASS[i]!;
     netZ += dz / NODE_INV_MASS[i]!;
-    local += Math.hypot(dx, dz);
+    local += Math.hypot(dx, dy, dz);
   }
-  assert(Math.hypot(netX, netZ) < 0.0001,
-    'internal task motor creates net horizontal momentum');
+  assert(Math.hypot(netX, netY, netZ) < 0.0001,
+    'internal task motor creates net linear momentum');
   assert(local > 1, 'momentum conserved only by disabling motors');
-  console.log('PASS motor momentum', { netX, netZ, local });
+  console.log('PASS 3D motor momentum', { netX, netY, netZ, local });
+}
+
+{
+  const { p, b, tick } = fixture();
+  const melee = (b as any).melee;
+  let started = 0;
+  let wasActive = false;
+  let groundedTicks = 0;
+  let measuredTicks = 0;
+  let maxRootY = p.y;
+  let minRootY = p.y;
+  let peakAbsVy = 0;
+  for (let i = 0; i < 2400 && started < 50; i++) {
+    const activeBefore = melee.isActive(p.id);
+    tick(activeBefore ? {} : { attackPressed: true });
+    const activeAfter = melee.isActive(p.id);
+    if (!wasActive && activeAfter) started++;
+    wasActive = activeAfter;
+    maxRootY = Math.max(maxRootY, p.y);
+    minRootY = Math.min(minRootY, p.y);
+    peakAbsVy = Math.max(peakAbsVy, Math.abs(p.vy));
+    if (p.grounded) groundedTicks++;
+    measuredTicks++;
+  }
+  for (let i = 0; i < 60; i++) {
+    tick();
+    maxRootY = Math.max(maxRootY, p.y);
+    minRootY = Math.min(minRootY, p.y);
+    if (p.grounded) groundedTicks++;
+    measuredTicks++;
+  }
+  assert.equal(started, 50, 'could not execute 50 consecutive punches');
+  assert(maxRootY - minRootY < 0.18,
+    'repeated punching accumulates vertical root displacement');
+  assert(groundedTicks / measuredTicks > 0.96,
+    'repeated punching loses grounded support');
+  console.log('PASS 50-punch grounding', {
+    started, verticalRange: maxRootY - minRootY,
+    groundedFraction: groundedTicks / measuredTicks, peakAbsVy,
+  });
 }
 
 function strike(kick: boolean, cutGuard = false) {
-  const { w, p, b, tick } = fixture();
-  // Sever the final shoulder -> guard edge at its actual producer.
-  const melee = (b as any).melee;
-  if (cutGuard) melee.finishCoupledTasks = () => {};
+  const { p, tick, b } = fixture();
   const values: number[] = [];
   let peak = 0, reach = 0, turn = 0, handHeight = 0;
   let firstLift = 0, supportHeight = 0;
+  const melee = (b as any).melee;
+  if (cutGuard) melee.finishCoupledTasks = () => {};
   for (let i = 0; i < 36; i++) {
     tick(i === 0 ? kick
       ? { kickPressed: true } : { attackPressed: true } : {});

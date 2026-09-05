@@ -280,9 +280,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
         physicalSpeed = Math.hypot(this.mech.velX, this.mech.velZ);
       }
 
-      // Phase-matched cadence. Physical COM velocity remains the primary source,
-      // but intent contributes enough phase to initiate stepping instead of the
-      // old self-locking "must already move before feet can move" loop.
       const commandSpeed = this.rootSpeed[slot]!;
       const intentBlend =
         a.kind === "player"
@@ -292,9 +289,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
             : 0.4;
       const phaseSpeed =
         physicalSpeed + Math.max(0, commandSpeed - physicalSpeed) * intentBlend;
-      // A planted leg cannot cover more than its fore/aft reach while
-      // the body passes over it. The old sprint cycle asked a 0.68 m leg
-      // to remain planted across 1.48 m, lifting both feet and stalling.
       const stanceTravel = lerp(0.58, 0.78,
         this.runBlend[slot]!) * bodyScale(a);
       const cycleDistance = stanceTravel / (1 - SWING_PORTION);
@@ -347,8 +341,6 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
     const localForward = moveX * fx + moveZ * fz;
     const localSide = moveX * rx + moveZ * rz;
-    // Keep stance targets reachable as horizontal stride grows. Without
-    // lowering the hips, IK shortens a long step by lifting its support foot.
     const halfSpan = lerp(0.29, 0.39, rb) * speedN;
     const stanceDrop = 0.68 - Math.sqrt(
       Math.max(0, 0.68 ** 2 - halfSpan ** 2));
@@ -413,8 +405,18 @@ export class AnimationController extends AnimatedPhysicalBodies {
     const supportY = Math.min(rig.y[BODY.lFoot]!, rig.y[BODY.rFoot]!);
     const comH = Math.max(0.42 * scale, this.mech.comY - supportY);
     const omega0 = Math.sqrt(GRAVITY / comH);
-    const captureX = this.mech.comX + this.mech.velX / Math.max(1e-5, omega0);
-    const captureZ = this.mech.comZ + this.mech.velZ / Math.max(1e-5, omega0);
+
+    // Capture balance is driven by UNINTENDED motion. Deliberate travel along
+    // the commanded heading is the locomotion objective, not a disturbance.
+    // Discount only the achieved forward component up to commanded speed;
+    // sideways/backward motion and overspeed remain visible to recovery.
+    const commandSpeed = Math.max(0, this.rootSpeed[slot]!);
+    const alongIntent = this.mech.velX * moveX + this.mech.velZ * moveZ;
+    const intendedSpeed = Math.max(0, Math.min(commandSpeed, alongIntent));
+    const residualVx = this.mech.velX - moveX * intendedSpeed;
+    const residualVz = this.mech.velZ - moveZ * intendedSpeed;
+    const captureX = this.mech.comX + residualVx / Math.max(1e-5, omega0);
+    const captureZ = this.mech.comZ + residualVz / Math.max(1e-5, omega0);
     let ex = captureX - supportX;
     let ez = captureZ - supportZ;
     const err = Math.hypot(ex, ez);
@@ -640,4 +642,3 @@ export class AnimationController extends AnimatedPhysicalBodies {
     return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
 }
-

@@ -66,12 +66,47 @@ function modeAuthority(mode: BodyMode) {
  *
  * Explicit moving tasks are tracked as position + velocity targets before
  * integration. Static posture stabilization remains a conventional damped
- * position servo. Contacts and anatomical constraints remain authoritative.
+ * position servo. Every internal motor pass is projected to zero net linear
+ * momentum in all three axes; only support/contact/external impulses may move
+ * the body's centre of mass.
  */
 export class ActiveBodyControl {
   private readonly taskDvX = new Float32Array(BODY_NODE_COUNT);
+  private readonly taskDvY = new Float32Array(BODY_NODE_COUNT);
   private readonly taskDvZ = new Float32Array(BODY_NODE_COUNT);
   private readonly state: MechanicalState = makeMechanicalState();
+
+  private clearInternalDv() {
+    this.taskDvX.fill(0);
+    this.taskDvY.fill(0);
+    this.taskDvZ.fill(0);
+  }
+
+  private applyInternalDv(rig: BodyRig, h: number) {
+    let mass = 0;
+    let momentumX = 0;
+    let momentumY = 0;
+    let momentumZ = 0;
+
+    for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      const m = 1 / NODE_INV_MASS[node]!;
+      mass += m;
+      momentumX += this.taskDvX[node]! * m;
+      momentumY += this.taskDvY[node]! * m;
+      momentumZ += this.taskDvZ[node]! * m;
+    }
+
+    if (mass <= 0) return;
+    const commonX = momentumX / mass;
+    const commonY = momentumY / mass;
+    const commonZ = momentumZ / mass;
+
+    for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      rig.px[node] -= (this.taskDvX[node]! - commonX) * h;
+      rig.py[node] -= (this.taskDvY[node]! - commonY) * h;
+      rig.pz[node] -= (this.taskDvZ[node]! - commonZ) * h;
+    }
+  }
 
   driveTasksPreIntegration(
     w: World,
@@ -110,13 +145,8 @@ export class ActiveBodyControl {
     const baseMaxDv =
       (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
 
-    this.taskDvX.fill(0);
-    this.taskDvZ.fill(0);
-    let momentumX = 0;
-    let momentumZ = 0;
-    let mass = 0;
+    this.clearInternalDv();
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
-      mass += 1 / NODE_INV_MASS[node]!;
       const taskPriority = bodyTaskTargets.priorityFor(a, node);
       if (taskPriority <= 0) continue;
 
@@ -187,8 +217,6 @@ export class ActiveBodyControl {
       const kp = omega * omega;
       const kd = 2 * 0.88 * omega;
 
-      // Moving-target PD: do not damp away the velocity required to follow the
-      // task. The derivative term tracks desired task velocity instead.
       let dvx = (kp * ex + kd * (tvx - vx)) * h * authority * taskWeight;
       let dvy = (kp * ey + kd * (tvy - vy)) * h * authority * taskWeight;
       let dvz = (kp * ez + kd * (tvz - vz)) * h * authority * taskWeight;
@@ -202,21 +230,11 @@ export class ActiveBodyControl {
       }
 
       this.taskDvX[node] = dvx;
+      this.taskDvY[node] = dvy;
       this.taskDvZ[node] = dvz;
-      momentumX += dvx / NODE_INV_MASS[node]!;
-      momentumZ += dvz / NODE_INV_MASS[node]!;
-      rig.py[node] -= dvy * h;
     }
 
-    // Internal posture motors redistribute horizontal momentum. Only the
-    // support reaction and contacts may accelerate the body as a whole.
-    // Otherwise tracking a pelvis-relative pose brakes locomotion every tick.
-    const commonX = momentumX / mass;
-    const commonZ = momentumZ / mass;
-    for (let node = 0; node < BODY_NODE_COUNT; node++) {
-      rig.px[node] -= (this.taskDvX[node]! - commonX) * h;
-      rig.pz[node] -= (this.taskDvZ[node]! - commonZ) * h;
-    }
+    this.applyInternalDv(rig, h);
   }
 
   drive(
@@ -258,6 +276,7 @@ export class ActiveBodyControl {
     const maxDv =
       (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
 
+    this.clearInternalDv();
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
       if (bodyTaskTargets.priorityFor(a, node) > 0) continue;
 
@@ -310,12 +329,13 @@ export class ActiveBodyControl {
         dvz *= q;
       }
 
-      rig.px[node] -= dvx * h;
-      rig.py[node] -= dvy * h;
-      rig.pz[node] -= dvz * h;
+      this.taskDvX[node] = dvx;
+      this.taskDvY[node] = dvy;
+      this.taskDvZ[node] = dvz;
     }
+
+    this.applyInternalDv(rig, h);
   }
 }
 
 export const activeBodyControl = new ActiveBodyControl();
-

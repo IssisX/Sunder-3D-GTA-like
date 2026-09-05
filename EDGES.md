@@ -14,6 +14,8 @@ under advanced-game-math, with debug-causal owning diagnosis.
 | Turned shoulders → kick guard | Final arm IK uses the winning shoulder frame after coupling | Sever final guard pass: minimum hand height at tick 13 drops from 1.26 to 1.09 m |
 | Support surface → kick height | Capture support height instead of feeding solved pelvis lift back into the next target | First 20 ticks: supporting foot center stays below 0.22 m |
 | Solved fist sweep → contact consequence | Shorter jab/cross cycles; bounded fist-plus-forearm contact mass in existing empirical impact model | Same small target: 22.02 damage; sever contact resolver: zero |
+| Internal motor → articulated shape, not COM propulsion | Mass-weighted projection removes net X/Y/Z momentum from moving-task and posture motors; support/contact remain the only locomotor/external impulse source | Direct motor probe requires vigorous local node motion with near-zero 3D net momentum; 50 back-to-back grounded punches bound root-height drift |
+| Commanded travel → gait, unintended motion → recovery | Capture-point corrective stepping discounts only achieved velocity along commanded movement up to requested speed; lateral/backward/overspeed disturbance remains | Ten-second clear-ground walk rejects repeated low-speed windows and reports corrective-step activity |
 
 Kick heel trajectory has one owner. Coupling fits a reachable two-link leg to
 the rotated hip instead of replacing the trajectory with another phase curve.
@@ -52,16 +54,34 @@ were inspected using the production fixed step through `__controlsTest`.
 Cloud browser could not access localhost; local Playwright with packaged
 Chromium/SwiftShader was the browser fallback. Audio was not judged by listening.
 
+## 2026-09-05 control-stability continuation
+
+Two repair edges close physics/controller leaks exposed by the touch-first
+combat requirements:
+
+- **Internal actuation → shape, not propulsion.** Both moving task motors and
+  background posture motors are now mass-projected to zero net linear momentum
+  in X/Y/Z. A punch may shift or rotate the body only through support reaction,
+  contact, or another external impulse; internal limb commands cannot launch it.
+- **Intentional travel → locomotion; residual travel → capture recovery.** The
+  capture-point correction removes only the achieved component along current
+  commanded travel, capped by requested speed. Sideways/backward motion and
+  overspeed are still disturbances. This prevents ordinary forward gait from
+  repeatedly asking the recovery controller to fight the locomotion controller.
+
+The direct falsifiers are the 3D motor-momentum probe, a 50-punch grounded
+sequence, and the clear-ground continuity window in `tests/substrate/probe.ts`.
+
 ## Remaining limits and next targets
 
-This remains a bounded active-ragdoll approximation. Horizontal task actuation
-conserves its weighted linear momentum; that is not a claim of full angular or
-vertical conservation. Fist effective contact mass is empirically bounded, not
-computed from an articulated inverse mass matrix. Kick support foot can still
-lift about 0.11 m beyond its 0.10 m radius at the worst tested frame; contact
-compliance and planting need further refinement. Hardware gamepad and physical
-phone feel/performance remain unverified.
+This remains a bounded active-ragdoll approximation. Internal task/posture
+actuation now conserves weighted linear momentum in all three axes; angular
+momentum is still approximate and support yaw is handled through the bounded
+foot-ground wrench. Fist effective contact mass is empirically bounded, not
+computed from an articulated inverse mass matrix. Kick support contact compliance
+still needs refinement. Hardware Fold 6 touch feel/performance remains
+unverified.
 
-The next two capabilities now cheaper to implement are support-aware kick
-height/reach selection, and guard-aware directional blocking using the final
-shoulder/hand frame. First priority is reducing residual support-foot lift.
+The next capabilities made cheaper are touch-intent combat buffering over the
+same mechanical action tasks, and support-aware action continuation that carries
+locomotion/stance through attack and recovery instead of cancelling movement.
