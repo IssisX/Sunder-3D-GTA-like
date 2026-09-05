@@ -37,6 +37,7 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly coupling = new WholeBodyCoupling(this);
   private readonly rootAuthority = new HumanRootAuthority();
   private readonly centroidal = new CentroidalLocomotion(this);
+  private playerJumpRequested = false;
 
   override bootstrap(w: World) {
     super.bootstrap(w);
@@ -46,6 +47,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.coupling.bootstrap(w);
     this.rootAuthority.clear();
     this.social.reset();
+    this.playerJumpRequested = false;
   }
 
   override clear() {
@@ -55,6 +57,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.coupling.clear();
     this.rootAuthority.clear();
     this.social.reset();
+    this.playerJumpRequested = false;
   }
 
   override reset(a: Actor) {
@@ -63,6 +66,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.reset(a);
     this.coupling.reset(a);
     this.rootAuthority.reset(a);
+    if (a.kind === "player") this.playerJumpRequested = false;
   }
 
   override captureInput(input: Actions) {
@@ -71,6 +75,10 @@ export class ProceduralAnimationController extends AnimationController {
   }
 
   override prepareInput(w: World, input: Actions, dt: number) {
+    // Capture the semantic command before any compatibility layer mutates input.
+    // This one-tick authorization is the only path from player jump intent to
+    // external upward support work on the articulated body.
+    this.playerJumpRequested = Boolean(input.jumpPressed);
     super.prepareInput(w, input, dt);
     this.melee.prepareInput(w, input);
   }
@@ -102,9 +110,17 @@ export class ProceduralAnimationController extends AnimationController {
       if (!rig?.initialized) continue;
       const mode = bodyMode(a);
       activeBodyControl.driveTasksPreIntegration(w, a, rig, dt, mode);
-      supportMotion.drive(w, a, rig, dt, mode);
+      supportMotion.drive(
+        w,
+        a,
+        rig,
+        dt,
+        mode,
+        a.kind === "player" && this.playerJumpRequested,
+      );
       supportWrench.drive(w, a, rig, dt, mode);
     }
+    this.playerJumpRequested = false;
 
     super.step(w, dt);
     this.melee.step(w, dt);

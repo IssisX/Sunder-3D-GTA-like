@@ -48,6 +48,7 @@ export class SupportMotionController {
     rig: BodyRig,
     dt: number,
     mode: BodyMode,
+    jumpRequested = false,
   ) {
     if (!a.alive || a.grabbedBy || mode === "dynamic") return;
     if (a.loco === "swim" || a.loco === "climb" || a.loco === "vault") return;
@@ -143,8 +144,12 @@ export class SupportMotionController {
     const dvx = ax * h;
     const dvz = az * h;
 
+    // Vertical support work is authorized only by the explicit jump input edge.
+    // Pelvis motion produced by punches, kicks, recovery or posture is measured
+    // body state, not a command. Treating that difference as jump intent created
+    // a positive feedback loop that launched grounded fighters.
     let dvy = 0;
-    if (a.vy > this.state.velY + 0.7 && a.vy > 1.2) {
+    if (jumpRequested && a.vy > this.state.velY + 0.7 && a.vy > 1.2) {
       const requested = Math.min(7.2 * scale, a.vy - this.state.velY);
       dvy = Math.max(0, requested);
     }
@@ -166,4 +171,3 @@ export class SupportMotionController {
 }
 
 export const supportMotion = new SupportMotionController();
-
