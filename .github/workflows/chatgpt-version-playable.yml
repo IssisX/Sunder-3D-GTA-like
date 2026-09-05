@@ -1,4 +1,4 @@
-name: Build ChatGPT-version playable
+name: Build and deploy ChatGPT-version preview
 
 on:
   push:
@@ -8,6 +8,12 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
 
 jobs:
   playable:
@@ -31,16 +37,40 @@ jobs:
       - name: Typecheck current source
         run: npm run typecheck
 
-      - name: Build single-file canonical playable
+      - name: Build canonical browser preview from source
         run: npm run build:local-preview
 
-      - name: Verify playable artifact exists
-        run: test -s local-preview-dist/SUNDER.html
+      - name: Verify browser preview bundle
+        run: |
+          test -s local-preview-dist/index.html
+          test -s local-preview-dist/style.css
+          test -s local-preview-dist/sunder.js
+          test -s local-preview-dist/SUNDER.html
 
-      - name: Upload playable
+      - name: Upload downloadable standalone fallback
         uses: actions/upload-artifact@v4
         with:
           name: SUNDER-ChatGPT-version-${{ github.sha }}
           path: local-preview-dist/SUNDER.html
           if-no-files-found: error
           retention-days: 14
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload browser preview site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: local-preview-dist
+
+  deploy:
+    name: Deploy browser preview
+    needs: playable
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy preview to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
