@@ -913,7 +913,7 @@ function consume(w: World, a: Actor, dt: number) {
     } else if (peak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
       collapse(w, a, 0.35 + peak * 0.04);
     } else if (losing) {
-      if (margin < FALL_MARGIN || a.consciousness < 0.3) {
+      if (margin < FALL_MARGIN || a.consciousness < STANCE_CONSCIOUS) {
         collapse(w, a);
       } else if (a.catchT <= 0) {
         const lm = legMotor(a);
@@ -938,7 +938,7 @@ function consume(w: World, a: Actor, dt: number) {
     if (pinned) {
       a.loco = "pin";
       a.stanceAuth = Math.min(a.stanceAuth, 0.3);
-    } else if (settled && a.locoT <= 0 && a.consciousness > 0.25 && a.alive) {
+    } else if (settled && a.locoT <= 0 && a.consciousness > RISE_CONSCIOUS && a.alive) {
       a.loco = "getup";
       a.getupT = 0;
     } else {
@@ -1009,6 +1009,21 @@ export function collapse(w: World, a: Actor, hold = 0) {
 
 /** Rate at which a body that has lost its stance gives up the rest of it, s^-1. */
 const LIMP_RATE = 4.2;
+/**
+ * Consciousness below which a body cannot hold a stance at all: the balance
+ * controller stops trying and lets it go down.
+ */
+export const STANCE_CONSCIOUS = 0.3;
+/**
+ * Consciousness a body must reach before it tries to get up.
+ *
+ * This has to sit clear ABOVE `STANCE_CONSCIOUS`, not below it. It used to be
+ * 0.25 against a floor of 0.3, which left a band where a body would rise, be
+ * collapsed by its own balance controller on the next tick, hit the ground,
+ * and try again -- banging its head until the head trauma killed it. Anything
+ * that decides a body is ready to be back on its feet reads this.
+ */
+export const RISE_CONSCIOUS = 0.36;
 
 /**
  * Trip test: a foot that finds contact well above the ground while the body is

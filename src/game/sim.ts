@@ -36,6 +36,7 @@ import {
 import { dropFrame, makeFrame, wakeFrame } from "./frames";
 import { HELD, solveReactions } from "./statics";
 import {
+  RISE_CONSCIOUS,
   armMotor,
   checkTrips,
   collapse,
@@ -1740,7 +1741,28 @@ function resolveProp(w: World, p: Prop) {
  * actor between down and rising several times a second.
  */
 const DOWN_ENTER = 0.15;
-const DOWN_EXIT = 0.22;
+/**
+ * Leaving "down" is the same decision as deciding a body is ready to rise, so
+ * it reads the same number the balance controller does. Picking an independent
+ * one put the exit below the floor at which a stance can be held: the body
+ * stood up into a controller that immediately collapsed it again.
+ */
+const DOWN_EXIT = RISE_CONSCIOUS;
+/**
+ * Bleed rate at or under which a wound counts as closed, per second. The
+ * passive decay on `bleed` always reaches this, so every wound closes
+ * eventually and no body is left bleeding for good.
+ */
+const BLEED_CLOSED = 0.02;
+/**
+ * Blood volume restored per second once the wound is closed, as a fraction of
+ * full. At 0.004 a drained body is whole again in about 250 s, a little under
+ * half of the 540 s day -- fast enough that coming round after a bad bleed is
+ * a beat rather than a wait, slow enough that being cut open still costs you
+ * the fight you are in. An open bleed drains far faster than this, so bleeding
+ * out is untouched: at bleed 0.5 the loss is 0.06/s against this 0.004/s.
+ */
+const BLOOD_REFILL = 0.004;
 
 function stepInjury(w: World, dt: number) {
   for (const a of w.actors) {
@@ -1762,18 +1784,40 @@ function stepInjury(w: World, dt: number) {
       }
     }
     a.pain = clamp(a.pain * (1 - dt * 0.08) + injurySum(a.injuries.torso) * 0.05, 0, 1);
-    if (a.blood < 0.25) a.consciousness = Math.min(a.consciousness, a.blood * 2);
     if (a.breath <= 0) a.consciousness -= dt * 0.4;
     if (injurySum(a.injuries.head) > 1.6) a.consciousness -= dt * 0.15;
-    // Coming round. Consciousness could only ever fall, which made every
-    // knockdown terminal -- there was no state between standing and dead. A
-    // body that is breathing, not bleeding out and not concussed past saving
-    // comes back, slowly, and how slowly is what head trauma costs you.
-    if (a.alive && a.blood > 0.35 && a.breath > 0.25) {
-      const head = injurySum(a.injuries.head);
-      const rate = 0.055 * clamp(1 - head / 1.8, 0, 1) * clamp((a.blood - 0.35) / 0.5, 0, 1);
-      a.consciousness += rate * dt;
+    // Blood is a reservoir, not a one-way drain. It was only ever subtracted
+    // from -- the bleed above was the single place in the game that wrote it --
+    // so a body that had bled below the ceiling further down could never get
+    // back over it. That left a band, roughly 2% to 7% blood, where an actor
+    // was alive, unconscious, and unrecoverable for the rest of the session:
+    // strictly worse than dying, because death at least ends.
+    //
+    // Volume comes back once the wound is closed, over a good part of a day.
+    // This is what makes `bleed` and `blood` genuinely different quantities
+    // rather than two names for one drain: the bleed is the emergency and it
+    // kills in seconds, the reservoir is the debt and it repays slowly. It is
+    // also what finally makes binding a wound decisive, because closing the
+    // bleed is what flips a body from dying to mending.
+    if (a.alive && a.bleed <= BLEED_CLOSED) {
+      a.blood = Math.min(1, a.blood + BLOOD_REFILL * dt);
     }
+    // Coming round. Consciousness could only ever fall, which made every
+    // knockdown terminal -- there was no state between standing and dead. What
+    // brings a body back is being stable and breathing, not being full: how
+    // much blood is left decides how ALERT it can get, and that is the ceiling
+    // below rather than a gate here. Gating recovery on blood > 0.35 meant the
+    // one state that most needed a way out was the one state that had none.
+    // How slowly it comes round is still what head trauma costs you.
+    if (a.alive && a.bleed <= BLEED_CLOSED && a.breath > 0.25) {
+      const head = injurySum(a.injuries.head);
+      a.consciousness += 0.055 * clamp(1 - head / 1.8, 0, 1) * dt;
+    }
+    // What is left in the body caps how alert it can be. This is the last word
+    // on consciousness each tick, so recovery can approach the ceiling and
+    // never cross it -- applied before the recovery instead, the two fought
+    // every tick and consciousness sawtoothed around the cap.
+    if (a.blood < 0.25) a.consciousness = Math.min(a.consciousness, a.blood * 2);
     a.consciousness = clamp(a.consciousness, 0, 1);
     if (a.alive && (a.blood <= 0.02 || a.consciousness <= 0 || a.y < -2.5)) {
       kill(w, a, a.blood <= 0.02 ? "bled out" : a.y < -2.5 ? "drowned" : "the body gave out");
@@ -1804,6 +1848,7 @@ function stepInjury(w: World, dt: number) {
       // controller, at the same rate a fall or a shove would.
       a.loco = "getup";
       a.getupT = 0;
+      a.downT = 0;
       if (a.kind === "player" && w.phase === "down") {
         // An ordinary knockdown never touches `w.phase` at all -- authority
         // alone gates what a ragdolled body can do, input stays live the whole
