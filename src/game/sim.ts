@@ -58,8 +58,27 @@ const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
 /** Fastest a prop may be moving at the moment it becomes a physical body, m/s. */
 const PROP_BIRTH_SPEED = 10;
+/**
+ * Per-node velocity discontinuity applied at a single frame node to start a
+ * collapse rotating, m/s-equivalent against the whole prop's mass. These are
+ * not measured physical speeds -- concentrating a small kick on one node
+ * while its neighbours keep the body's bulk velocity is what the constraint
+ * solve turns into torque, the same mechanism validated for melee and throw
+ * impulses. `EDGE` pushes sideways from a guessed direction; `DROP` pulls a
+ * known failed corner down.
+ */
+const COLLAPSE_EDGE_KICK = 0.06;
+const COLLAPSE_DROP_KICK = 0.5;
 /** Parts that came down this tick; reused, never reallocated. */
 const fellScratch: Prop[] = [];
+/**
+ * World-space (x, z) centroid of the dead supports behind each `fellScratch`
+ * entry, parallel to it. This is the real edge a tipped or unsupported part
+ * gave way from -- not the part's own centre -- so `collapseProp` can anchor
+ * the initiating impulse there instead of guessing a direction from velocity.
+ */
+const fellFailX: number[] = [];
+const fellFailZ: number[] = [];
 
 export interface Cam {
   yaw: number;
@@ -2088,7 +2107,7 @@ function damageProp(w: World, p: Prop, dmg: number, vx: number, vz: number, by?:
   else w.emitSound(p.x, p.z, 0.3, "wood", by?.id ?? 0);
 }
 
-function collapseProp(w: World, p: Prop, vx: number, vz: number) {
+function collapseProp(w: World, p: Prop, vx: number, vz: number, failX = NaN, failZ = NaN) {
   if (p.collapsed) return;
   p.collapsed = true;
   p.dynamic = true;
@@ -2115,20 +2134,36 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
     const B = w.bodies;
     B.addVelocity(slot, p.vx, p.vy, p.vz, STEP);
     // A structural member starts falling because one side gave way, not
-    // because it was pushed from its own centre, so the force that starts
-    // it moving belongs at an edge. Which edge is not known here -- that
-    // would mean threading the failed support's position through from
-    // stepStructures, a real follow-up -- but (vx, vz) already carries
-    // whatever direction the caller does know (the blow that broke it, or
-    // upstream jitter standing in for the side that let go). Projecting to
-    // the real node in that direction and pushing there, instead of
-    // injecting an angular velocity that was never a force anywhere, is
-    // what actually needs to be true even when the input to it is a guess.
-    const m = Math.hypot(vx, vz);
-    if (m > 1e-4) {
-      const reach = Math.max(p.sx, p.sy, p.sz) + 1;
-      const node = B.nearestNode(slot, p.x + (vx / m) * reach, p.y + p.sy * 0.5, p.z + (vz / m) * reach, reach);
-      if (node >= 0) B.applyImpulse(slot, node, vx * p.mass * 0.06, 0, vz * p.mass * 0.06, STEP);
+    // because it was pushed from its own centre, so the force that starts it
+    // moving belongs at an edge. When the caller knows which edge -- a tipped
+    // or unsupported part, threaded from the same reaction solve that decided
+    // it was no longer held -- anchor there and pull that corner down: the
+    // rest of the frame is still rigidly connected, so the constraint solve
+    // turns one corner's extra downward velocity into the same genuine
+    // rotation already validated for melee and throw impulses, pivoting away
+    // from the support that actually failed instead of an arbitrary axis.
+    // Without that (a lone post crushed by its own overload, say -- there is
+    // no other support to blame, `p` already IS the failed element), fall
+    // back to projecting from (vx, vz): the best direction the caller has.
+    const reach = Math.max(p.sx, p.sy, p.sz) + 1;
+    if (Number.isFinite(failX) && Number.isFinite(failZ)) {
+      const node = B.nearestNode(slot, failX, p.y - p.sy * 0.5, failZ, reach);
+      if (node >= 0) {
+        B.applyImpulse(
+          slot,
+          node,
+          vx * p.mass * COLLAPSE_EDGE_KICK,
+          -p.mass * COLLAPSE_DROP_KICK,
+          vz * p.mass * COLLAPSE_EDGE_KICK,
+          STEP,
+        );
+      }
+    } else {
+      const m = Math.hypot(vx, vz);
+      if (m > 1e-4) {
+        const node = B.nearestNode(slot, p.x + (vx / m) * reach, p.y + p.sy * 0.5, p.z + (vz / m) * reach, reach);
+        if (node >= 0) B.applyImpulse(slot, node, vx * p.mass * COLLAPSE_EDGE_KICK, 0, vz * p.mass * COLLAPSE_EDGE_KICK, STEP);
+      }
     }
   }
   w.emitSound(p.x, p.z, p.sy > 1.5 ? 1.1 : 0.55, p.sy > 1.5 ? "collapse" : "break", 0);
@@ -2225,6 +2260,29 @@ function gatherSupports(w: World, b: Building) {
 function accumulateLoad(w: World, b: Building, n: number, fell: Prop[] | null) {
   let live = 0;
   for (let i = 0; i < n; i++) if (supLive[i]) live++;
+
+  // Centroid of whichever of these supports are no longer live -- the real
+  // edge a part comes down from, for `collapseProp` to anchor on. NaN when
+  // none are dead (a tip from geometry alone finds no failed support to
+  // blame). Computed once per building: `supLive` does not change across the
+  // reaction solves below, since `solveReactions` mutates its own scratch
+  // copy, never the array it is given.
+  let deadX = NaN;
+  let deadZ = NaN;
+  if (live < n) {
+    let sx = 0;
+    let sz = 0;
+    let dn = 0;
+    for (let i = 0; i < n; i++) {
+      if (supLive[i]) continue;
+      sx += supX[i]!;
+      sz += supZ[i]!;
+      dn++;
+    }
+    deadX = sx / dn;
+    deadZ = sz / dn;
+  }
+
   if (!live) {
     // Nothing is holding it up. Returning here would leave a roof standing on
     // four dead posts, which is exactly the all-or-nothing failure this solve
@@ -2232,7 +2290,11 @@ function accumulateLoad(w: World, b: Building, n: number, fell: Prop[] | null) {
     if (fell) {
       for (const id of b.parts) {
         const p = w.prop(id);
-        if (p && !p.collapsed && p.y > FOUNDED_Y) fell.push(p);
+        if (p && !p.collapsed && p.y > FOUNDED_Y) {
+          fell.push(p);
+          fellFailX.push(deadX);
+          fellFailZ.push(deadZ);
+        }
       }
     }
     return;
@@ -2254,6 +2316,8 @@ function accumulateLoad(w: World, b: Building, n: number, fell: Prop[] | null) {
         // Tipped past the edge of what is left standing, or nothing left at
         // all. Either way it is no longer being held up.
         fell.push(p);
+        fellFailX.push(deadX);
+        fellFailZ.push(deadZ);
       }
     } else {
       // Severed: an equal share per standing support, with no position in it.
@@ -2304,11 +2368,14 @@ function stepStructures(w: World, dt: number) {
     for (let i = 0; i < n; i++) supAccum[i] = 0;
 
     fellScratch.length = 0;
+    fellFailX.length = 0;
+    fellFailZ.length = 0;
     accumulateLoad(w, b, n, fellScratch);
 
     // Anything the remaining supports cannot balance comes down where it stood.
-    for (const p of fellScratch) {
-      collapseProp(w, p, (w.rng() - 0.5) * 2, (w.rng() - 0.5) * 2);
+    for (let i = 0; i < fellScratch.length; i++) {
+      const p = fellScratch[i]!;
+      collapseProp(w, p, (w.rng() - 0.5) * 2, (w.rng() - 0.5) * 2, fellFailX[i], fellFailZ[i]);
       w.whisper("Something gives way overhead.");
       w.shake = Math.max(w.shake, 0.45);
     }
