@@ -33,12 +33,18 @@ function bodyOwnsRoot(a: Actor) {
  * translation is discarded before task generation. The body then advances from
  * support reaction + active control + contacts and derives Actor root afterward.
  *
+ * Player facing is also preserved when the movement stick is neutral. The
+ * legacy player path tries to rotate an idle player back toward camera-forward;
+ * that is a presentation convenience, not mechanical truth. Movement may turn
+ * the body while input is active, but releasing the stick keeps the last heading.
+ *
  * This is intentionally zero-GC in the fixed-step hot path.
  */
 export class HumanRootAuthority {
   private readonly x = new Float32Array(ENTITY_ID_CAP);
   private readonly y = new Float32Array(ENTITY_ID_CAP);
   private readonly z = new Float32Array(ENTITY_ID_CAP);
+  private readonly yaw = new Float32Array(ENTITY_ID_CAP);
   private readonly valid = new Uint8Array(ENTITY_ID_CAP);
 
   capture(w: World) {
@@ -48,6 +54,7 @@ export class HumanRootAuthority {
       this.x[a.id] = a.x;
       this.y[a.id] = a.y;
       this.z[a.id] = a.z;
+      this.yaw[a.id] = a.yaw;
       this.valid[a.id] = 1;
     }
   }
@@ -66,6 +73,13 @@ export class HumanRootAuthority {
       a.x = this.x[a.id]!;
       a.y = this.y[a.id]!;
       a.z = this.z[a.id]!;
+
+      // Do not let neutral input rotate the player back toward camera-forward.
+      // While moving, applyPlayer may still turn toward the chosen movement
+      // direction; once movement ends, that final heading persists.
+      if (a.kind === "player" && a.intendSpeed < 0.1) {
+        a.yaw = this.yaw[a.id]!;
+      }
     }
   }
 
@@ -74,6 +88,7 @@ export class HumanRootAuthority {
     this.x[a.id] = a.x;
     this.y[a.id] = a.y;
     this.z[a.id] = a.z;
+    this.yaw[a.id] = a.yaw;
     this.valid[a.id] = 1;
   }
 
