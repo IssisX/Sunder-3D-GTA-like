@@ -20,4 +20,4 @@ registerHooks({
     return { format: 'module', source, shortCircuit: true };
   },
 });
-await import('../tests/substrate/action-continuity-probe.ts');
+await import('../tests/substrate/current-stance-action-probe.ts');
