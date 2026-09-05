@@ -3,6 +3,7 @@ import type { World } from "./world";
 import { BODY, type PhysicalBodies } from "./body";
 import { bodyScale, type BodyRig } from "./body-model";
 import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
+import { footSupported } from "./action-support";
 
 const ENTITY_ID_CAP = 8192;
 const BODY_CAP = 128;
@@ -25,6 +26,7 @@ function human(a: Actor) {
 export class WholeBodyCoupling {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
   private readonly kind = new Uint8Array(BODY_CAP);
+  private readonly supportMask = new Uint8Array(BODY_CAP);
   private readonly lFootX = new Float32Array(BODY_CAP);
   private readonly lFootY = new Float32Array(BODY_CAP);
   private readonly lFootZ = new Float32Array(BODY_CAP);
@@ -48,12 +50,16 @@ export class WholeBodyCoupling {
   clear() {
     this.slotById.fill(-1);
     this.kind.fill(0);
+    this.supportMask.fill(0);
     this.slotCount = 0;
   }
 
   reset(a: Actor) {
     const slot = this.slot(a.id);
-    if (slot >= 0) this.kind[slot] = NONE;
+    if (slot >= 0) {
+      this.kind[slot] = NONE;
+      this.supportMask[slot] = 0;
+    }
   }
 
   prepare(w: World) {
@@ -66,6 +72,7 @@ export class WholeBodyCoupling {
       const rig = this.bodies.get(a);
       if (!rig?.initialized || rig.mode !== "follow") {
         this.kind[slot] = NONE;
+        this.supportMask[slot] = 0;
         continue;
       }
 
@@ -84,7 +91,12 @@ export class WholeBodyCoupling {
 
       if (detected !== this.kind[slot]!) {
         this.kind[slot] = detected;
-        if (detected !== NONE) this.captureFeet(rig, slot);
+        this.supportMask[slot] = 0;
+        if (detected !== NONE) {
+          this.captureFeet(rig, slot);
+          if (footSupported(w, a, rig, BODY.lFoot)) this.supportMask[slot] |= 1;
+          if (footSupported(w, a, rig, BODY.rFoot)) this.supportMask[slot] |= 2;
+        }
       }
 
       if (detected === PUNCH) {
@@ -109,43 +121,70 @@ export class WholeBodyCoupling {
     const drive = clamp01(reach / (0.56 * scale));
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
+    const mask = this.supportMask[slot]!;
 
-    // Boxing force chain: lead-foot gather for the jab, rear-foot brace for the
-    // cross, then pelvis/chest travel before the fist reaches full extension.
-    const leadStep = (jab ? 0.1 : 0.05) * drive * scale;
-    const rearSet = (jab ? 0.016 : 0.046) * drive * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      BODY.lFoot,
-      this.lFootX[slot]! + fx * leadStep,
-      this.lFootY[slot]!,
-      this.lFootZ[slot]! + fz * leadStep,
-      1,
-      TASK_PRIORITY.CONTACT_CRITICAL,
-    );
-    bodyTaskTargets.offerWorld(
-      a,
-      BODY.rFoot,
-      this.rFootX[slot]! - fx * rearSet,
-      this.rFootY[slot]!,
-      this.rFootZ[slot]! - fz * rearSet,
-      1,
-      TASK_PRIORITY.CONTACT_CRITICAL,
-    );
+    // Preserve the stance that physically existed at action entry. A supported
+    // foot may brace exactly where it already was; an unsupported/swinging foot
+    // is not pulled into an authored boxing layout and remains available to the
+    // incoming locomotion step carried by ActionContinuity.
+    if (mask & 1) {
+      bodyTaskTargets.offerWorld(
+        a,
+        BODY.lFoot,
+        this.lFootX[slot]!,
+        this.lFootY[slot]!,
+        this.lFootZ[slot]!,
+        1,
+        TASK_PRIORITY.CONTACT_CRITICAL,
+      );
+    }
+    if (mask & 2) {
+      bodyTaskTargets.offerWorld(
+        a,
+        BODY.rFoot,
+        this.rFootX[slot]!,
+        this.rFootY[slot]!,
+        this.rFootZ[slot]!,
+        1,
+        TASK_PRIORITY.CONTACT_CRITICAL,
+      );
+    }
 
     const pelvisX = bodyTaskTargets.targetXFor(a, BODY.pelvis);
     const pelvisY = bodyTaskTargets.targetYFor(a, BODY.pelvis);
     const pelvisZ = bodyTaskTargets.targetZFor(a, BODY.pelvis);
-    const leadDx = this.lFootX[slot]! - rig.x[BODY.pelvis]!;
-    const leadDz = this.lFootZ[slot]! - rig.z[BODY.pelvis]!;
-    const transfer = (jab ? 0.17 : 0.31) * drive;
-    const surge = (jab ? 0.055 : 0.12) * drive * scale;
+
+    let supportX = rig.x[BODY.pelvis]!;
+    let supportZ = rig.z[BODY.pelvis]!;
+    let supportCount = 0;
+    if (mask & 1) {
+      supportX += this.lFootX[slot]!;
+      supportZ += this.lFootZ[slot]!;
+      supportCount++;
+    }
+    if (mask & 2) {
+      supportX += this.rFootX[slot]!;
+      supportZ += this.rFootZ[slot]!;
+      supportCount++;
+    }
+    if (supportCount > 0) {
+      supportX = (supportX - rig.x[BODY.pelvis]!) / supportCount;
+      supportZ = (supportZ - rig.z[BODY.pelvis]!) / supportCount;
+    } else {
+      supportX = rig.x[BODY.pelvis]!;
+      supportZ = rig.z[BODY.pelvis]!;
+    }
+
+    const toSupportX = supportX - rig.x[BODY.pelvis]!;
+    const toSupportZ = supportZ - rig.z[BODY.pelvis]!;
+    const transfer = (jab ? 0.13 : 0.24) * drive;
+    const surge = (jab ? 0.052 : 0.105) * drive * scale;
     bodyTaskTargets.offerWorld(
       a,
       BODY.pelvis,
-      pelvisX + leadDx * transfer + fx * surge,
-      pelvisY - (jab ? 0.018 : 0.035) * drive * scale,
-      pelvisZ + leadDz * transfer + fz * surge,
+      pelvisX + toSupportX * transfer + fx * surge,
+      pelvisY - (jab ? 0.016 : 0.032) * drive * scale,
+      pelvisZ + toSupportZ * transfer + fz * surge,
       1,
       TASK_PRIORITY.ACTION,
     );
@@ -156,21 +195,33 @@ export class WholeBodyCoupling {
     bodyTaskTargets.offerWorld(
       a,
       BODY.chest,
-      chestX + leadDx * transfer * 0.55 + fx * surge * 0.9,
+      chestX + toSupportX * transfer * 0.55 + fx * surge * 0.9,
       chestY,
-      chestZ + leadDz * transfer * 0.55 + fz * surge * 0.9,
+      chestZ + toSupportZ * transfer * 0.55 + fz * surge * 0.9,
       1,
       TASK_PRIORITY.ACTION,
     );
 
-    const rearKnee = BODY.rKnee;
-    if (bodyTaskTargets.priorityFor(a, rearKnee) >= TASK_PRIORITY.ACTION) {
+    // Recruit whichever leg is actually behind the pelvis in the current
+    // stance. If only one foot is supporting, that real support leg wins.
+    const lForward =
+      (this.lFootX[slot]! - rig.x[BODY.pelvis]!) * fx +
+      (this.lFootZ[slot]! - rig.z[BODY.pelvis]!) * fz;
+    const rForward =
+      (this.rFootX[slot]! - rig.x[BODY.pelvis]!) * fx +
+      (this.rFootZ[slot]! - rig.z[BODY.pelvis]!) * fz;
+    let driveLeft = lForward < rForward;
+    if (mask === 1) driveLeft = true;
+    else if (mask === 2) driveLeft = false;
+    const driveKnee = driveLeft ? BODY.lKnee : BODY.rKnee;
+    if (bodyTaskTargets.priorityFor(a, driveKnee) >= TASK_PRIORITY.ACTION) {
       bodyTaskTargets.offerWorld(
         a,
-        rearKnee,
-        bodyTaskTargets.targetXFor(a, rearKnee),
-        bodyTaskTargets.targetYFor(a, rearKnee) - (jab ? 0.024 : 0.07) * drive * scale,
-        bodyTaskTargets.targetZFor(a, rearKnee),
+        driveKnee,
+        bodyTaskTargets.targetXFor(a, driveKnee),
+        bodyTaskTargets.targetYFor(a, driveKnee)
+          - (jab ? 0.022 : 0.062) * drive * scale,
+        bodyTaskTargets.targetZFor(a, driveKnee),
         1,
         TASK_PRIORITY.ACTION,
       );
@@ -202,8 +253,6 @@ export class WholeBodyCoupling {
     const rx = Math.cos(a.yaw);
     const rz = -Math.sin(a.yaw);
 
-    // Use the original melee task only as a phase signal. The final leg geometry
-    // below is a side kick, not a remapped front-kick pose.
     const rawFootX = bodyTaskTargets.targetXFor(a, attackFoot);
     const rawFootY = bodyTaskTargets.targetYFor(a, attackFoot);
     const rawFootZ = bodyTaskTargets.targetZFor(a, attackFoot);
@@ -215,7 +264,6 @@ export class WholeBodyCoupling {
     const chamber = clamp01(flight * (1 - extension * 0.72));
     const turn = clamp01(chamber * 0.78 + extension);
 
-    // The support foot is the pivot and remains a hard task-space anchor.
     bodyTaskTargets.offerWorld(
       a,
       supportFoot,
@@ -246,9 +294,6 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.ACTION,
     );
 
-    // True transverse-axis rotation instead of shear offsets. At peak turn the
-    // pelvis rotates about 70 degrees toward the attack while preserving hip
-    // width. Shoulders lag slightly, producing a real hip-to-torso torque chain.
     const theta = side * turn * 1.48;
     const c = Math.cos(theta);
     const s = Math.sin(theta);
@@ -273,8 +318,6 @@ export class WholeBodyCoupling {
     bodyTaskTargets.offerWorld(a, supportHip, supportHipX, supportHipY, supportHipZ, 1, TASK_PRIORITY.CONTACT_CRITICAL);
     bodyTaskTargets.offerWorld(a, attackHip, attackHipX, attackHipY, attackHipZ, 1, TASK_PRIORITY.ACTION);
 
-    // Supporting knee stays loaded under the pivoting pelvis instead of locking
-    // straight. This is where the side kick gets its base and counter-force.
     bodyTaskTargets.offerWorld(
       a,
       supportKnee,
@@ -285,8 +328,6 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.CONTACT_CRITICAL,
     );
 
-    // Preserve the requested heel trajectory. Fit a two-bone leg to the
-    // final turned hip; a second authored foot path used to erase the kick.
     let dx = rawFootX + pelvisX - basePelvisX - attackHipX;
     let dy = rawFootY - attackHipY;
     let dz = rawFootZ + pelvisZ - basePelvisZ - attackHipZ;
@@ -313,8 +354,6 @@ export class WholeBodyCoupling {
       attackHipZ + dz * along + poleZ / poleLength * bend,
       1, TASK_PRIORITY.ACTION);
 
-    // Torso counterleans over the support side while remaining rotated. This
-    // prevents the rigid upright-Lego silhouette and keeps COM over the base.
     const baseChestX = bodyTaskTargets.targetXFor(a, BODY.chest);
     const baseChestY = bodyTaskTargets.targetYFor(a, BODY.chest);
     const baseChestZ = bodyTaskTargets.targetZFor(a, BODY.chest);
@@ -344,9 +383,6 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.ACTION,
     );
 
-    // Keep both hands in an actual fighting guard throughout the kick. These
-    // higher-priority requests explicitly replace the old low 1.08m hand target
-    // that visually read as hands-on-hips before leg extension.
     const guardForwardX = fx * 0.12 * scale;
     const guardForwardZ = fz * 0.12 * scale;
     bodyTaskTargets.offerWorld(
@@ -423,4 +459,3 @@ export class WholeBodyCoupling {
     return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
 }
-
