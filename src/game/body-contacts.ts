@@ -5,11 +5,15 @@ import { clamp } from "./world";
 import { impactDynamics } from "./impact-dynamics";
 import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 import {
+  applyBodyImpactDamage,
+  assessPairNodeImpact,
+  assessStaticNodeImpact,
+} from "./impact-mediation";
+import {
   BASE_RADIUS,
   BODY,
   CONTACT_NODES,
   NODE_INV_MASS,
-  NODE_REGION,
   SELF_PAIRS,
   bodyScale,
   nodeRadius,
@@ -17,107 +21,6 @@ import {
   type BodyMode,
   type BodyRig,
 } from "./body-model";
-
-function applyImpact(
-  w: World,
-  a: Actor,
-  rig: BodyRig,
-  node: number,
-  speed: number,
-) {
-  if (
-    !a.alive ||
-    speed < 3.2 ||
-    rig.impactCd[node]! > 0
-  ) {
-    return;
-  }
-
-  const region = NODE_REGION[node]!;
-  const severity = clamp(
-    (speed - 3.2) ** 2 *
-      0.018 *
-      (a.mass / 78),
-    0,
-    1.4,
-  );
-  if (severity < 0.025) return;
-
-  const inj = a.injuries[region];
-  inj.bruise += severity * 0.36;
-
-  if (
-    region === "larm" ||
-    region === "rarm" ||
-    region === "lleg" ||
-    region === "rleg"
-  ) {
-    if (speed > 5.4) {
-      inj.sprain += severity * 0.1;
-    }
-    if (speed > 8.2) {
-      inj.fracture += severity * 0.08;
-    }
-  } else if (region === "head") {
-    a.consciousness = Math.max(
-      0,
-      a.consciousness - severity * 0.16,
-    );
-    if (speed > 8.5) {
-      inj.fracture += severity * 0.06;
-    }
-  } else if (speed > 9.5) {
-    inj.fracture += severity * 0.04;
-  }
-
-  a.pain = clamp(
-    a.pain + severity * 0.18,
-    0,
-    1,
-  );
-  a.balance = clamp(
-    a.balance - severity * 0.28,
-    0,
-    1,
-  );
-
-  if (
-    speed > 6.6 &&
-    a.loco !== "ragdoll" &&
-    a.loco !== "down"
-  ) {
-    a.loco =
-      speed > 9 || region === "head"
-        ? "ragdoll"
-        : "stumble";
-    a.locoT = Math.max(
-      a.locoT,
-      0.45 + severity * 0.35,
-    );
-  }
-
-  rig.impactCd[node] = 0.16;
-  w.emitSound(
-    a.x,
-    a.z,
-    0.3 + Math.min(0.7, severity * 0.45),
-    "impact",
-    a.id,
-  );
-  if (severity > 0.2) {
-    w.emitSound(
-      a.x,
-      a.z,
-      0.24 + severity * 0.2,
-      "hurt",
-      a.id,
-    );
-  }
-  w.shake = Math.max(
-    w.shake,
-    Math.min(0.5, severity * 0.24),
-  );
-}
 
 function resolveNodeAabb(
   w: World,
@@ -211,17 +114,20 @@ function resolveNodeAabb(
   );
   const vn = vx * nx + vy * ny + vz * nz;
 
-  if (registerImpact && vn < -3.2) {
+  if (registerImpact && vn < 0) {
     const closing = -vn;
-    applyImpact(w, a, rig, node, closing);
-    impactDynamics.contactNode(
-      a,
-      node,
-      nx * closing * 0.42,
-      ny * closing * 0.42,
-      nz * closing * 0.42,
-      0.78,
-    );
+    const impact = assessStaticNodeImpact(a, node, closing);
+    applyBodyImpactDamage(w, a, rig, node, impact);
+    if (impact.damaging) {
+      impactDynamics.contactNode(
+        a,
+        node,
+        nx * closing * 0.42,
+        ny * closing * 0.42,
+        nz * closing * 0.42,
+        0.78,
+      );
+    }
   }
 
   rig.x[node] += nx * penetration;
@@ -263,19 +169,22 @@ export function collideRig(
       );
       if (
         registerImpact &&
-        vy < -3.2 &&
+        vy < 0 &&
         bodyTaskTargets.priorityFor(a, i) < TASK_PRIORITY.ACTION
       ) {
         const closing = -vy;
-        applyImpact(w, a, rig, i, closing);
-        impactDynamics.contactNode(
-          a,
-          i,
-          0,
-          closing * 0.36,
-          0,
-          0.72,
-        );
+        const impact = assessStaticNodeImpact(a, i, closing);
+        applyBodyImpactDamage(w, a, rig, i, impact);
+        if (impact.damaging) {
+          impactDynamics.contactNode(
+            a,
+            i,
+            0,
+            closing * 0.36,
+            0,
+            0.72,
+          );
+        }
       }
       rig.y[i] = radius;
       if (vy < 0) {
@@ -491,44 +400,37 @@ export function solveBodyPair(
         (bvy - avy) * ny +
         (bvz - avz) * nz;
 
-      if (rel >= -3.4) continue;
+      if (rel >= 0) continue;
 
       const closing = -rel;
+      const impact = assessPairNodeImpact(a, ia, b, ib, closing);
       const shareA = b.mass / Math.max(1, a.mass + b.mass);
       const shareB = a.mass / Math.max(1, a.mass + b.mass);
       if (modeA > 0) {
-        applyImpact(
-          w,
-          a,
-          ra,
-          ia,
-          closing * shareA,
-        );
-        impactDynamics.contactNode(
-          a,
-          ia,
-          -nx * closing * shareA * 0.38,
-          -ny * closing * shareA * 0.38,
-          -nz * closing * shareA * 0.38,
-          0.7,
-        );
+        applyBodyImpactDamage(w, a, ra, ia, impact);
+        if (impact.damaging) {
+          impactDynamics.contactNode(
+            a,
+            ia,
+            -nx * closing * shareA * 0.38,
+            -ny * closing * shareA * 0.38,
+            -nz * closing * shareA * 0.38,
+            0.7,
+          );
+        }
       }
       if (modeB > 0) {
-        applyImpact(
-          w,
-          b,
-          rb,
-          ib,
-          closing * shareB,
-        );
-        impactDynamics.contactNode(
-          b,
-          ib,
-          nx * closing * shareB * 0.38,
-          ny * closing * shareB * 0.38,
-          nz * closing * shareB * 0.38,
-          0.7,
-        );
+        applyBodyImpactDamage(w, b, rb, ib, impact);
+        if (impact.damaging) {
+          impactDynamics.contactNode(
+            b,
+            ib,
+            nx * closing * shareB * 0.38,
+            ny * closing * shareB * 0.38,
+            nz * closing * shareB * 0.38,
+            0.7,
+          );
+        }
       }
     }
   }

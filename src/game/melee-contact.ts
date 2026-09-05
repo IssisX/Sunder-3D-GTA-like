@@ -3,13 +3,16 @@ import { FIRE_CELL, WEAPON_STATS } from "./types";
 import type { World } from "./world";
 import { canSeeThrough, clamp } from "./world";
 import { impactDynamics } from "./impact-dynamics";
+import {
+  assessImpact,
+  nodeEffectiveMass,
+  reducedEffectiveMass,
+} from "./impact-mediation";
+import { representativeNode } from "./body-model";
 
 const KICK_BLUNT = 1.15;
 const KICK_MASS = 3.2;
 
-// The striking hand carries some forearm mass into contact. Inventory mass
-// (0.4 kg for a fist) understates that load. This is a bounded gameplay
-// approximation, not a whole-body effective-mass calculation.
 function strikingMass(atk: Actor, kind: "strike" | "kick") {
   if (kind === "kick") return KICK_MASS;
   return atk.weapon === "fist"
@@ -98,7 +101,13 @@ export function applyActorMeleeContact(
 
   const [nx, ny, nz] = normalizeDirection(atk, dirX, dirY, dirZ);
   const rel = atk.mass / Math.max(1, atk.mass + vic.mass);
-  const contactSpeed = clamp(speed, 1.5, 14);
+  const contactSpeed = clamp(speed, 0, 14);
+  const targetMass = nodeEffectiveMass(vic, representativeNode(region));
+  const contactImpact = assessImpact(
+    reducedEffectiveMass(mass, targetMass),
+    contactSpeed,
+    0.05,
+  );
   const force =
     (0.52 + contactSpeed * 0.13) *
     (0.72 + mass * 0.22) *
@@ -106,9 +115,6 @@ export function applyActorMeleeContact(
   const impulse = force * (2.0 + rel * 1.4);
   const bodyDv = impulse * rel;
 
-  // One contact authority: this impulse field now owns both the visible
-  // articulated response and the coarse root momentum consumed by world
-  // physics. No parallel Actor-velocity kick is applied here.
   impactDynamics.contactRegion(
     vic,
     region,
@@ -118,9 +124,6 @@ export function applyActorMeleeContact(
     kind === "kick" ? 1.08 : 1,
   );
 
-  // Equal-and-opposite recoil enters the attacker's same body field. Heavy
-  // targets therefore interrupt posture more than light ones without a
-  // separate recoil animation.
   const recoil = clamp((vic.mass / Math.max(1, atk.mass + vic.mass)) * 0.52, 0.16, 0.42);
   impactDynamics.contactRegion(
     atk,
@@ -131,30 +134,36 @@ export function applyActorMeleeContact(
     0.72,
   );
 
-  const inj = vic.injuries[region];
-  inj.bruise += blunt * 0.2 * force;
-  inj.cut += cut * 0.28 * force;
-  inj.puncture += pierce * 0.27 * force;
+  if (contactImpact.damaging) {
+    const damageForce = force * contactImpact.damageScale;
+    const inj = vic.injuries[region];
+    inj.bruise += blunt * 0.2 * damageForce;
+    inj.cut += cut * 0.28 * damageForce;
+    inj.puncture += pierce * 0.27 * damageForce;
 
-  if (kind === "kick" && (region === "lleg" || region === "rleg" || region === "torso")) {
-    inj.sprain += 0.035 + force * 0.025;
-  }
-  if (fire > 0 || atk.torchLit) {
-    inj.burn += 0.18 + fire * 0.08;
-    const ci = w.cell(vic.x, vic.z);
-    w.heat[ci] = Math.min(2.5, w.heat[ci]! + 0.45 + fire * 0.25);
-  }
-  if (cut + pierce > 0.4) vic.bleed += 0.055 + cut * 0.065 + pierce * 0.045;
-  if (region === "head") {
-    vic.consciousness = Math.max(0, vic.consciousness - force * 0.11);
-    inj.bruise += 0.12 * force;
-    if (blunt > 1 && contactSpeed > 8.4) inj.fracture += 0.05 * force;
+    if (kind === "kick" && (region === "lleg" || region === "rleg" || region === "torso")) {
+      inj.sprain += 0.035 + damageForce * 0.025;
+    }
+    if (fire > 0 || atk.torchLit) {
+      inj.burn += 0.18 + fire * 0.08;
+      const ci = w.cell(vic.x, vic.z);
+      w.heat[ci] = Math.min(2.5, w.heat[ci]! + 0.45 + fire * 0.25);
+    }
+    if (cut + pierce > 0.4) vic.bleed += 0.055 + cut * 0.065 + pierce * 0.045;
+    if (region === "head") {
+      vic.consciousness = Math.max(0, vic.consciousness - damageForce * 0.11);
+      inj.bruise += 0.12 * damageForce;
+      if (
+        blunt > 1 &&
+        (contactImpact.kineticEnergy > 90 || contactImpact.impulse > 42)
+      ) {
+        inj.fracture += 0.05 * damageForce;
+      }
+    }
+
+    vic.pain = clamp(vic.pain + 0.13 * damageForce, 0, 1);
   }
 
-  // Injury changes physiology; support/balance/fall state is deliberately not
-  // chosen here. BodyCausality derives that from the resulting impulse field,
-  // actual foot support, posture, leg integrity and consciousness.
-  vic.pain = clamp(vic.pain + 0.13 * force, 0, 1);
   vic.lastHitBy = atk.id;
   vic.lastHitT = w.time;
   vic.alert = 1;
@@ -166,13 +175,16 @@ export function applyActorMeleeContact(
     registerWitnesses(w, atk, vic);
   }
 
-  w.emitSound(vic.x, vic.z, 0.42 + Math.min(0.6, force * 0.16), "impact", atk.id);
-  if (vic.kind === "human" || vic.kind === "player") {
-    if (vic.pain > 0.62 && w.rng() < 0.42) w.emitSound(vic.x, vic.z, 0.68, "scream", vic.id);
-    else w.emitSound(vic.x, vic.z, 0.34, "hurt", vic.id);
+  if (contactImpact.damaging) {
+    const damageForce = force * contactImpact.damageScale;
+    w.emitSound(vic.x, vic.z, 0.42 + Math.min(0.6, damageForce * 0.16), "impact", atk.id);
+    if (vic.kind === "human" || vic.kind === "player") {
+      if (vic.pain > 0.62 && w.rng() < 0.42) w.emitSound(vic.x, vic.z, 0.68, "scream", vic.id);
+      else w.emitSound(vic.x, vic.z, 0.34, "hurt", vic.id);
+    }
+    w.shake = Math.max(w.shake, 0.1 + Math.min(0.32, damageForce * 0.08));
+    if (atk.kind === "player") w.hitstop = Math.max(w.hitstop, 0.032 + Math.min(0.022, damageForce * 0.006));
   }
-  w.shake = Math.max(w.shake, 0.1 + Math.min(0.32, force * 0.08));
-  if (atk.kind === "player") w.hitstop = Math.max(w.hitstop, 0.032 + Math.min(0.022, force * 0.006));
 }
 
 export function applyPropMeleeContact(
@@ -188,14 +200,24 @@ export function applyPropMeleeContact(
   const stats = WEAPON_STATS[atk.weapon];
   const blunt = kind === "kick" ? KICK_BLUNT : stats.blunt;
   const mass = strikingMass(atk, kind);
-  const dmg = (4.5 + speed * 1.2) * (0.7 + blunt * 0.55 + mass * 0.12);
+  const contactSpeed = clamp(speed, 0, 14);
+  const contactImpact = assessImpact(
+    reducedEffectiveMass(mass, Math.max(0.5, p.mass)),
+    contactSpeed,
+    0.05,
+  );
+  const dmg = contactImpact.damaging
+    ? (4.5 + contactSpeed * 1.2) *
+      (0.7 + blunt * 0.55 + mass * 0.12) *
+      contactImpact.damageScale
+    : 0;
 
   p.hp -= dmg;
-  p.vx += dirX * (1.4 + speed * 0.12);
-  p.vz += dirZ * (1.4 + speed * 0.12);
+  p.vx += dirX * (1.4 + contactSpeed * 0.12);
+  p.vz += dirZ * (1.4 + contactSpeed * 0.12);
 
   const rigidity = clamp(p.mass / Math.max(1, p.mass + atk.mass), 0.08, 0.78);
-  const recoil = Math.min(3.2, (0.7 + speed * 0.18) * rigidity);
+  const recoil = Math.min(3.2, (0.7 + contactSpeed * 0.18) * rigidity);
   impactDynamics.contactRegion(
     atk,
     kind === "kick" ? "rleg" : "torso",
@@ -205,7 +227,7 @@ export function applyPropMeleeContact(
     0.9,
   );
 
-  if (p.kind === "lamp" && dmg > 6 && p.oil) {
+  if (contactImpact.damaging && p.kind === "lamp" && dmg > 6 && p.oil) {
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         const i = w.cell(p.x + dx * FIRE_CELL, p.z + dz * FIRE_CELL);
@@ -219,7 +241,7 @@ export function applyPropMeleeContact(
     w.emitSound(p.x, p.z, 0.5, "break", atk.id);
   }
 
-  if (p.hp <= 0) {
+  if (contactImpact.damaging && p.hp <= 0) {
     p.hp = 0;
     p.collapsed = true;
     p.dynamic = true;
@@ -231,7 +253,7 @@ export function applyPropMeleeContact(
     }
     w.emitSound(p.x, p.z, p.sy > 1.5 ? 1.05 : 0.52, p.sy > 1.5 ? "collapse" : "break", atk.id);
     w.shake = Math.max(w.shake, p.sy > 1.5 ? 0.48 : 0.16);
-  } else {
+  } else if (contactImpact.damaging) {
     w.emitSound(p.x, p.z, 0.28, p.material === "metal" ? "metal" : "wood", atk.id);
   }
 }
