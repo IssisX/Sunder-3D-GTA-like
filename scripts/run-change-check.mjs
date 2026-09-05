@@ -20,4 +20,4 @@ registerHooks({
     return { format: 'module', source, shortCircuit: true };
   },
 });
-await import('../tests/substrate/damage-mediation-probe.ts');
+await import('../tests/substrate/agent-independence-probe.ts');

@@ -23,6 +23,12 @@ import {
   regionFromHit,
   rightOf,
 } from "./world";
+import {
+  agentRandom,
+  agentSpeedScale,
+  agentTempoScale,
+  prepareAgent,
+} from "./agent-independence";
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
@@ -351,11 +357,12 @@ function isThreat(a: Actor, o: Actor, w: World) {
 function stepAI(w: World, dt: number) {
   for (const a of w.actors) {
     if (a.kind === "player" || !a.alive) continue;
+    prepareAgent(w, a);
     if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup" || a.grabbedBy) {
       a.intendSpeed = 0;
       continue;
     }
-    a.aiT -= dt;
+    a.aiT -= dt * agentTempoScale(a);
     a.fear = clamp(a.fear - dt * 0.05, 0, 1);
     const nearbyFire = closestFire(w, a.x, a.z);
     if (nearbyFire && nearbyFire.d < 3.2) {
@@ -364,7 +371,7 @@ function stepAI(w: World, dt: number) {
       const m = Math.hypot(dx, dz) || 1;
       a.intendX = dx / m;
       a.intendZ = dz / m;
-      a.intendSpeed = 5;
+      a.intendSpeed = 5 * agentSpeedScale(a);
       a.ai = "flee";
       continue;
     }
@@ -404,7 +411,7 @@ function seek(a: Actor, x: number, z: number, speed: number) {
   }
   a.intendX = dx / m;
   a.intendZ = dz / m;
-  a.intendSpeed = speed;
+  a.intendSpeed = speed * agentSpeedScale(a);
   a.yaw = lerpAng(a.yaw, Math.atan2(-a.intendX, -a.intendZ), 0.25);
   return m;
 }
@@ -452,7 +459,7 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
       a.ai = "combat";
       const d = Math.hypot(player.x - a.x, player.z - a.z);
       if (d > 1.5) seek(a, player.x, player.z, 5.2);
-      else a.intendSpeed = 0.4;
+      else a.intendSpeed = 0.4 * agentSpeedScale(a);
       a.targetId = player.id;
       if (a.shoutCd <= 0) {
         w.emitSound(a.x, a.z, 1.0, "shout", a.id);
@@ -517,26 +524,26 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     if (d < 0.8) {
       a.routineI++;
       a.intendSpeed = 0;
-      a.aiT = 1 + w.rng() * 2;
+      a.aiT = 1 + agentRandom(w, a) * 2;
     }
     return;
   }
 
   a.ai = "wander";
   if (a.aiT <= 0) {
-    a.wayX = a.homeX + (w.rng() - 0.5) * 10;
-    a.wayZ = a.homeZ + (w.rng() - 0.5) * 10;
-    a.aiT = 3 + w.rng() * 4;
+    a.wayX = a.homeX + (agentRandom(w, a) - 0.5) * 10;
+    a.wayZ = a.homeZ + (agentRandom(w, a) - 0.5) * 10;
+    a.aiT = 3 + agentRandom(w, a) * 4;
   }
   seek(a, a.wayX, a.wayZ, 1.5);
 }
 
 function pickSearch(w: World, a: Actor) {
-  const ang = w.rng() * Math.PI * 2;
-  const r = 3 + w.rng() * 7;
+  const ang = agentRandom(w, a) * Math.PI * 2;
+  const r = 3 + agentRandom(w, a) * 7;
   a.searchX = a.lastSeenX + Math.cos(ang) * r;
   a.searchZ = a.lastSeenZ + Math.sin(ang) * r;
-  a.aiT = 2 + w.rng() * 2;
+  a.aiT = 2 + agentRandom(w, a) * 2;
 }
 
 function followTracks(w: World, a: Actor) {
@@ -599,9 +606,9 @@ function beastAI(w: World, a: Actor, _dt: number) {
     }
     a.ai = "graze";
     if (a.aiT <= 0) {
-      a.wayX = a.homeX + (w.rng() - 0.5) * (a.species === "deer" ? 16 : 5);
-      a.wayZ = a.homeZ + (w.rng() - 0.5) * (a.species === "deer" ? 16 : 5);
-      a.aiT = 2 + w.rng() * 4;
+      a.wayX = a.homeX + (agentRandom(w, a) - 0.5) * (a.species === "deer" ? 16 : 5);
+      a.wayZ = a.homeZ + (agentRandom(w, a) - 0.5) * (a.species === "deer" ? 16 : 5);
+      a.aiT = 2 + agentRandom(w, a) * 4;
     }
     seek(a, a.wayX, a.wayZ, 1.1);
     return;
@@ -632,9 +639,9 @@ function beastAI(w: World, a: Actor, _dt: number) {
     }
     a.ai = "wander";
     if (a.aiT <= 0) {
-      a.wayX = a.homeX + (w.rng() - 0.5) * 18;
-      a.wayZ = a.homeZ + (w.rng() - 0.5) * 18;
-      a.aiT = 4;
+      a.wayX = a.homeX + (agentRandom(w, a) - 0.5) * 18;
+      a.wayZ = a.homeZ + (agentRandom(w, a) - 0.5) * 18;
+      a.aiT = 3.4 + agentRandom(w, a) * 1.2;
     }
     seek(a, a.wayX, a.wayZ, 2.4);
     return;
@@ -657,9 +664,9 @@ function beastAI(w: World, a: Actor, _dt: number) {
       return;
     }
     if (a.aiT <= 0) {
-      a.wayX = a.homeX + (w.rng() - 0.5) * 20;
-      a.wayZ = a.homeZ + (w.rng() - 0.5) * 14;
-      a.aiT = 5;
+      a.wayX = a.homeX + (agentRandom(w, a) - 0.5) * 20;
+      a.wayZ = a.homeZ + (agentRandom(w, a) - 0.5) * 14;
+      a.aiT = 4.2 + agentRandom(w, a) * 1.6;
     }
     seek(a, a.wayX, a.wayZ, 1.8);
   }
