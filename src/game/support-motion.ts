@@ -67,18 +67,18 @@ export class SupportMotionController {
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
 
-    // The previous support envelope already has enough acceleration authority to
-    // reach the requested speed quickly. The remaining slow feel therefore comes
-    // from the gameplay velocity target itself, not insufficient traction. Raise
-    // the player target directly while keeping the same friction/leg/fatigue law.
+    // Physical game-speed calibration. The gameplay intent value remains useful
+    // to AI/state logic, while the player body is allowed to converge to a more
+    // decisive world-space pace. This still goes through the same support/grip/
+    // injury envelope below; it is not root translation.
     const requestedSpeed = Math.max(0, a.intendSpeed);
     let speedScale = 1;
     if (a.kind === "player") {
       if (a.crouch) {
-        speedScale = 1.08;
+        speedScale = 1.12;
       } else {
-        const sprintBlend = clamp01((requestedSpeed - 4.2) / 2.4);
-        speedScale = 1.32 + (1.15 - 1.32) * sprintBlend;
+        const sprintBlend = clamp01((requestedSpeed - 4.0) / 2.6);
+        speedScale = 1.6 + (1.22 - 1.6) * sprintBlend;
       }
     }
 
@@ -90,6 +90,10 @@ export class SupportMotionController {
     targetVx += clamp(rootErrX * errGain, -2.1 * scale, 2.1 * scale);
     targetVz += clamp(rootErrZ * errGain, -2.1 * scale, 2.1 * scale);
 
+    // Bare-fist striking can recruit additional forward ground reaction, but
+    // only while a real support contact exists and only inside the same traction
+    // envelope as locomotion. This gives the fist more body mass without adding
+    // a fake impact multiplier.
     let handReach = 0;
     if (a.weapon === "fist") {
       if (bodyTaskTargets.priorityFor(a, BODY.lHand) >= TASK_PRIORITY.ACTION) {
@@ -115,8 +119,8 @@ export class SupportMotionController {
     }
     if (handReach > 0) {
       const recruitment = clamp01(handReach / (0.58 * scale));
-      targetVx += fx * recruitment * 0.42 * scale;
-      targetVz += fz * recruitment * 0.42 * scale;
+      targetVx += fx * recruitment * 0.78 * scale;
+      targetVz += fz * recruitment * 0.78 * scale;
     }
 
     const response =
@@ -125,7 +129,7 @@ export class SupportMotionController {
         : mode === "recover"
           ? 0.13
           : a.kind === "player"
-            ? 0.055
+            ? 0.045
             : 0.085;
     let ax = (targetVx - this.state.velX) / response;
     let az = (targetVz - this.state.velZ) / response;
