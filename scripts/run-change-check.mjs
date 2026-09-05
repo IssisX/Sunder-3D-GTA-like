@@ -20,4 +20,4 @@ registerHooks({
     return { format: 'module', source, shortCircuit: true };
   },
 });
-await import('../tests/substrate/spatial-carrier-probe.ts');
+await import('../tests/substrate/beast-spatial-carrier-probe.ts');
