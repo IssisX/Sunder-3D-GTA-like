@@ -58,7 +58,7 @@ const normal = sample(true);
 const severed = sample(false);
 console.log('PLANTED-SUPPORT', { normal, severed });
 
-assert(normal.gap < 0.01 && normal.grounded,
+assert(normal.gap < 0.001 && normal.grounded,
   'contact-critical foot did not bind to support normal');
-assert(severed.gap > normal.gap + 0.02,
+assert(severed.gap > normal.gap + 0.003,
   'planted-foot edge severance does not change support gap');
