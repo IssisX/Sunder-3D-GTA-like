@@ -126,11 +126,6 @@ export class ActionContinuity {
     this.frameKick = Boolean(input.kickPressed);
   }
 
-  /**
-   * Keep one deliberate follow-up command briefly while an action owns the
-   * body. Returns true only when a buffered command was re-injected and must
-   * be passed through MeleeKinematics.captureInput again this frame.
-   */
   prepareBufferedInput(input: Actions, actionActive: boolean, dt: number) {
     const h = Math.max(0, dt);
     if (actionActive) {
@@ -161,7 +156,6 @@ export class ActionContinuity {
     return released;
   }
 
-  /** Capture the locomotion solution before specialist action tasks overwrite it. */
   captureLocomotion(w: World) {
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
@@ -202,7 +196,6 @@ export class ActionContinuity {
     }
   }
 
-  /** Couple the final action field to the locomotion state it interrupted. */
   couple(w: World, dt: number) {
     const h = Math.max(1e-5, dt);
     for (let i = 0; i < w.actors.length; i++) {
@@ -218,10 +211,7 @@ export class ActionContinuity {
       if (detected !== previous) {
         if (detected !== NONE) {
           const physicalSpeed = Math.hypot(a.vx, a.vz);
-          this.entrySpeed[slot] = Math.max(
-            physicalSpeed,
-            this.captureSpeed[slot]!,
-          );
+          this.entrySpeed[slot] = Math.max(physicalSpeed, this.captureSpeed[slot]!);
           let dx = this.captureDirX[slot]!;
           let dz = this.captureDirZ[slot]!;
           let dm = Math.hypot(dx, dz);
@@ -273,12 +263,7 @@ export class ActionContinuity {
     return NONE;
   }
 
-  private applyActiveFlow(
-    a: Actor,
-    rig: BodyRig,
-    slot: number,
-    kind: number,
-  ) {
+  private applyActiveFlow(a: Actor, rig: BodyRig, slot: number, kind: number) {
     const scale = bodyScale(a);
     const physicalSpeed = Math.hypot(a.vx, a.vz);
     const baseSpeed = Math.max(this.entrySpeed[slot]!, physicalSpeed);
@@ -303,28 +288,18 @@ export class ActionContinuity {
       const lHandD = this.taskDistance(a, rig, BODY.lHand);
       const rHandD = this.taskDistance(a, rig, BODY.rHand);
       const commit = clamp01(Math.max(lHandD, rHandD) / (0.58 * scale));
-      const retained = baseSpeed * (0.86 - 0.18 * commit);
-      a.intendSpeed = Math.max(a.intendSpeed, retained);
+      a.intendSpeed = Math.max(a.intendSpeed, baseSpeed * (0.86 - 0.18 * commit));
       this.inheritGaitStep(a, rig, slot, baseSpeed, commit);
       this.inheritLocomotionTorso(a, slot, baseSpeed, commit);
     } else {
       const lFootD = this.taskDistance(a, rig, BODY.lFoot);
       const rFootD = this.taskDistance(a, rig, BODY.rFoot);
       const commit = clamp01(Math.max(lFootD, rFootD) / (0.64 * scale));
-      // A kick must establish support, but it should bleed incoming travel
-      // through the planted side instead of deleting momentum at the button edge.
-      const retained = baseSpeed * (0.52 - 0.2 * commit);
-      a.intendSpeed = Math.max(a.intendSpeed, retained);
+      a.intendSpeed = Math.max(a.intendSpeed, baseSpeed * (0.52 - 0.2 * commit));
     }
   }
 
-  private inheritGaitStep(
-    a: Actor,
-    rig: BodyRig,
-    slot: number,
-    speed: number,
-    commit: number,
-  ) {
+  private inheritGaitStep(a: Actor, rig: BodyRig, slot: number, speed: number, commit: number) {
     const base = slot * STRIDE;
     const scale = bodyScale(a);
     const lq = base + BODY.lFoot;
@@ -332,18 +307,10 @@ export class ActionContinuity {
     if (this.locoPriority[lq]! <= 0 && this.locoPriority[rq]! <= 0) return;
 
     const lMove = this.locoPriority[lq]! > 0
-      ? Math.hypot(
-          this.locoX[lq]! - rig.x[BODY.lFoot]!,
-          this.locoY[lq]! - rig.y[BODY.lFoot]!,
-          this.locoZ[lq]! - rig.z[BODY.lFoot]!,
-        )
+      ? Math.hypot(this.locoX[lq]! - rig.x[BODY.lFoot]!, this.locoY[lq]! - rig.y[BODY.lFoot]!, this.locoZ[lq]! - rig.z[BODY.lFoot]!)
       : 0;
     const rMove = this.locoPriority[rq]! > 0
-      ? Math.hypot(
-          this.locoX[rq]! - rig.x[BODY.rFoot]!,
-          this.locoY[rq]! - rig.y[BODY.rFoot]!,
-          this.locoZ[rq]! - rig.z[BODY.rFoot]!,
-        )
+      ? Math.hypot(this.locoX[rq]! - rig.x[BODY.rFoot]!, this.locoY[rq]! - rig.y[BODY.rFoot]!, this.locoZ[rq]! - rig.z[BODY.rFoot]!)
       : 0;
     const node = lMove >= rMove ? BODY.lFoot : BODY.rFoot;
     const q = base + node;
@@ -352,34 +319,25 @@ export class ActionContinuity {
 
     const flow = clamp01(speed / 4.8) * (1 - commit * 0.25);
     if (flow <= 0.02) return;
-    const ax = bodyTaskTargets.targetXFor(a, node);
-    const ay = bodyTaskTargets.targetYFor(a, node);
-    const az = bodyTaskTargets.targetZFor(a, node);
     const blend = 0.78 * flow;
     bodyTaskTargets.offerWorld(
       a,
       node,
-      lerp(ax, this.locoX[q]!, blend),
-      lerp(ay, this.locoY[q]!, blend),
-      lerp(az, this.locoZ[q]!, blend),
+      lerp(bodyTaskTargets.targetXFor(a, node), this.locoX[q]!, blend),
+      lerp(bodyTaskTargets.targetYFor(a, node), this.locoY[q]!, blend),
+      lerp(bodyTaskTargets.targetZFor(a, node), this.locoZ[q]!, blend),
       1,
       TASK_PRIORITY.CONTACT_CRITICAL,
     );
   }
 
-  private inheritLocomotionTorso(
-    a: Actor,
-    slot: number,
-    speed: number,
-    commit: number,
-  ) {
+  private inheritLocomotionTorso(a: Actor, slot: number, speed: number, commit: number) {
     const flow = clamp01(speed / 5.4) * (1 - commit * 0.45) * 0.18;
     if (flow <= 0.01) return;
     const base = slot * STRIDE;
     for (const node of [BODY.pelvis, BODY.chest]) {
       const q = base + node;
-      if (this.locoPriority[q]! <= 0 ||
-          bodyTaskTargets.priorityFor(a, node) < TASK_PRIORITY.ACTION) continue;
+      if (this.locoPriority[q]! <= 0 || bodyTaskTargets.priorityFor(a, node) < TASK_PRIORITY.ACTION) continue;
       bodyTaskTargets.offerWorld(
         a,
         node,
@@ -422,7 +380,11 @@ export class ActionContinuity {
 
   private applyRecovery(a: Actor, slot: number, dt: number) {
     const duration = Math.max(1e-5, this.recoveryDuration[slot]!);
-    const t = 1 - this.recoveryT[slot]! / duration;
+    // Advance recovery before producing this frame's target. Otherwise the
+    // first post-action fixed step simply replays the terminal pose and creates
+    // a visible one-frame hitch before locomotion resumes.
+    const nextRecoveryT = Math.max(0, this.recoveryT[slot]! - dt);
+    const t = 1 - nextRecoveryT / duration;
     const blend = smooth01(t);
     const base = slot * STRIDE;
     const fx = -Math.sin(a.yaw);
@@ -433,8 +395,7 @@ export class ActionContinuity {
 
     for (let node = 0; node < STRIDE; node++) {
       const q = base + node;
-      if (this.lastActionPriority[q]! < TASK_PRIORITY.ACTION ||
-          this.locoPriority[q]! <= 0) continue;
+      if (this.lastActionPriority[q]! < TASK_PRIORITY.ACTION || this.locoPriority[q]! <= 0) continue;
       let sx: number;
       let sy: number;
       let sz: number;
@@ -448,11 +409,7 @@ export class ActionContinuity {
         sz = a.z + rz * this.lastX[q]! + fz * this.lastZ[q]!;
       }
       let priority = TASK_PRIORITY.ACTION;
-      if (
-        (node === BODY.lFoot || node === BODY.rFoot) &&
-        Math.abs(this.locoY[q]! - sy) < 0.05 * scale &&
-        blend < 0.62
-      ) {
+      if ((node === BODY.lFoot || node === BODY.rFoot) && Math.abs(this.locoY[q]! - sy) < 0.05 * scale && blend < 0.62) {
         priority = TASK_PRIORITY.CONTACT_CRITICAL;
       }
       bodyTaskTargets.offerWorld(
@@ -466,10 +423,8 @@ export class ActionContinuity {
       );
     }
 
-    this.recoveryT[slot] = Math.max(0, this.recoveryT[slot]! - dt);
-    if (this.recoveryT[slot] <= 0) {
-      this.lastActionPriority.fill(0, base, base + STRIDE);
-    }
+    this.recoveryT[slot] = nextRecoveryT;
+    if (nextRecoveryT <= 0) this.lastActionPriority.fill(0, base, base + STRIDE);
   }
 
   private taskDistance(a: Actor, rig: BodyRig, node: number) {
