@@ -35,6 +35,10 @@ jobs:
     if: contains(github.event.head_commit.message, '[build]')
     needs: change-check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout canonical branch state
         uses: actions/checkout@v4
@@ -48,13 +52,47 @@ jobs:
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Build canonical standalone from source
+      - name: Typecheck canonical source
+        run: npm run typecheck
+
+      - name: Build canonical browser preview from source
         run: npm run build:local-preview
 
-      - name: Upload canonical standalone
+      - name: Verify browser preview bundle
+        run: |
+          test -s local-preview-dist/index.html
+          test -s local-preview-dist/style.css
+          test -s local-preview-dist/sunder.js
+          test -s local-preview-dist/SUNDER.html
+
+      - name: Upload downloadable standalone fallback
         uses: actions/upload-artifact@v4
         with:
           name: SUNDER-ChatGPT-version-${{ github.sha }}
           path: local-preview-dist/SUNDER.html
           if-no-files-found: error
           retention-days: 14
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload browser preview site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: local-preview-dist
+
+  deploy:
+    name: Deploy browser preview
+    if: contains(github.event.head_commit.message, '[build]')
+    needs: playable
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy preview to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
