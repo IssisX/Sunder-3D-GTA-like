@@ -15,6 +15,7 @@ import { WholeBodyCoupling } from "./whole-body-coupling";
 import { bodyTaskTargets } from "./body-task-targets";
 import { HumanRootAuthority } from "./human-root-authority";
 import { CentroidalLocomotion } from "./centroidal-locomotion";
+import { ActionContinuity } from "./action-continuity";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -24,6 +25,7 @@ import { CentroidalLocomotion } from "./centroidal-locomotion";
  *   world sim: compatibility prediction for legacy game systems
  *   root firewall: discard temporary capsule translation for body-owned humans
  *   post-world/pre-body: locomotion + melee end-effector task generation
+ *   action continuity: preserve incoming step/momentum through action + recovery
  *   whole-body coupling: support / COM / stance tasks derived from actions
  *   centroidal coupling: acceleration/braking/turning posture from real COM state
  *   task finalization: position + target-velocity field
@@ -36,6 +38,7 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly social = new SocialAwarenessController();
   private readonly causality = new BodyCausality(this);
   private readonly coupling = new WholeBodyCoupling(this);
+  private readonly continuity = new ActionContinuity(this);
   private readonly rootAuthority = new HumanRootAuthority();
   private readonly centroidal = new CentroidalLocomotion(this);
   private playerJumpRequested = false;
@@ -48,6 +51,7 @@ export class ProceduralAnimationController extends AnimationController {
     beastMelee.bootstrap();
     this.melee.bootstrap(w);
     this.coupling.bootstrap(w);
+    this.continuity.bootstrap(w);
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -59,6 +63,7 @@ export class ProceduralAnimationController extends AnimationController {
     beastMelee.clear();
     this.melee.clear();
     this.coupling.clear();
+    this.continuity.clear();
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -70,20 +75,25 @@ export class ProceduralAnimationController extends AnimationController {
     beastMelee.reset(a);
     this.melee.reset(a);
     this.coupling.reset(a);
+    this.continuity.reset(a);
     this.rootAuthority.reset(a);
     if (a.kind === "player") this.playerJumpRequested = false;
   }
 
   override captureInput(input: Actions) {
+    this.continuity.captureInput(input);
     this.melee.captureInput(input);
     super.captureInput(input);
   }
 
   override prepareInput(w: World, input: Actions, dt: number) {
-    // Capture the semantic command before any compatibility layer mutates input.
-    // This one-tick authorization is the only path from player jump intent to
-    // external upward support work on the articulated body.
     this.playerJumpRequested = Boolean(input.jumpPressed);
+    const replayBuffered = this.continuity.prepareBufferedInput(
+      input,
+      this.melee.isActive(w.playerId),
+      dt,
+    );
+    if (replayBuffered) this.melee.captureInput(input);
     super.prepareInput(w, input, dt);
     this.melee.prepareInput(w, input);
   }
@@ -99,12 +109,14 @@ export class ProceduralAnimationController extends AnimationController {
     this.rootAuthority.restoreBodyOwnedRoots(w);
 
     super.prepareBodyStep(w, dt);
+    // Capture the gait-selected footwork before the specialist action wins the
+    // task priorities. This lets the strike inherit the step rather than reset it.
+    this.continuity.captureLocomotion(w);
     this.melee.prepareStep(w, dt);
     this.coupling.prepare(w);
     this.melee.finishCoupledTasks(w);
+    this.continuity.couple(w, dt);
 
-    // Measured COM velocity error supplies acceleration/braking/turning posture.
-    // Corrective steps and combat remain higher-priority than this layer.
     this.centroidal.prepare(w, dt);
     bodyTaskTargets.finalizeStep(dt);
 
@@ -129,8 +141,6 @@ export class ProceduralAnimationController extends AnimationController {
 
     super.step(w, dt);
     this.melee.step(w, dt);
-    // Predators consume AI strike intent here and can affect something only if
-    // their actual visible head volume swept through it this fixed step.
     beastMelee.step(w, dt);
     impactDynamics.step(w, dt);
     this.causality.step(w, dt);
