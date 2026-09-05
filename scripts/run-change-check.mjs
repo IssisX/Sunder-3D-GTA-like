@@ -21,3 +21,5 @@ registerHooks({
   },
 });
 await import('../tests/substrate/action-continuity-probe.ts');
+await import('../tests/substrate/encounter-causality-probe.ts');
+await import('../tests/substrate/action-vertical-probe.ts');

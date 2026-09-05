@@ -1,15 +1,16 @@
-name: Check ChatGPT-version change
+name: Check ChatGPT branch change
 
 on:
   push:
     branches:
       - ChatGPT-version
+      - ChatGPT-B
 
 permissions:
   contents: read
 
 concurrency:
-  group: chatgpt-version-change
+  group: chatgpt-branch-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,7 +29,7 @@ jobs:
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Run one targeted binary check
+      - name: Run targeted gameplay checks
         run: node scripts/run-change-check.mjs
 
   playable:
@@ -67,22 +68,24 @@ jobs:
       - name: Upload downloadable standalone fallback
         uses: actions/upload-artifact@v4
         with:
-          name: SUNDER-ChatGPT-version-${{ github.sha }}
+          name: SUNDER-${{ github.ref_name }}-${{ github.sha }}
           path: local-preview-dist/SUNDER.html
           if-no-files-found: error
           retention-days: 14
 
       - name: Configure GitHub Pages
+        if: github.ref_name == 'ChatGPT-version'
         uses: actions/configure-pages@v5
 
       - name: Upload browser preview site
+        if: github.ref_name == 'ChatGPT-version'
         uses: actions/upload-pages-artifact@v4
         with:
           path: local-preview-dist
 
   deploy:
     name: Deploy browser preview
-    if: contains(github.event.head_commit.message, '[build]')
+    if: contains(github.event.head_commit.message, '[build]') && github.ref_name == 'ChatGPT-version'
     needs: playable
     runs-on: ubuntu-latest
     permissions:
