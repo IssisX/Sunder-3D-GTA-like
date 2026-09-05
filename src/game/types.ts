@@ -213,6 +213,19 @@ export interface Actor {
   routine: { x: number; z: number }[];
   routineI: number;
   walkPhase: number;
+  /**
+   * Per-actor multiplier on commanded movement speed, drawn once at spawn.
+   *
+   * Every scripted movement funnels through one function (`seek` in sim.ts),
+   * so this is the one place a shared literal speed constant becomes many
+   * individual ones: two guards issued the identical patrol speed still cover
+   * ground, and therefore step, at slightly different rates. Without it,
+   * `walkPhase` starting at 0 for everyone and integrating from the same
+   * shared-constant speed keeps a whole patrol in visible lockstep for as
+   * long as they walk together, and a replay is exactly reproducible only
+   * because the motion has no individual variation to begin with.
+   */
+  moveScale: number;
   leanX: number;
   leanZ: number;
   recovT: number;

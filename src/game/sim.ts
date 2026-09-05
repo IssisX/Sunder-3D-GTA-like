@@ -120,6 +120,9 @@ export function stepWorld(w: World, dt: number, input: Actions, cam: Cam, playin
   stepPhysics(w, dt);
   // Bodies and prop frames are solved together: `stepBodies` interleaves them.
   stepBodies(w, dt);
+  // Melee contact needs this tick's solved hand/foot position, which does not
+  // exist until stepBodies has run -- see resolveStrikes's own comment.
+  resolveStrikes(w);
   checkTrips(w, dt);
   stepDragTracks(w);
   stepInjury(w, dt);
@@ -536,7 +539,11 @@ function seek(w: World, a: Actor, x: number, z: number, speed: number, towardId 
   const dir = avoidBodies(w, a, dx / m, dz / m, towardId);
   a.intendX = dir.x;
   a.intendZ = dir.z;
-  a.intendSpeed = speed;
+  // Every AI-commanded speed passes through here, so this is the one place
+  // a shared literal (`seek(w, a, x, z, 1.5)` for every guard on patrol)
+  // becomes individual per actor, in both real travel speed and -- because
+  // the gait clock integrates off the resulting a.vx/a.vz -- gait rate too.
+  a.intendSpeed = speed * a.moveScale;
   a.yaw = lerpAng(a.yaw, Math.atan2(-a.intendX, -a.intendZ), 0.25);
   return m;
 }
@@ -1017,24 +1024,15 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
     a.attackCd = Math.max(0, a.attackCd - dt);
     if (a.strikeT > 0) {
       a.strikeT -= dt;
-      const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
+      // Prop damage stays a reach check: a crate has no node frame -- and so
+      // no real geometry to sweep a hand against -- until it has already
+      // taken damage once (`damageProp` is what creates it). Actor contact
+      // has no such excuse and is resolved for real in `resolveStrikes`,
+      // after bodies solve.
       const active = a.strikeT < 0.18 && a.strikeT > 0.04;
       if (active) {
+        const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
         const f = facing(a.yaw);
-        const reach = st.reach * (a.species === "bear" ? 1.6 : 1);
-        for (const o of w.nearby(a.x, a.z, reach + 0.6)) {
-          if (o.id === a.id || !o.alive) continue;
-          if (a.strikeHit & (1 << (o.id % 30))) continue;
-          const dx = o.x - a.x;
-          const dz = o.z - a.z;
-          const d = Math.hypot(dx, dz);
-          if (d > reach + o.radius) continue;
-          const dot = d > 0 ? (dx * f.x + dz * f.z) / d : 1;
-          if (dot < 0.25) continue;
-          a.strikeHit |= 1 << (o.id % 30);
-          const speed = Math.hypot(a.vx, a.vz) + 2.2;
-          hitActor(w, a, o, st, speed, "strike", strikeHeight(w, a, false));
-        }
         for (const pr of w.props) {
           if (pr.collapsed || pr.heldBy) continue;
           if (dist2(a.x + f.x * 0.8, a.z + f.z * 0.8, pr.x, pr.z) > 1.6) continue;
@@ -1042,50 +1040,77 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
         }
       }
     }
-    if (a.kickT > 0) {
-      a.kickT -= dt;
-      if (a.kickT < 0.16 && a.kickT > 0.08) {
-        const f = facing(a.yaw);
-        for (const o of w.nearby(a.x, a.z, 1.4)) {
-          if (o.id === a.id) continue;
-          const dx = o.x - a.x;
-          const dz = o.z - a.z;
-          if (dx * f.x + dz * f.z < 0) continue;
-          hitActor(
-            w,
-            a,
-            o,
-            { ...WEAPON_STATS.fist, blunt: 1.1, reach: 1.1 },
-            3,
-            "kick",
-            strikeHeight(w, a, true),
-          );
-        }
+    if (a.kickT > 0) a.kickT -= dt;
+    if (a.shoveT > 0) a.shoveT -= dt;
+  }
+}
+
+/**
+ * Turns an active strike, kick or shove into contact.
+ *
+ * This runs after `stepBodies`, not from inside `stepCombat` where the
+ * timers above are managed. `stepCombat` runs before the body solve, so at
+ * that point "where is the hand right now" is still last tick's answer --
+ * resolving contact there would price this tick's swing using last tick's
+ * geometry and call it current. By the time bodies have solved, the
+ * striking node's `rx/ry/rz -> px/py/pz` is a true record of where it was
+ * when the tick began and where it ended up -- the actual swept path a hand
+ * or foot took this tick, not a point projected from the attacker's facing
+ * and a weapon-length constant. `Bodies.sweptNode` tests that segment
+ * against the target's real node spheres; nothing registers unless it
+ * actually passed within contact distance of one.
+ */
+function resolveStrikes(w: World) {
+  const B = w.bodies;
+  for (const a of w.actors) {
+    if (a.body < 0) continue;
+    const plan = B.plan(a.body);
+    const base = B.base(a.body);
+
+    if (a.strikeT > 0 && a.strikeT < 0.18 && a.strikeT > 0.04) {
+      const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
+      const k = base + plan.grabHand;
+      // The weapon still lengthens real reach; it no longer substitutes for it.
+      const strikerRad = B.rad[k]! + st.reach * 0.35;
+      const broad = st.reach * (a.species === "bear" ? 1.6 : 1) + 1.2;
+      for (const o of w.nearby(a.x, a.z, broad)) {
+        if (o.id === a.id || !o.alive || o.body < 0) continue;
+        if (a.strikeHit & (1 << (o.id % 30))) continue;
+        const node = B.sweptNode(o.body, B.rx[k]!, B.ry[k]!, B.rz[k]!, B.px[k]!, B.py[k]!, B.pz[k]!, strikerRad);
+        if (node < 0) continue;
+        a.strikeHit |= 1 << (o.id % 30);
+        const speed = Math.hypot(a.vx, a.vz) + 2.2;
+        hitActor(w, a, o, st, speed, "strike", node);
       }
     }
-    if (a.shoveT > 0) {
-      a.shoveT -= dt;
-      if (a.shoveT < 0.16) {
-        const f = facing(a.yaw);
-        const push = a.mass * (1.6 + armMotor(a) * 2.2); // N*s
-        for (const o of w.nearby(a.x, a.z, 1.25)) {
-          if (o.id === a.id) continue;
-          const dx = o.x - a.x;
-          const dz = o.z - a.z;
-          if (dx * f.x + dz * f.z < 0) continue;
-          // Applied at the chest: the shove tips the body rather than sliding
-          // it, so whether it becomes a stagger or a fall is decided by the
-          // support-polygon test, not by a threshold here.
-          if (o.body >= 0) {
-            const plan = w.bodies.plan(o.body);
-            w.bodies.applyImpulse(o.body, plan.chest, f.x * push, push * 0.12, f.z * push, STEP);
-          } else {
-            const rel = a.mass / (a.mass + o.mass);
-            o.vx += f.x * 5.5 * rel;
-            o.vz += f.z * 5.5 * rel;
-          }
-          w.emitSound(o.x, o.z, 0.3, "grab", a.id);
-        }
+
+    if (a.kickT > 0 && a.kickT < 0.16 && a.kickT > 0.08) {
+      const st = { ...WEAPON_STATS.fist, blunt: 1.1, reach: 1.1 };
+      const k = base + plan.feet[1];
+      const strikerRad = B.rad[k]! + 0.15;
+      for (const o of w.nearby(a.x, a.z, 2.0)) {
+        if (o.id === a.id || !o.alive || o.body < 0) continue;
+        const node = B.sweptNode(o.body, B.rx[k]!, B.ry[k]!, B.rz[k]!, B.px[k]!, B.py[k]!, B.pz[k]!, strikerRad);
+        if (node < 0) continue;
+        hitActor(w, a, o, st, 3, "kick", node);
+      }
+    }
+
+    if (a.shoveT > 0 && a.shoveT < 0.16) {
+      const k = base + plan.grabHand;
+      const strikerRad = B.rad[k]! + 0.12;
+      const push = a.mass * (1.6 + armMotor(a) * 2.2); // N*s
+      const f = facing(a.yaw);
+      for (const o of w.nearby(a.x, a.z, 1.8)) {
+        if (o.id === a.id || o.body < 0) continue;
+        const node = B.sweptNode(o.body, B.rx[k]!, B.ry[k]!, B.rz[k]!, B.px[k]!, B.py[k]!, B.pz[k]!, strikerRad);
+        if (node < 0) continue;
+        // Applied at the chest: the shove tips the body rather than sliding
+        // it, so whether it becomes a stagger or a fall is decided by the
+        // support-polygon test, not by a threshold here.
+        const vplan = B.plan(o.body);
+        B.applyImpulse(o.body, vplan.chest, f.x * push, push * 0.12, f.z * push, STEP);
+        w.emitSound(o.x, o.z, 0.3, "grab", a.id);
       }
     }
   }
@@ -1106,22 +1131,6 @@ function stepCombat(w: World, dt: number, input: Actions | null) {
  *
  * `aimY` is the height above the attacker's feet the swing arrives at, m.
  */
-/**
- * Height above the attacker's feet that the swing actually arrives at, m.
- *
- * This is read from the attacker's solved hand (or foot) node, not from a
- * constant, so a crouching attacker lands low, a mid-swing strike lands where
- * the arm has got to, and an attacker whose arm has lost motor authority
- * genuinely cannot lift the blow to head height.
- */
-function strikeHeight(w: World, atk: Actor, kick: boolean) {
-  if (atk.body < 0) return atk.height * (kick ? 0.24 : 0.68);
-  const B = w.bodies;
-  const plan = B.plan(atk.body);
-  const node = kick ? plan.feet[1] : plan.grabHand;
-  return Math.max(0.05, B.py[B.base(atk.body) + node]! - atk.y);
-}
-
 function hitActor(
   w: World,
   atk: Actor,
@@ -1129,7 +1138,7 @@ function hitActor(
   st: (typeof WEAPON_STATS)[WeaponKind],
   speed: number,
   how: "strike" | "kick" | "throw",
-  aimY = -1,
+  node: number,
 ) {
   const B = w.bodies;
   const f = facing(atk.yaw);
@@ -1146,20 +1155,13 @@ function hitActor(
     (0.35 + grip * 0.65);
   const jn = mEff * vSwing; // N*s
 
-  // Which node did the swing reach? Fall back to the torso when the victim has
-  // no body (should not happen; the guard keeps the law total).
-  let node = -1;
+  // `node` is the real contact the swept check already found; the region and
+  // mass it carries are read off it, never re-guessed from facing and reach.
   let region: Region = "torso";
   let nodeMass = vic.mass * 0.28;
-  if (vic.body >= 0) {
-    const reachY = aimY >= 0 ? atk.y + aimY : atk.y + vic.height * (how === "kick" ? 0.24 : 0.68);
-    const tx = atk.x + f.x * (st.reach * 0.72);
-    const tz = atk.z + f.z * (st.reach * 0.72);
-    node = B.nearestNode(vic.body, tx, reachY, tz, st.reach + 0.9);
-    if (node >= 0) {
-      region = B.regionOf(vic.body, node);
-      nodeMass = B.mass[B.base(vic.body) + node]!;
-    }
+  if (node >= 0 && vic.body >= 0) {
+    region = B.regionOf(vic.body, node);
+    nodeMass = B.mass[B.base(vic.body) + node]!;
   }
 
   const inj = vic.injuries[region];

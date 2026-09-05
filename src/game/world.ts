@@ -242,6 +242,7 @@ export class World {
       routine: [],
       routineI: 0,
       walkPhase: 0,
+      moveScale: 1,
       leanX: 0,
       leanZ: 0,
       recovT: 0,
@@ -287,6 +288,12 @@ export class World {
     a.pz = a.z;
     a.homeX = a.homeX || a.x;
     a.homeZ = a.homeZ || a.z;
+    // A phase offset so a group spawned together never starts in lockstep,
+    // and a speed scale so they do not walk back into sync later: both are
+    // the one place gait/travel individuality lives, read by `seek` and the
+    // gait clock rather than authored per call site.
+    a.walkPhase = this.rng() * Math.PI * 2;
+    a.moveScale = 0.92 + this.rng() * 0.16;
     const plan: PlanId = a.species === "human" ? "humanoid" : "quadruped";
     a.body = this.bodies.spawn(a.id, plan, a.height, a.mass, a.x, a.y, a.z, a.yaw);
     this.actors.push(a);

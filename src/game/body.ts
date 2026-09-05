@@ -840,6 +840,61 @@ export class Bodies {
     return best;
   }
 
+  /**
+   * Node on `slot` that a striking sphere actually swept through this tick, or
+   * -1 if none.
+   *
+   * The segment is the striking node's own solved path over the tick --
+   * `rx/ry/rz` (where it was when the tick began) to `px/py/pz` (where the
+   * solve left it) -- not a point projected from the striker's facing and a
+   * weapon-length constant. A blow that never reaches a real node cannot
+   * register, and one that grazes an arm cannot be billed to the chest.
+   *
+   * Picks the node with the deepest overlap along the sweep, so a strike that
+   * passes near two nodes lands on whichever it actually came closest to.
+   */
+  sweptNode(
+    slot: number,
+    ax0: number,
+    ay0: number,
+    az0: number,
+    ax1: number,
+    ay1: number,
+    az1: number,
+    strikerRad: number,
+  ) {
+    const b = this.base(slot);
+    const n = this.count[slot]!;
+    const dx = ax1 - ax0;
+    const dy = ay1 - ay0;
+    const dz = az1 - az0;
+    const segLen2 = dx * dx + dy * dy + dz * dz;
+    let best = -1;
+    let bestPen = 0;
+    for (let i = 0; i < n; i++) {
+      const k = b + i;
+      const px = this.px[k]!;
+      const py = this.py[k]!;
+      const pz = this.pz[k]!;
+      let t = segLen2 > 1e-9 ? ((px - ax0) * dx + (py - ay0) * dy + (pz - az0) * dz) / segLen2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const cx = ax0 + dx * t;
+      const cy = ay0 + dy * t;
+      const cz = az0 + dz * t;
+      const ddx = px - cx;
+      const ddy = py - cy;
+      const ddz = pz - cz;
+      const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+      const rr = strikerRad + this.rad[k]!;
+      const pen = rr * rr - d2;
+      if (pen > bestPen) {
+        bestPen = pen;
+        best = i;
+      }
+    }
+    return best;
+  }
+
   regionOf(slot: number, node: number): Region {
     return REGIONS[this.region[this.base(slot) + node]!]!;
   }
