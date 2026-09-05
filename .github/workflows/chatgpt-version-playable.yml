@@ -1,22 +1,19 @@
-name: Build and deploy ChatGPT-version preview
+name: Check ChatGPT-version change
 
 on:
   push:
     branches:
       - ChatGPT-version
-  workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: github-pages
+  group: chatgpt-version-change
   cancel-in-progress: false
 
 jobs:
-  playable:
+  change-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout canonical branch state
@@ -31,46 +28,33 @@ jobs:
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Falsify articulated substrate
-        run: npm run test:substrate
+      - name: Run one targeted binary check
+        run: node scripts/run-change-check.mjs
 
-      - name: Typecheck current source
-        run: npm run typecheck
+  playable:
+    if: contains(github.event.head_commit.message, '[build]')
+    needs: change-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout canonical branch state
+        uses: actions/checkout@v4
 
-      - name: Build canonical browser preview from source
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install project dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Build canonical standalone from source
         run: npm run build:local-preview
 
-      - name: Verify browser preview bundle
-        run: |
-          test -s local-preview-dist/index.html
-          test -s local-preview-dist/style.css
-          test -s local-preview-dist/sunder.js
-          test -s local-preview-dist/SUNDER.html
-
-      - name: Upload downloadable standalone fallback
+      - name: Upload canonical standalone
         uses: actions/upload-artifact@v4
         with:
           name: SUNDER-ChatGPT-version-${{ github.sha }}
           path: local-preview-dist/SUNDER.html
           if-no-files-found: error
           retention-days: 14
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload browser preview site
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: local-preview-dist
-
-  deploy:
-    name: Deploy browser preview
-    needs: playable
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy preview to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4

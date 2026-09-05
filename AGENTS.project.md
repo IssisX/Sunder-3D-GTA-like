@@ -8,6 +8,34 @@ For every substantive SUNDER development response, begin the technical reasoning
 
 Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
 
+## ONE-BINARY-CHECK LAW
+
+For each substantive change: implement once, run one targeted binary check, report pass/fail, stop. If that check fails, fix once, re-run that same check once, then stop.
+
+No soak tests, confidence reruns, long-horizon proving, duplicate verification, or unrelated test batteries. The check must target the changed causal edge. Full-suite tests and playable builds run only when explicitly required by the task, not automatically for confidence.
+
+## DAMAGE MEDIATION LAW
+
+Contact is not damage. Collision/contact resolution may produce geometry, relative velocity, impulse, effective mass, or kinetic-energy evidence, but it must not directly write hurt, blood, HP loss, or injury merely because overlap/contact occurred.
+
+Damage is a downstream consequence of a calibrated impact threshold. Gentle touch, resting/standing contact, overlap correction, and low-energy bumps are inert. Only contact impulses / kinetic energy above the calibrated threshold may produce damage consequences.
+
+## AGENT INDEPENDENCE LAW
+
+Every NPC, animal, and independently simulated entity owns its own decision state and deterministic entropy stream: unique seed/stream identity, phase/time offset, speed variance, and decision state. Shared movement logic may define rules but must not collapse entities onto one synchronized script or phase.
+
+Visible lockstep among three or more independent agents is a defect. Ordinary repeated play should diverge because independently seeded agent streams and decisions diverge; explicit deterministic replay remains reproducible when the captured session seed/state/order are replayed.
+
+## SPATIAL CARRIER LAW
+
+No action-at-a-distance and no magic hits. Intent, timer expiry, or range checks may authorize motion but never apply the effect by themselves.
+
+Melee resolves only from a real swept limb/weapon volume occupying the target volume during the fixed-step strike path. Ranged/fire effects require a projectile, propagating field, or expanding physical volume with travel time, geometry, and physics steps. If the carrier never occupied the target volume, nothing happens.
+
+## MEDIATION-FIRST WORK LAW
+
+Fix the authoritative mediation layer - impulse/energy, per-agent state, swept/projectile carriers, support/contact constraints - rather than masking defects with FX, extra scripts, or extra verification.
+
 ## HANDOFF EXPOSURE LAW
 
 Never hide, blur, or euphemize the actual state of delivered work.

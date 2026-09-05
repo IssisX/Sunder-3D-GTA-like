@@ -40,6 +40,11 @@ export {
   type BodyRig,
 } from "./body-model";
 
+/** Causal edges exposed for targeted severance probes. */
+export const EDGES = {
+  plantedFootNormal: true,
+};
+
 function solveDistance(
   rig: BodyRig,
   ia: number,
@@ -410,21 +415,22 @@ export class PhysicalBodies {
         injectExternalImpulse(w, a, rig, dt);
       }
 
-      // A one-leg action stance may use the ground as its normal boundary
-      // while contact is close. Horizontal motion remains free for the
-      // existing collision/friction solver.
+      // "Planted" has one physical meaning: a contact-critical foot whose
+      // task itself lies on the support surface may use that surface as its
+      // normal boundary. This applies equally to punches, kicks, bracing and
+      // future closed-chain actions. Horizontal motion remains free.
       let supportMask = 0;
       let leftY = 0, rightY = 0;
-      if (mode !== "dynamic" && !a.grabbedBy) {
+      if (EDGES.plantedFootNormal && mode !== "dynamic" && !a.grabbedBy) {
         for (const foot of [BODY.lFoot, BODY.rFoot]) {
           if (bodyTaskTargets.priorityFor(a, foot) <
               TASK_PRIORITY.CONTACT_CRITICAL) continue;
-          const other = foot === BODY.lFoot ? BODY.rFoot : BODY.lFoot;
-          if (bodyTaskTargets.priorityFor(a, other) !==
-              TASK_PRIORITY.ACTION) continue;
           const floorY = supportHeight(
             w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
           ) + nodeRadius(a, foot);
+          // Do not teleport a remote foot onto the floor. Bind the normal
+          // constraint only when the physical foot is already near support and
+          // its task explicitly requests that same support height.
           if (Math.abs(rig.y[foot]! - floorY) >
               0.085 * bodyScale(a)) continue;
           if (Math.abs(bodyTaskTargets.targetYFor(a, foot) -
