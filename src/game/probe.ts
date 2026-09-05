@@ -1017,6 +1017,52 @@ function checkStructuralEccentricity(): CheckResult {
 }
 
 /**
+ * "down" had no exit. Once an actor's consciousness fell below the entry
+ * line, nothing in the codebase ever moved its `loco` away from "down" again
+ * -- so a player who went under and was not captured stayed there, and
+ * because the game loop's own "is anything running" gate excluded `w.phase
+ * === "down"`, the whole simulation stopped advancing at the same moment,
+ * taking consciousness recovery, capture, and eventual death all down with
+ * it. Reloading a save taken in that state reproduced it forever.
+ *
+ * This exercises the actual liveness property end to end, through the same
+ * `stepWorld` entry point the game loop calls: force an actor under the
+ * line, confirm "down", then supply what recovery needs (blood, breath) and
+ * confirm the state actually leaves "down" within a bounded number of ticks,
+ * rather than only checking that the transition exists in source.
+ */
+function measureDownRecovers() {
+  const w = freshWorld(4004);
+  const a = stage(w, 20, 20);
+  quiet(w);
+  run(w, 2);
+  a.consciousness = 0.05;
+  run(w, 1);
+  const entered = a.loco === "down";
+  a.blood = 1;
+  a.breath = 1;
+  for (let i = 1; i <= 20 * 60; i++) {
+    run(w, 1);
+    if (a.loco !== "down") return { entered, ticks: i };
+  }
+  return { entered, ticks: -1 };
+}
+
+function checkDownRecovers(): CheckResult {
+  const { entered, ticks } = measureDownRecovers();
+  return {
+    name: "down-recovers",
+    pass: entered && ticks > 0,
+    detail:
+      !entered
+        ? "consciousness 0.05 did not enter \"down\" at all -- the entry threshold moved"
+        : ticks < 0
+          ? "entered \"down\" and never left it in 20s of simulated time with blood and breath restored"
+          : `entered "down", then left it ${(ticks / 60).toFixed(1)}s after consciousness had a path to recover`,
+  };
+}
+
+/**
  * A beam dropped on someone has to hurt, and hurt one place.
  */
 function checkFallingTimber(): CheckResult {
@@ -1055,6 +1101,7 @@ export function runFalsifiers(): CheckResult[] {
     severance("loadCascade", "lost support->load on the rest", measureCollapseCascade, 0.5),
     severance("loadMoment", "support geometry->which one carries it", measureLoadSpread, 1),
     checkStructuralEccentricity(),
+    checkDownRecovers(),
     checkFallingTimber(),
     checkAblation(),
     checkCoactivity(),

@@ -1731,6 +1731,17 @@ function resolveProp(w: World, p: Prop) {
   }
 }
 
+/**
+ * Consciousness band that defines "down": below `DOWN_ENTER` the body is
+ * unconscious and unresponsive; recovery does not resume until consciousness
+ * climbs back past `DOWN_EXIT`, a deliberate gap above the entry line. Without
+ * it, consciousness hovering exactly at the boundary (the regen law and the
+ * smoke/head-trauma decrements both touch it every tick) would flicker the
+ * actor between down and rising several times a second.
+ */
+const DOWN_ENTER = 0.15;
+const DOWN_EXIT = 0.22;
+
 function stepInjury(w: World, dt: number) {
   for (const a of w.actors) {
     if (a.heat > 0.5) {
@@ -1768,7 +1779,7 @@ function stepInjury(w: World, dt: number) {
       kill(w, a, a.blood <= 0.02 ? "bled out" : a.y < -2.5 ? "drowned" : "the body gave out");
     }
     if (!a.alive) continue;
-    if (a.consciousness < 0.15) {
+    if (a.consciousness < DOWN_ENTER) {
       a.loco = "down";
       a.intendSpeed = 0;
       a.stanceAuth = 0;
@@ -1782,6 +1793,24 @@ function stepInjury(w: World, dt: number) {
         // why a doorway full of bodies is a real reason none of them gets to
         // you. `secureTarget` ends it.
         if (a.grabbedBy) w.whisper("They drag you.");
+      }
+    } else if (a.loco === "down" && a.consciousness > DOWN_EXIT) {
+      // "down" had no way out: nothing ever moved a loco of "down" to anything
+      // else, so once consciousness dipped below DOWN_ENTER the actor -- and,
+      // for the player, the whole game loop below -- was stuck there for the
+      // rest of the session. Coming round rejoins the ragdoll -> pin -> getup
+      // continuum every other knockdown already uses, rather than inventing a
+      // second recovery path: stanceAuth ramps back up through the same
+      // controller, at the same rate a fall or a shove would.
+      a.loco = "getup";
+      a.getupT = 0;
+      if (a.kind === "player" && w.phase === "down") {
+        // An ordinary knockdown never touches `w.phase` at all -- authority
+        // alone gates what a ragdolled body can do, input stays live the whole
+        // time. "down" is that same state plus a harder freeze applied only
+        // while consciousness is under the line; the moment it is not, this
+        // goes back to being an ordinary (if still very compromised) getup.
+        w.phase = "playing";
       }
     }
   }

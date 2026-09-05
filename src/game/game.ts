@@ -161,7 +161,15 @@ export class Game {
   private frame = (now: number) => {
     const raw = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
-    const playing = this.world.phase === "playing" || this.world.phase === "title";
+    // "down" has to keep ticking, not just rendering: it is consciousness
+    // recovering, a guard closing the distance to take hold of you, or blood
+    // loss finishing you off, and none of those are reachable if the world
+    // stops advancing the moment you go under. Player control stays withheld
+    // through `simPlaying` alone, same as it always has.
+    const playing =
+      this.world.phase === "playing" ||
+      this.world.phase === "title" ||
+      this.world.phase === "down";
     const simPlaying = this.world.phase === "playing";
     const input = this.input.sample();
     if (simPlaying) {
@@ -293,6 +301,7 @@ export class Game {
         z: p.z,
         yaw: p.yaw,
         blood: p.blood,
+        consciousness: p.consciousness,
         stamina: p.stamina,
         weapon: p.weapon,
         torchLit: p.torchLit,
@@ -316,6 +325,7 @@ export class Game {
     p.z = s.player.z;
     p.yaw = s.player.yaw;
     p.blood = s.player.blood;
+    p.consciousness = s.player.consciousness;
     p.stamina = s.player.stamina;
     p.weapon = s.player.weapon;
     p.torchLit = s.player.torchLit;
