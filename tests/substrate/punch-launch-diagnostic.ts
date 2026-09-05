@@ -6,6 +6,8 @@ import { stepWorld } from '../../src/game/sim';
 import { ProceduralAnimationController as Controller }
   from '../../src/game/ProceduralAnimationController';
 import { supportMotion } from '../../src/game/support-motion';
+import { BODY, bodyScale, nodeRadius } from '../../src/game/body-model';
+import { supportHeight } from '../../src/game/body-contacts';
 
 function fixture() {
   const w = new World();
@@ -39,7 +41,7 @@ function fixture() {
 }
 
 function run(kind: 'normal' | 'cut-coupling' | 'cut-support-motion') {
-  const { p, b, tick } = fixture();
+  const { w, p, b, tick } = fixture();
   const originalSupport = supportMotion.drive;
   if (kind === 'cut-coupling') {
     (b as any).coupling.prepare = () => {};
@@ -54,26 +56,42 @@ function run(kind: 'normal' | 'cut-coupling' | 'cut-support-motion') {
   let grounded = 0;
   let ticks = 0;
   let peakVy = 0;
+  let maxNearestFootGap = 0;
+  let near3cm = 0;
+  let nearMechanical = 0;
   try {
+    const sample = () => {
+      const rig = b.get(p)!;
+      const lg = Math.abs(
+        rig.y[BODY.lFoot]! - nodeRadius(p, BODY.lFoot) -
+        supportHeight(w, rig.x[BODY.lFoot]!, rig.y[BODY.lFoot]!, rig.z[BODY.lFoot]!),
+      );
+      const rg = Math.abs(
+        rig.y[BODY.rFoot]! - nodeRadius(p, BODY.rFoot) -
+        supportHeight(w, rig.x[BODY.rFoot]!, rig.y[BODY.rFoot]!, rig.z[BODY.rFoot]!),
+      );
+      const nearest = Math.min(lg, rg);
+      maxNearestFootGap = Math.max(maxNearestFootGap, nearest);
+      if (nearest <= 0.03 * bodyScale(p)) near3cm++;
+      if (nearest <= 0.085 * bodyScale(p)) nearMechanical++;
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+      peakVy = Math.max(peakVy, Math.abs(p.vy));
+      if (p.grounded) grounded++;
+      ticks++;
+    };
+
     for (let i = 0; i < 2400 && started < 50; i++) {
       const activeBefore = melee.isActive(p.id);
       tick(activeBefore ? {} : { attackPressed: true });
       const activeAfter = melee.isActive(p.id);
       if (!wasActive && activeAfter) started++;
       wasActive = activeAfter;
-      minY = Math.min(minY, p.y);
-      maxY = Math.max(maxY, p.y);
-      peakVy = Math.max(peakVy, Math.abs(p.vy));
-      if (p.grounded) grounded++;
-      ticks++;
+      sample();
     }
     for (let i = 0; i < 60; i++) {
       tick();
-      minY = Math.min(minY, p.y);
-      maxY = Math.max(maxY, p.y);
-      peakVy = Math.max(peakVy, Math.abs(p.vy));
-      if (p.grounded) grounded++;
-      ticks++;
+      sample();
     }
   } finally {
     supportMotion.drive = originalSupport;
@@ -83,6 +101,9 @@ function run(kind: 'normal' | 'cut-coupling' | 'cut-support-motion') {
     verticalRange: maxY - minY,
     groundedFraction: grounded / Math.max(1, ticks),
     peakVy,
+    maxNearestFootGap,
+    near3cmFraction: near3cm / Math.max(1, ticks),
+    nearMechanicalFraction: nearMechanical / Math.max(1, ticks),
   };
 }
 
