@@ -416,12 +416,10 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
       lz += -0.07 * hipT + 0.12 * drive;
     } else if (i === P.spine) {
       lx += side * (0.06 * hipT - 0.1 * drive);
-      ly += 0.04 * drive;
       lz += -0.04 * hipT + 0.14 * drive;
     } else if (i === P.head) {
       lx += side * (0.03 * hipT - 0.04 * drive);
       lz += 0.05 * drive;
-      ly -= 0.02 * hipT;
     }
     const rearLeg = left ? P.shinL : P.shinR;
     const leadLeg = left ? P.shinR : P.shinL;
@@ -429,7 +427,6 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
     const leadTh = left ? P.thighR : P.thighL;
     if (i === rearLeg) {
       lz -= 0.12 * hipT;
-      ly += 0.05 * drive;
     } else if (i === leadLeg) {
       lz += 0.1 * drive;
     } else if (i === rearTh) {
@@ -491,7 +488,6 @@ function poseLocal(a: Actor, i: number): [number, number, number] {
       ly -= 0.02 * snapAmt;
     } else if (i === P.pelvis) {
       lx -= 0.06 * snapAmt;
-      ly += 0.05 * chamberAmt;
       lz += -0.08 * chamberAmt + 0.1 * snapAmt;
     } else if (i === P.spine) {
       lz += -0.1 * chamberAmt + 0.12 * snapAmt;
@@ -955,8 +951,9 @@ function poseCompliance(a: Actor, i: number) {
     const uarm = left ? P.uarmL : P.uarmR;
     const otherH = left ? P.larmR : P.larmL;
     const otherU = left ? P.uarmR : P.uarmL;
-    if (i === hand || i === uarm || i === P.spine || i === P.pelvis) return 0.0000026 * (1 + frac * 8);
+    if (i === hand || i === uarm) return 0.0000026 * (1 + frac * 8);
     if (i === otherH || i === otherU) return 0.0000042 * (1 + frac * 8);
+    if (i === P.shinL || i === P.shinR) return 0.0000016 * (1 + frac * 8);
   }
   if (a.kickT > 0) {
     if (i === P.shinR || i === P.thighR || i === P.pelvis || i === P.spine) return 0.0000026 * (1 + frac * 8);
@@ -1038,8 +1035,6 @@ function predict(a: Actor, h: number) {
       p.vx *= 0.999;
       p.vy *= 0.999;
       p.vz *= 0.999;
-    } else {
-      p.vy += g * h * 0.15;
     }
     p.x += p.vx * h;
     p.y += p.vy * h;
@@ -1468,6 +1463,16 @@ export function stepBodies(w: World, dt: number) {
           p.vx *= 0.48;
           p.vz *= 0.48;
           p.y = Math.max(p.y, p.r);
+        }
+      }
+      if (a.body.mode === "stance" && a.grounded) {
+        const pel = a.body.parts[P.pelvis]!;
+        const spn = a.body.parts[P.spine]!;
+        if (pel.vy > 0) pel.vy = 0;
+        if (spn.vy > 0.2) spn.vy *= 0.15;
+        for (const i of [P.shinL, P.shinR, P.head]) {
+          const p = a.body.parts[i]!;
+          if (p.vy > 0.15) p.vy *= 0.2;
         }
       }
       if (a.body.mode !== "stance") {

@@ -257,6 +257,8 @@ export class Game {
       burning: p.heat > 0.5,
       wanted: this.world.wanted,
       captureT: this.world.captureT,
+      binding: p.bandageHold,
+      bleed: p.bleed,
     };
     this.onHud(this.hud);
   }
@@ -582,6 +584,8 @@ export class Game {
           walkPhase: p.walkPhase,
           belly: !!(mesh?.userData?.parts as { belly?: unknown } | undefined)?.belly,
           hipD: (mesh?.userData?.parts?.pelvis as { scale?: { z: number } } | undefined)?.scale?.z ?? 0,
+          binding: p.bandageHold,
+          bleed: p.bleed,
         };
       },
       forceInjure: (region?: string, kind?: string) => {

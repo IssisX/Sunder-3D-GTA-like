@@ -200,6 +200,7 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   }
 
   if (input.bandage) treat(w, p, dt);
+  else p.bandageHold = 0;
   if (input.ignitePressed) tryIgnite(w, p);
   if (input.dropPressed) dropHeld(w, p, 0.5);
 
@@ -226,7 +227,14 @@ function probeHeight(w: World, x: number, z: number) {
 }
 
 function treat(w: World, p: Actor, dt: number) {
-  p.intendSpeed = Math.min(p.intendSpeed, 0.6);
+  const busy = p.strikeT > 0 || p.kickT > 0 || p.shoveT > 0 || p.loco === "sprint" || !p.grounded || p.loco === "ragdoll" || p.loco === "down";
+  if (busy) {
+    p.bandageHold = 0;
+    return;
+  }
+  p.intendSpeed = Math.min(p.intendSpeed, 0.45);
+  p.bandageHold = Math.min(1, p.bandageHold + dt / 0.85);
+  if (p.bandageHold < 0.28) return;
   p.bleed = Math.max(0, p.bleed - dt * 0.35);
   for (const r of REGIONS) {
     p.injuries[r].cut = Math.max(0, p.injuries[r].cut - dt * 0.12);
@@ -1066,7 +1074,7 @@ function hitActor(
     hitY,
     hitZ,
     f.x * force * jScale * rel,
-    (how === "kick" ? 2.2 : 4.5) * rel,
+    (how === "kick" ? 1.2 : 0.45) * rel,
     f.z * force * jScale * rel,
   );
   const region =
@@ -1414,9 +1422,9 @@ function stepPhysics(w: World, dt: number) {
             a.plantPart === P.shinL
               ? injurySum(a.injuries.lleg) + a.injuries.lleg.fracture
               : injurySum(a.injuries.rleg) + a.injuries.rleg.fracture;
-          plantMul = 0.55 + 0.45 * (1 - clamp(inj, 0, 1));
+          plantMul = 0.9 + 0.1 * (1 - clamp(inj, 0, 1));
         } else if (a.grounded && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint")) {
-          plantMul = 0.7;
+          plantMul = 0.96;
         }
       }
       a.vx += (wishX - a.vx) * (1 - Math.exp(-dt * acc * 0.25 * plantMul));
@@ -1447,6 +1455,7 @@ function stepPhysics(w: World, dt: number) {
       a.wet = Math.max(0, a.wet - dt * 0.05);
     }
     a.vy -= GRAVITY * dt * (water ? 0.35 : 1);
+    if (a.grounded && a.vy > 0 && (a.strikeT > 0 || a.kickT > 0 || a.shoveT > 0)) a.vy = 0;
     integrateActor(w, a, dt);
     a.balance = clamp(a.balance + dt * 0.55, 0, 1);
     if (Math.hypot(a.vx, a.vz) > 4.5 && surf === "mud") {
@@ -1993,6 +2002,6 @@ export function hintFor(w: World): string {
     if (pr.kind === "flask") return "Oil flask";
     if (pr.kind === "hay") return "Dry hay";
   }
-  if (p.bleed > 0.2) return "Hold T to bind the wound";
+  if (p.bleed > 0.2) return "Hold BIND to wrap the wound";
   return "";
 }

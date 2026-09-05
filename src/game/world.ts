@@ -262,6 +262,7 @@ export class World {
       plantZ: 0,
       combo: 0,
       comboAge: 0,
+      bandageHold: 0,
       ...partial,
     };
     a.px = a.x;

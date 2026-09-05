@@ -160,6 +160,8 @@ export function SunderHud({
               onLook={onLook}
               onTouchUi={onTouchUi}
               hint={hud.hint}
+              binding={hud.binding}
+              showBind={hud.bleed > 0.08 || hurt}
             />
           )}
         </>
@@ -236,7 +238,7 @@ function Title({
             <p className="text-xs leading-relaxed text-subtle">
               {touch
                 ? "Left stick walks. Drag the right pad to look. Strike, grab, run on the right. Folded or open — thumbs stay in the corners, off the hinge."
-                : "WASD move · Shift run · Mouse look · LMB strike · RMB grab/throw · E shove · F kick · R ignite · T bind"}
+                : "WASD move · Shift run · Mouse look · LMB strike · RMB grab · E shove · F kick · R ignite · T bind"}
             </p>
           </div>
         </div>
@@ -286,12 +288,16 @@ function TouchControls({
   onLook,
   onTouchUi,
   hint,
+  binding,
+  showBind,
 }: {
   onVirtual: (btn: string, down: boolean) => void;
   onStick: (x: number, y: number) => void;
   onLook: (dx: number, dy: number) => void;
   onTouchUi: (on: boolean) => void;
   hint: string;
+  binding: number;
+  showBind: boolean;
 }) {
   const [coach, setCoach] = useState(true);
   useEffect(() => {
@@ -307,7 +313,8 @@ function TouchControls({
   return (
     <>
       <LookPad onLook={onLook} />
-      <div className="touch-left pointer-events-none absolute bottom-0 left-0 z-20 p-3 pb-[max(1.25rem,env(safe-area-inset-bottom))] pl-[max(0.75rem,env(safe-area-inset-left))]">
+      <div className="touch-left pointer-events-none absolute bottom-0 left-0 z-20 flex flex-col items-start gap-2 p-3 pb-[max(1.25rem,env(safe-area-inset-bottom))] pl-[max(0.75rem,env(safe-area-inset-left))]">
+        {showBind && <BindBtn onVirtual={onVirtual} progress={binding} />}
         <Stick onStick={onStick} />
       </div>
       <div className="touch-right pointer-events-none absolute right-0 bottom-0 z-20 flex flex-col items-end gap-2 p-3 pb-[max(1.25rem,env(safe-area-inset-bottom))] pr-[max(0.75rem,env(safe-area-inset-right))]">
@@ -330,7 +337,7 @@ function TouchControls({
       {(coach || hint) && (
         <div className="touch-hint pointer-events-none absolute z-10 w-[min(22rem,70%)] -translate-x-1/2 text-center">
           <p className="rounded-md bg-bg/55 px-3 py-1.5 text-xs text-fg/80 backdrop-blur-sm">
-            {hint || "Left stick walks · drag right to look"}
+            {hint || "Left thumb walks · right thumb fights"}
           </p>
         </div>
       )}
@@ -378,20 +385,56 @@ function ActionBtn({
   );
 }
 
+function BindBtn({
+  onVirtual,
+  progress,
+}: {
+  onVirtual: (btn: string, down: boolean) => void;
+  progress: number;
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  return (
+    <button
+      type="button"
+      aria-label="Bind wound"
+      className="pointer-events-auto relative h-14 min-h-14 min-w-14 rounded-full border border-border bg-surface/85 text-xs tracking-wide text-fg uppercase backdrop-blur-sm select-none"
+      style={{ touchAction: "none" }}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        onVirtual("bandage", true);
+      }}
+      onPointerUp={(e) => {
+        e.preventDefault();
+        onVirtual("bandage", false);
+      }}
+      onPointerCancel={() => onVirtual("bandage", false)}
+      onLostPointerCapture={() => onVirtual("bandage", false)}
+    >
+      <span
+        className="pointer-events-none absolute inset-1 rounded-full"
+        style={{
+          background: `conic-gradient(var(--color-accent) ${pct}%, transparent ${pct}%)`,
+          opacity: 0.55,
+        }}
+      />
+      <span className="relative">Bind</span>
+    </button>
+  );
+}
+
 function Stick({ onStick }: { onStick: (x: number, y: number) => void }) {
-  const baseRef = useRef<HTMLDivElement>(null);
+  const zoneRef = useRef<HTMLDivElement>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
+  const [live, setLive] = useState<{ ox: number; oy: number } | null>(null);
+  const origin = useRef({ x: 0, y: 0 });
   const active = useRef(false);
-  const throwR = 56;
+  const throwR = 64;
 
   const apply = (clientX: number, clientY: number) => {
-    const el = baseRef.current;
-    if (!el) return;
-    const b = el.getBoundingClientRect();
-    const cx = b.left + b.width / 2;
-    const cy = b.top + b.height / 2;
-    let dx = clientX - cx;
-    let dy = clientY - cy;
+    let dx = clientX - origin.current.x;
+    let dy = clientY - origin.current.y;
     const m = Math.hypot(dx, dy);
     if (m > throwR) {
       dx *= throwR / m;
@@ -401,31 +444,37 @@ function Stick({ onStick }: { onStick: (x: number, y: number) => void }) {
     const nx = dx / throwR;
     const ny = -dy / throwR;
     const mag = Math.hypot(nx, ny);
-    if (mag < 0.12) onStick(0, 0);
+    if (mag < 0.14) onStick(0, 0);
     else {
-      const s = (mag - 0.12) / 0.88;
-      onStick((nx / mag) * Math.min(1, s), (ny / mag) * Math.min(1, s));
+      const u = (mag - 0.14) / 0.86;
+      const s = u * u * (3 - 2 * u);
+      onStick((nx / mag) * s, (ny / mag) * s);
     }
   };
 
   const end = () => {
     active.current = false;
     setKnob({ x: 0, y: 0 });
+    setLive(null);
     onStick(0, 0);
   };
 
   return (
     <div
-      ref={baseRef}
+      ref={zoneRef}
       data-stick
-      className="pointer-events-auto relative h-36 w-36 rounded-full border border-border bg-surface/45 select-none"
+      className="pointer-events-auto relative h-44 w-44 select-none"
       style={{ touchAction: "none" }}
       onPointerDown={(e) => {
         e.preventDefault();
         e.stopPropagation();
         active.current = true;
         (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        apply(e.clientX, e.clientY);
+        const b = e.currentTarget.getBoundingClientRect();
+        origin.current = { x: e.clientX, y: e.clientY };
+        setLive({ ox: e.clientX - b.left, oy: e.clientY - b.top });
+        setKnob({ x: 0, y: 0 });
+        onStick(0, 0);
       }}
       onPointerMove={(e) => {
         if (!active.current) return;
@@ -436,17 +485,23 @@ function Stick({ onStick }: { onStick: (x: number, y: number) => void }) {
       onPointerCancel={end}
       onLostPointerCapture={end}
     >
-      <div className="pointer-events-none absolute inset-6 rounded-full border border-border/70" />
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-        <div className="h-1.5 w-1.5 rounded-full bg-fg/35" />
-      </div>
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+      {!live && (
+        <div className="pointer-events-none absolute inset-6 rounded-full border border-border/50 bg-surface/30" />
+      )}
+      {live && (
         <div
-          data-stick-knob
-          className="h-14 w-14 rounded-full border border-accent/40 bg-accent/80"
-          style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
-        />
-      </div>
+          className="pointer-events-none absolute h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full border border-border bg-surface/45"
+          style={{ left: live.ox, top: live.oy }}
+        >
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div
+              data-stick-knob
+              className="h-14 w-14 rounded-full border border-accent/40 bg-accent/80"
+              style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

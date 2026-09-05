@@ -41,6 +41,17 @@ export function updatePlant(a: Actor) {
     slidePlant(a, 0.34);
     return;
   }
+  if (a.strikeT > 0 && a.grounded) {
+    const want = Math.sin(a.walkPhase) >= 0 ? SHIN_R : SHIN_L;
+    const foot = a.body.parts[want]!;
+    if (a.plantPart !== want) {
+      a.plantPart = want;
+      a.plantX = foot.x;
+      a.plantZ = foot.z;
+    }
+    slidePlant(a, 0.36);
+    return;
+  }
   const spd = Math.hypot(a.vx, a.vz);
   const stepping =
     a.grounded && spd > 0.28 && (a.loco === "walk" || a.loco === "run" || a.loco === "sprint");

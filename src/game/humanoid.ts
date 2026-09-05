@@ -7,17 +7,17 @@ import { PROFILE } from "./profile";
 export { PROFILE } from "./profile";
 
 /** Bump when the mesh layout changes so cached actors rebuild. */
-export const MESH_REV = 9;
+export const MESH_REV = 10;
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
   sphere: new THREE.SphereGeometry(0.5, 14, 12),
   cyl: new THREE.CylinderGeometry(0.5, 0.5, 1, 14),
-  chest: new THREE.CylinderGeometry(0.5, 0.4, 1, 16),
-  belly: new THREE.CylinderGeometry(0.4, 0.46, 1, 16),
-  hips: new THREE.CylinderGeometry(0.42, 0.52, 1, 16),
-  limbU: new THREE.CylinderGeometry(0.36, 0.5, 1, 12),
-  limbL: new THREE.CylinderGeometry(0.3, 0.42, 1, 12),
+  chest: new THREE.CylinderGeometry(0.5, 0.44, 1, 16),
+  belly: new THREE.CylinderGeometry(0.4, 0.4, 1, 12),
+  hips: new THREE.CylinderGeometry(0.46, 0.5, 1, 14),
+  limbU: new THREE.CylinderGeometry(0.38, 0.5, 1, 12),
+  limbL: new THREE.CylinderGeometry(0.32, 0.42, 1, 12),
   cone: new THREE.ConeGeometry(0.5, 1, 8),
 };
 
@@ -98,6 +98,16 @@ export function makeHumanoid(a: Actor) {
   const rknee = mk(dark, "rknee", GEO.sphere);
   const lfoot = mk(dark, "lfoot");
   const rfoot = mk(dark, "rfoot");
+  const addToe = (foot: THREE.Mesh) => {
+    const toe = new THREE.Mesh(GEO.sphere, dark);
+    toe.name = "toe";
+    toe.scale.set(0.85, 0.7, 0.55);
+    toe.position.set(0, -0.05, 0.38);
+    toe.castShadow = true;
+    foot.add(toe);
+  };
+  addToe(lfoot);
+  addToe(rfoot);
   const lshcap = mk(cloth, "lshcap", GEO.sphere);
   const rshcap = mk(cloth, "rshcap", GEO.sphere);
   for (const m of [pelvis, belly, torso, neck, head, luarm, llarm, ruarm, rlarm, lthigh, lshin, rthigh, rshin, lhand, rhand]) {
@@ -174,10 +184,12 @@ export function syncHumanoid(a: Actor, g: THREE.Group, alpha: number) {
   const cf = PROFILE.chestFwd;
   const hb = PROFILE.hipBack;
   const shY = (A[P.uarmL]!.y + A[P.uarmR]!.y) * 0.5;
+  const axisX = pel.x * 0.4 + sp.x * 0.6;
+  const axisZ = pel.z * 0.4 + sp.z * 0.6;
   placeBody(
     parts.pelvis!,
-    { x: pel.x - fwd.x * hb, y: pel.y - 0.1, z: pel.z - fwd.z * hb },
-    { x: pel.x - fwd.x * 0.012, y: pel.y + 0.05, z: pel.z - fwd.z * 0.012 },
+    { x: axisX - fwd.x * hb, y: pel.y - 0.08, z: axisZ - fwd.z * hb },
+    { x: axisX - fwd.x * 0.008, y: pel.y + 0.1, z: axisZ - fwd.z * 0.008 },
     rgt,
     PROFILE.hipW,
     PROFILE.hipD,
@@ -185,27 +197,23 @@ export function syncHumanoid(a: Actor, g: THREE.Group, alpha: number) {
   if (parts.belly) {
     placeBody(
       parts.belly,
-      { x: pel.x + fwd.x * 0.012, y: pel.y + 0.02, z: pel.z + fwd.z * 0.012 },
-      { x: pel.x + fwd.x * 0.028, y: pel.y + 0.22, z: pel.z + fwd.z * 0.028 },
+      { x: axisX, y: pel.y + 0.06, z: axisZ },
+      { x: axisX + fwd.x * 0.008, y: pel.y + 0.22, z: axisZ + fwd.z * 0.008 },
       rgt,
       PROFILE.bellyW,
       PROFILE.bellyD,
     );
   }
-  const chestA = { x: pel.x + fwd.x * 0.03, y: pel.y + 0.18, z: pel.z + fwd.z * 0.03 };
-  const chestB = {
-    x: sp.x + fwd.x * cf,
-    y: sp.y * 0.4 + shY * 0.6 - 0.02,
-    z: sp.z + fwd.z * cf,
-  };
+  const chestA = { x: axisX + fwd.x * cf, y: pel.y + 0.18, z: axisZ + fwd.z * cf };
+  const chestB = { x: axisX + fwd.x * cf, y: shY - 0.02, z: axisZ + fwd.z * cf };
   placeBody(parts.torso!, chestA, chestB, rgt, PROFILE.chestW, PROFILE.chestD);
   const nb = { x: chestB.x, y: chestB.y, z: chestB.z };
   const nt = limp
     ? { x: hd.x, y: hd.y - 0.1, z: hd.z }
     : {
-        x: nb.x * 0.78 + hd.x * 0.22,
-        y: Math.max(hd.y - 0.12, nb.y + 0.09),
-        z: nb.z * 0.78 + hd.z * 0.22,
+        x: nb.x * 0.2 + hd.x * 0.15 + axisX * 0.65,
+        y: Math.max(hd.y - 0.11, nb.y + 0.08),
+        z: nb.z * 0.2 + hd.z * 0.15 + axisZ * 0.65,
       };
   if (parts.neck) placeSeg(parts.neck, nb, nt, PROFILE.neck);
   const headR = 0.11;

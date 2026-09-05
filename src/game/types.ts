@@ -267,6 +267,7 @@ export interface Actor {
   plantZ: number;
   combo: number;
   comboAge: number;
+  bandageHold: number;
   body?: Physique;
 }
 
@@ -386,6 +387,8 @@ export interface HudState {
   burning: boolean;
   wanted: number;
   captureT: number;
+  binding: number;
+  bleed: number;
 }
 
 export function defaultHud(): HudState {
@@ -414,6 +417,8 @@ export function defaultHud(): HudState {
     burning: false,
     wanted: 0,
     captureT: 0,
+    binding: 0,
+    bleed: 0,
   };
 }
 
