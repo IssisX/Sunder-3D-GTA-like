@@ -30,6 +30,7 @@ import {
   solveSelfContacts,
   supportHeight,
 } from "./body-contacts";
+import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 import { activeBodyControl } from "./active-body-control";
 
 export {
@@ -46,6 +47,7 @@ function solveDistance(
   rest: number,
   stiffness: number,
   scale: number,
+  supportMask = 0,
 ) {
   const dx = rig.x[ib]! - rig.x[ia]!;
   const dy = rig.y[ib]! - rig.y[ia]!;
@@ -60,10 +62,13 @@ function solveDistance(
   const corr = ((d - rest * scale) / d) * stiffness;
 
   rig.x[ia] += dx * corr * (wa / sum);
-  rig.y[ia] += dy * corr * (wa / sum);
+  const ya = supportMask & (1 << ia) ? 0 : wa;
+  const yb = supportMask & (1 << ib) ? 0 : wb;
+  const ysum = ya + yb || 1;
+  rig.y[ia] += dy * corr * (ya / ysum);
   rig.z[ia] += dz * corr * (wa / sum);
   rig.x[ib] -= dx * corr * (wb / sum);
-  rig.y[ib] -= dy * corr * (wb / sum);
+  rig.y[ib] -= dy * corr * (yb / ysum);
   rig.z[ib] -= dz * corr * (wb / sum);
 }
 
@@ -74,6 +79,7 @@ function solveRange(
   min: number,
   max: number,
   scale: number,
+  supportMask = 0,
 ) {
   const dx = rig.x[ib]! - rig.x[ia]!;
   const dy = rig.y[ib]! - rig.y[ia]!;
@@ -93,10 +99,13 @@ function solveRange(
   const corr = (d - target) / d;
 
   rig.x[ia] += dx * corr * (wa / sum);
-  rig.y[ia] += dy * corr * (wa / sum);
+  const ya = supportMask & (1 << ia) ? 0 : wa;
+  const yb = supportMask & (1 << ib) ? 0 : wb;
+  const ysum = ya + yb || 1;
+  rig.y[ia] += dy * corr * (ya / ysum);
   rig.z[ia] += dz * corr * (wa / sum);
   rig.x[ib] -= dx * corr * (wb / sum);
-  rig.y[ib] -= dy * corr * (wb / sum);
+  rig.y[ib] -= dy * corr * (yb / ysum);
   rig.z[ib] -= dz * corr * (wb / sum);
 }
 
@@ -104,6 +113,7 @@ function solveLinks(
   a: Actor,
   rig: BodyRig,
   stiffness = 1,
+  supportMask = 0,
 ) {
   const scale = bodyScale(a);
 
@@ -116,11 +126,12 @@ function solveLinks(
       rest,
       LINK_STIFFNESS[i]! * stiffness,
       scale,
+      supportMask,
     );
   }
 
   for (const [ia, ib, min, max] of JOINT_RANGES) {
-    solveRange(rig, ia, ib, min, max, scale);
+    solveRange(rig, ia, ib, min, max, scale, supportMask);
   }
 }
 
@@ -399,7 +410,37 @@ export class PhysicalBodies {
         injectExternalImpulse(w, a, rig, dt);
       }
 
+      // A one-leg action stance may use the ground as its normal boundary
+      // while contact is close. Horizontal motion remains free for the
+      // existing collision/friction solver.
+      let supportMask = 0;
+      let leftY = 0, rightY = 0;
+      if (mode !== "dynamic" && !a.grabbedBy) {
+        for (const foot of [BODY.lFoot, BODY.rFoot]) {
+          if (bodyTaskTargets.priorityFor(a, foot) <
+              TASK_PRIORITY.CONTACT_CRITICAL) continue;
+          const other = foot === BODY.lFoot ? BODY.rFoot : BODY.lFoot;
+          if (bodyTaskTargets.priorityFor(a, other) !==
+              TASK_PRIORITY.ACTION) continue;
+          const floorY = supportHeight(
+            w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
+          ) + nodeRadius(a, foot);
+          if (Math.abs(rig.y[foot]! - floorY) >
+              0.085 * bodyScale(a)) continue;
+          if (Math.abs(bodyTaskTargets.targetYFor(a, foot) -
+              floorY) > 0.025 * bodyScale(a)) continue;
+          supportMask |= 1 << foot;
+          if (foot === BODY.lFoot) leftY = floorY;
+          else rightY = floorY;
+        }
+      }
       integrateBody(w, rig, dt, mode);
+      if (supportMask & (1 << BODY.lFoot)) {
+        rig.y[BODY.lFoot] = rig.py[BODY.lFoot] = leftY;
+      }
+      if (supportMask & (1 << BODY.rFoot)) {
+        rig.y[BODY.rFoot] = rig.py[BODY.rFoot] = rightY;
+      }
 
       const floor = supportHeight(
         w,
@@ -420,7 +461,7 @@ export class PhysicalBodies {
             : 0.94;
 
       for (let iter = 0; iter < iterations; iter++) {
-        solveLinks(a, rig, linkStrength);
+        solveLinks(a, rig, linkStrength, supportMask);
         solveGrab(
           w,
           a,
@@ -430,9 +471,22 @@ export class PhysicalBodies {
         );
         collideRig(w, a, rig, dt, iter === 0);
         solveSelfContacts(a, rig);
+        if (supportMask & (1 << BODY.lFoot)) {
+          rig.y[BODY.lFoot] = rig.py[BODY.lFoot] = leftY;
+          rig.groundedNodes = Math.max(1, rig.groundedNodes);
+        }
+        if (supportMask & (1 << BODY.rFoot)) {
+          rig.y[BODY.rFoot] = rig.py[BODY.rFoot] = rightY;
+          rig.groundedNodes = Math.max(1, rig.groundedNodes);
+        }
       }
 
       if (mode === "stumble") {
+        const actionActive =
+          bodyTaskTargets.priorityFor(a, BODY.lFoot) >= TASK_PRIORITY.ACTION ||
+          bodyTaskTargets.priorityFor(a, BODY.rFoot) >= TASK_PRIORITY.ACTION ||
+          bodyTaskTargets.priorityFor(a, BODY.lHand) >= TASK_PRIORITY.ACTION ||
+          bodyTaskTargets.priorityFor(a, BODY.rHand) >= TASK_PRIORITY.ACTION;
         const rise = rig.y[BODY.chest]! - rig.y[BODY.pelvis]!;
         const lean = Math.hypot(
           rig.x[BODY.chest]! - rig.x[BODY.pelvis]!,
@@ -440,9 +494,11 @@ export class PhysicalBodies {
         );
 
         if (
+          !actionActive && (
           rise < 0.16 ||
           lean > 0.62 * bodyScale(a) ||
           a.balance < 0.08
+          )
         ) {
           a.loco = "ragdoll";
           a.locoT = Math.max(a.locoT, 0.65);
@@ -499,4 +555,3 @@ export class PhysicalBodies {
     }
   }
 }
-

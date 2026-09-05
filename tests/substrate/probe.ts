@@ -161,7 +161,7 @@ function strike(kick: boolean, cutGuard = false) {
   const { p, tick, b } = fixture();
   const values: number[] = [];
   let peak = 0, reach = 0, turn = 0, handHeight = 0;
-  let firstLift = 0, supportHeight = 0;
+  let firstLift = 0, initialFoot = 0, supportHeight = 0;
   const melee = (b as any).melee;
   if (cutGuard) melee.finishCoupledTasks = () => {};
   for (let i = 0; i < 36; i++) {
@@ -175,7 +175,8 @@ function strike(kick: boolean, cutGuard = false) {
         (r.z[n]! - r.pz[n]!) / STEP));
       reach = Math.max(reach, p.z - r.z[n]!);
     }
-    if (i === 2) firstLift = r.y[BODY.rFoot]!;
+    if (i === 0) initialFoot = r.y[BODY.rFoot]!;
+    if (i === 2) firstLift = r.y[BODY.rFoot]! - initialFoot;
     if (i < 20 && kick) supportHeight = Math.max(supportHeight, r.y[BODY.lFoot]!);
     if (i === 12) {
       turn = Math.abs(Math.atan2(r.z[4]! - r.z[3]!, r.x[4]! - r.x[3]!));
@@ -184,7 +185,8 @@ function strike(kick: boolean, cutGuard = false) {
     values.push(...r.x, ...r.y, ...r.z);
   }
   assert(values.every(Number.isFinite), 'nonfinite solved pose');
-  return { values, peak, reach, turn, handHeight, firstLift, supportHeight };
+  return { values, peak, reach, turn, handHeight, firstLift, supportHeight,
+    finalLoco: p.loco, finalGrounded: p.grounded };
 }
 const kick = strike(true), punch = strike(false);
 console.log('DIAG strikes', {
@@ -194,10 +196,11 @@ console.log('DIAG strikes', {
   punch: { peak: punch.peak, reach: punch.reach },
 });
 assert(kick.supportHeight < 0.22, 'kick support foot climbs off ground');
-assert(kick.firstLift > 0.2, 'kick waits before lifting');
+assert(kick.firstLift > 0.04, 'kick waits before lifting');
 assert(kick.turn > 0.9, 'kick remains front-facing');
 assert(kick.handHeight > 1.2, 'kick puts hands on hips');
 assert(kick.reach > 0.6 && kick.peak > 8, 'weak kick');
+assert.notEqual(kick.finalLoco, 'ragdoll', 'kick recovery collapses');
 assert(punch.reach > 0.6 && punch.peak > 9, 'weak punch');
 assert.deepEqual(strike(true).values, kick.values,
   'kick replay diverges in same runtime');

@@ -544,9 +544,9 @@ export class MeleeKinematics {
       -0.03 + 0.16 * lift + 0.65 * extension, 1);
     // Guard rises immediately; final arm IK follows the coupled shoulders.
     this.solveArmTaskLocal(a, rig, false,
-      -0.22, 1.34 + heightOffset, 0.22, 1, 0.94);
+      -0.22, 1.48 + heightOffset, 0.22, 1, 0.94);
     this.solveArmTaskLocal(a, rig, true,
-      0.22, 1.34 + heightOffset, 0.22, 1, 0.94);
+      0.22, 1.48 + heightOffset, 0.22, 1, 0.94);
   }
 
   finishCoupledTasks(w: World) {
@@ -570,7 +570,7 @@ export class MeleeKinematics {
         this.solveArmTask(a, rig, side > 0,
           bodyTaskTargets.targetXFor(a, node)
             + (sideZ * 0.23 - sideX * side * 0.04) * scale,
-          bodyTaskTargets.targetYFor(a, node) + 0.025 * scale,
+          bodyTaskTargets.targetYFor(a, node) + 0.42 * scale,
           bodyTaskTargets.targetZFor(a, node)
             + (-sideX * 0.23 - sideZ * side * 0.04) * scale,
           1, 0.94);

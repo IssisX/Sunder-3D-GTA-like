@@ -78,9 +78,18 @@ This remains a bounded active-ragdoll approximation. Internal task/posture
 actuation now conserves weighted linear momentum in all three axes; angular
 momentum is still approximate and support yaw is handled through the bounded
 foot-ground wrench. Fist effective contact mass is empirically bounded, not
-computed from an articulated inverse mass matrix. Kick support contact compliance
-still needs refinement. Hardware Fold 6 touch feel/performance remains
-unverified.
+computed from an articulated inverse mass matrix. Kick support now uses a
+ground-normal stance constraint only when one foot owns a contact-critical
+support task and the other owns the action. Horizontal contact, ordinary gait,
+jumps, falls and two-foot punch support stay on their existing paths. Maximum
+support-foot center height fell from 1.64 m to 0.127 m (0.10 m foot radius)
+while heel reach remained 0.77 m and shoulder turn remained 76 degrees.
+Hardware Fold 6 touch feel/performance remains unverified.
+
+The action foot's authored ground return no longer registers as a self-impact;
+environment and body contacts outside an active limb task retain the existing
+impact path. The direct recovery trace returns to idle and both feet settle at
+ground height instead of classifying the kick landing as a ragdoll event.
 
 The next capabilities made cheaper are touch-intent combat buffering over the
 same mechanical action tasks, and support-aware action continuation that carries

@@ -3,6 +3,7 @@ import { HALF } from "./types";
 import type { World } from "./world";
 import { clamp } from "./world";
 import { impactDynamics } from "./impact-dynamics";
+import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 import {
   BASE_RADIUS,
   BODY,
@@ -260,7 +261,11 @@ export function collideRig(
         rig.py[i]!,
         dt,
       );
-      if (registerImpact && vy < -3.2) {
+      if (
+        registerImpact &&
+        vy < -3.2 &&
+        bodyTaskTargets.priorityFor(a, i) < TASK_PRIORITY.ACTION
+      ) {
         const closing = -vy;
         applyImpact(w, a, rig, i, closing);
         impactDynamics.contactNode(
