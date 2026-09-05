@@ -34,6 +34,7 @@ import {
   impulseDamage,
 } from "./body";
 import { dropFrame, makeFrame, wakeFrame } from "./frames";
+import { HELD, solveReactions } from "./statics";
 import {
   armMotor,
   checkTrips,
@@ -56,6 +57,8 @@ const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
 /** Fastest a prop may be moving at the moment it becomes a physical body, m/s. */
 const PROP_BIRTH_SPEED = 10;
+/** Parts that came down this tick; reused, never reallocated. */
+const fellScratch: Prop[] = [];
 
 export interface Cam {
   yaw: number;
@@ -2006,29 +2009,138 @@ function collapseProp(w: World, p: Prop, vx: number, vz: number) {
 }
 
 /**
- * Rates a building's supports against the load they were built to carry.
+ * Design safety factor on a support's rated capacity, dimensionless.
  *
- * A building that is standing is, by definition, within capacity, so the rating
- * comes from its own design load rather than from the mass of a post -- which
- * describes how hard the post is to throw, not what it can hold up. The margin
- * is what decides how many you have to take out: at 1.9, losing one of four is
- * survivable and losing two starts the cascade.
+ * Chosen against the structural consequence rather than picked: losing one
+ * corner of a four-post rectangle throws the load onto the two neighbours and
+ * exactly doubles it, so a factor below 2 makes any single cut fatal on its own
+ * and a factor far above 2 makes the second cut irrelevant too. Just over 2
+ * leaves a building that has lost a post standing but critical -- and puts the
+ * outcome in the hands of what happens next, which is what makes a beam landing
+ * on that roof matter.
  */
-const SUPPORT_MARGIN = 1.9;
+const SUPPORT_MARGIN = 2.2;
 
+/**
+ * A part is carried by the support group when its base stands clear of the
+ * ground, m. Posts and walls are founded at y=0 and hold themselves up; a roof
+ * at 2.55 m is held up by the posts, and that difference is the whole question
+ * of what the supports are actually rated against.
+ */
+const FOUNDED_Y = 0.5;
+/** Debris this far below a carried part's base still counts as resting on it, m. */
+const REST_SLACK = 0.4;
+
+/** Support scratch, sized past any building in the level; never reallocated. */
+const supX = new Float64Array(32);
+const supZ = new Float64Array(32);
+const supLive = new Uint8Array(32);
+const supR = new Float64Array(32);
+const supAccum = new Float64Array(32);
+const supId = new Int32Array(32);
+
+/**
+ * Rates each support against the load it actually carries in the intact
+ * structure, so the safety margin is uniform even when the reactions are not.
+ *
+ * This runs the same solver the live cascade runs. A post that carries more by
+ * geometry is built to carry more, which is why an untouched building is not
+ * quietly closer to failing at one corner than another -- the asymmetry that
+ * matters appears when something is removed, not at rest.
+ */
 function rateSupports(w: World, b: Building) {
   b.rated = true;
-  let carried = 0;
+  const n = gatherSupports(w, b);
+  if (!n) return;
+  for (let i = 0; i < n; i++) {
+    supLive[i] = 1;
+    supAccum[i] = 0;
+  }
+  accumulateLoad(w, b, n, null);
+  for (let i = 0; i < n; i++) {
+    const p = w.prop(supId[i]!);
+    if (p) p.capacity = Math.max(20, supAccum[i]! * SUPPORT_MARGIN);
+  }
+}
+
+/** Fills the support scratch from `b`. Returns the count. */
+function gatherSupports(w: World, b: Building) {
+  let n = 0;
+  for (const id of b.supports) {
+    if (n >= supX.length) break;
+    const p = w.prop(id);
+    if (!p) continue;
+    supId[n] = p.id;
+    supX[n] = p.x;
+    supZ[n] = p.z;
+    supLive[n] = p.collapsed || p.hp <= 0 ? 0 : 1;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Distributes every carried weight onto the live supports and accumulates the
+ * reactions into `supAccum`. When `fell` is supplied, parts the live supports
+ * can no longer balance are pushed into it rather than silently ignored.
+ *
+ * Reactions superpose, so each weight is solved at its own position and summed:
+ * that is what gives the result a moment arm, and it is why where a beam lands
+ * decides which post carries it.
+ */
+function accumulateLoad(w: World, b: Building, n: number, fell: Prop[] | null) {
+  let live = 0;
+  for (let i = 0; i < n; i++) if (supLive[i]) live++;
+  if (!live) {
+    // Nothing is holding it up. Returning here would leave a roof standing on
+    // four dead posts, which is exactly the all-or-nothing failure this solve
+    // exists to remove.
+    if (fell) {
+      for (const id of b.parts) {
+        const p = w.prop(id);
+        if (p && !p.collapsed && p.y > FOUNDED_Y) fell.push(p);
+      }
+    }
+    return;
+  }
+
+  let roofY = Infinity;
   for (const id of b.parts) {
     const p = w.prop(id);
-    if (p) carried += p.mass;
+    if (p && !p.collapsed && p.y > FOUNDED_Y && p.y < roofY) roofY = p.y;
   }
-  const live = b.supports.filter((id) => w.prop(id)).length;
-  if (!live) return;
-  const design = (carried / live) * SUPPORT_MARGIN;
-  for (const id of b.supports) {
+
+  const place = (p: Prop, mass: number) => {
+    if (!(mass > 0)) return;
+    if (EDGES.loadMoment) {
+      const r = solveReactions(supX, supZ, supLive, n, p.x, p.z, mass, supR);
+      if (r === HELD) {
+        for (let i = 0; i < n; i++) supAccum[i] = supAccum[i]! + supR[i]!;
+      } else if (fell) {
+        // Tipped past the edge of what is left standing, or nothing left at
+        // all. Either way it is no longer being held up.
+        fell.push(p);
+      }
+    } else {
+      // Severed: an equal share per standing support, with no position in it.
+      const share = mass / live;
+      for (let i = 0; i < n; i++) if (supLive[i]) supAccum[i] = supAccum[i]! + share;
+    }
+  };
+
+  for (const id of b.parts) {
     const p = w.prop(id);
-    if (p) p.capacity = design;
+    if (!p || p.collapsed || p.y <= FOUNDED_Y) continue;
+    place(p, p.mass);
+  }
+  if (roofY === Infinity) return;
+  // Debris resting on the structure is weight the frame has to carry, and it
+  // carries it where the debris actually landed.
+  for (const p of w.props) {
+    if (p.collapsed || p.frame < 0 || p.buildingId === b.id) continue;
+    if (p.x <= b.minX || p.x >= b.maxX || p.z <= b.minZ || p.z >= b.maxZ) continue;
+    if (p.y < roofY - REST_SLACK) continue;
+    place(p, p.mass);
   }
 }
 
@@ -2037,48 +2149,49 @@ function rateSupports(w: World, b: Building) {
  *
  * `Prop.load` and `Prop.capacity` were declared in the data model and read by
  * nothing: a building stood until half its posts were gone and then vanished
- * all at once. Load is now shared across the supports that are still standing,
- * so cutting one raises the share on every other -- and if that share passes
- * what a post can carry, it fails too, and the share rises again.
+ * all at once. Load is now solved as reactions on the support group, so it
+ * carries a moment arm: cutting one post throws its share onto its NEIGHBOURS
+ * and unloads the diagonal, and a beam that lands on one side of the roof is
+ * carried by the posts on that side.
  *
- * That is the whole cascade: a building does not fall because a counter reached
- * a threshold, it falls because the remaining posts could not carry what the
- * missing ones were carrying. Which post you take first decides whether the
- * roof comes down now, in a moment, or not at all.
+ * Two consequences follow that the equal-share model could not express. A load
+ * the live supports cannot balance in moment -- past the edge of what is left
+ * standing -- tips instead of overloading, so a roof comes off its remaining
+ * posts rather than waiting for them to be crushed. And because each carried
+ * part is solved at its own position, a building can lose one part and keep the
+ * rest: half-collapsed is a real state, not a step on the way to gone.
  */
 function stepStructures(w: World, dt: number) {
   for (const b of w.buildings) {
     if (b.collapsed) continue;
     if (!b.rated) rateSupports(w, b);
-    let live = 0;
-    let carried = 0;
-    for (const id of b.parts) {
-      const p = w.prop(id);
-      if (!p || p.collapsed) continue;
-      carried += p.mass;
-    }
-    // Anything heaped inside the footprint is weight the frame has to carry.
-    for (const p of w.props) {
-      if (p.collapsed || p.frame < 0) continue;
-      if (p.x > b.minX && p.x < b.maxX && p.z > b.minZ && p.z < b.maxZ) carried += p.mass * 0.5;
-    }
-    for (const id of b.supports) {
-      const p = w.prop(id);
-      if (p && !p.collapsed && p.hp > 0) live++;
-    }
-    if (!b.supports.length) continue;
+    const n = gatherSupports(w, b);
+    if (!n) continue;
+    for (let i = 0; i < n; i++) supAccum[i] = 0;
 
-    const share = live > 0 ? carried / live : Infinity;
+    fellScratch.length = 0;
+    accumulateLoad(w, b, n, fellScratch);
+
+    // Anything the remaining supports cannot balance comes down where it stood.
+    for (const p of fellScratch) {
+      collapseProp(w, p, (w.rng() - 0.5) * 2, (w.rng() - 0.5) * 2);
+      w.whisper("Something gives way overhead.");
+      w.shake = Math.max(w.shake, 0.45);
+    }
+
     let failed = 0;
-    for (const id of b.supports) {
-      const p = w.prop(id);
-      if (!p || p.collapsed || p.hp <= 0) continue;
-      p.load = share;
+    let live = 0;
+    for (let i = 0; i < n; i++) {
+      if (!supLive[i]) continue;
+      live++;
+      const p = w.prop(supId[i]!);
+      if (!p) continue;
+      p.load = supAccum[i]!;
       // Overload is not instant: timber groans, sags, and then goes. The margin
       // above capacity sets how fast, so a post barely over holds for a while
       // and one carrying twice its share does not.
-      if (EDGES.loadCascade && share > p.capacity) {
-        const over = share / p.capacity;
+      if (EDGES.loadCascade && p.load > p.capacity && p.capacity > 0) {
+        const over = p.load / p.capacity;
         p.hp -= dt * 14 * over;
         if (w.rng() < dt * 0.6 * over) w.emitSound(p.x, p.z, 0.5 + over * 0.2, "wood", 0);
         if (p.hp <= 0) {
@@ -2089,25 +2202,22 @@ function stepStructures(w: World, dt: number) {
     }
     if (failed && live - failed > 0) w.whisper("Timber groans overhead.");
 
-    // Collapse when nothing is left holding it up. The old rule fired as soon
-    // as half the posts were gone, which pre-empted the cascade it was standing
-    // in for: with load doing the work, the last posts groan under the share the
-    // missing ones were carrying and go one after another.
-    if (live - failed <= 0) {
+    // The building is gone when nothing elevated is left standing on it.
+    let standing = 0;
+    for (const id of b.parts) {
+      const p = w.prop(id);
+      if (p && !p.collapsed && p.y > FOUNDED_Y) standing++;
+    }
+    if (standing === 0) {
       b.collapsed = true;
       w.whisper(b.name + " gives way.");
       w.emitSound((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2, 1.4, "collapse", 0);
       w.shake = Math.max(w.shake, 0.7);
-      for (const id of b.parts) {
-        const p = w.prop(id);
-        if (!p) continue;
-        collapseProp(w, p, (w.rng() - 0.5) * 3, (w.rng() - 0.5) * 3);
-        if (p.frame >= 0) w.bodies.addVelocity(p.frame, 0, 2 + w.rng(), 0, STEP);
-      }
-      // The falling timber itself is what hurts anyone underneath now: the
-      // frames land on them, node against node, through the same contact and
-      // the same damage law as everything else. No blanket injury is applied
-      // here, because whether you are hit is a question about where you stood.
+      // The falling timber itself is what hurts anyone underneath: the frames
+      // land on them, node against node, through the same contact and the same
+      // damage law as everything else. Walls are founded on the ground and are
+      // not carried by the posts, so they stay up -- what is left is a real
+      // half-collapsed building rather than an empty lot.
       for (const a of w.actors) {
         a.fear = Math.min(1, a.fear + 0.35);
       }

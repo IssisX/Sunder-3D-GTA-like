@@ -80,6 +80,15 @@ export const EDGES = {
   bodyTactics: true,
   /** structural load share -> support failure -> further load (see stepStructures) */
   loadCascade: true,
+  /**
+   * Support geometry -> which support carries how much (see statics.ts).
+   *
+   * Cut this and load reverts to an equal share per standing support: the old
+   * law, in which cutting a corner post raised the diagonally opposite post as
+   * much as its neighbours and a beam dropped on one side of a roof loaded the
+   * far side identically.
+   */
+  loadMoment: true,
 };
 
 /* ------------------------------------------------------------------ *

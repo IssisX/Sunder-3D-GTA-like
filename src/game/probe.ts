@@ -891,18 +891,129 @@ function measureFallingTimber() {
  *
  * Returns the number of supports that had to be cut by hand before it fell.
  */
+/**
+ * Supports that failed by being overloaded, rather than by being cut or tipped.
+ *
+ * This has to name the cascade specifically. Counting cuts-to-collapse no longer
+ * does: with reactions carrying a moment arm, taking two of four posts leaves
+ * the roof unbalanced and it tips off whether or not overload is wired at all,
+ * so that measurement passed through a path the edge does not own.
+ *
+ * The isolating scenario is a building that has lost one corner -- still
+ * standing, near its margin -- with a beam landed on the span the cut threw its
+ * load onto. Severed, nothing is crushed by what it carries.
+ */
 function measureCollapseCascade() {
+  const w = freshWorld(7711);
+  stage(w, 40, 40);
+  quiet(w);
+  const b = w.buildings.find((x) => x.supports.length === 4 && !x.collapsed)!;
+  const sup = b.supports.map((id) => w.prop(id)).filter((p): p is NonNullable<typeof p> => !!p);
+  run(w, 2);
+  sup[0]!.hp = 0;
+  sup[0]!.collapsed = true;
+  const beam = w.addProp({
+    kind: "beam",
+    material: "wood",
+    x: (b.minX + b.maxX) / 2,
+    y: 3.2,
+    z: (b.minZ + b.maxZ) / 2,
+    sx: 0.3,
+    sy: 0.3,
+    sz: 2.6,
+    mass: 90,
+    hp: 60,
+  });
+  makeFrame(w.bodies, beam);
+  const start = sup.map((p) => p.hp);
+  run(w, 600);
+  // Supports whose own hp was eaten by the load they were carrying.
+  let crushed = 0;
+  for (let i = 1; i < sup.length; i++) if (sup[i]!.hp < start[i]! - 1e-6) crushed++;
+  return crushed;
+}
+
+/**
+ * Load spread across the supports still standing after one corner is cut.
+ *
+ * With the moment arm the two posts flanking the hole take the share the missing
+ * one was carrying and the diagonal unloads to nothing, so the spread is the
+ * whole load. Severed, every standing support carries an identical share and the
+ * spread is zero -- which is the old law, and the reason cutting a corner post
+ * used to raise the far corner exactly as much as the near ones.
+ */
+function measureLoadSpread() {
   const w = freshWorld(8811);
   stage(w, 30, 30);
-  const b = w.buildings.find((x) => x.supports.length >= 4 && !x.collapsed)!;
+  quiet(w);
+  const b = w.buildings.find((x) => x.supports.length === 4 && !x.collapsed)!;
   const sup = b.supports.map((id) => w.prop(id)).filter((p): p is NonNullable<typeof p> => !!p);
-  run(w, 30);
-  for (let cut = 1; cut <= sup.length; cut++) {
-    sup[cut - 1]!.hp = 0;
-    for (let i = 0; i < 600 && !b.collapsed; i++) run(w, 1);
-    if (b.collapsed) return cut;
+  run(w, 2);
+  sup[0]!.hp = 0;
+  sup[0]!.collapsed = true;
+  run(w, 2);
+  let lo = Infinity;
+  let hi = 0;
+  for (let i = 1; i < sup.length; i++) {
+    const l = sup[i]!.load;
+    if (l < lo) lo = l;
+    if (l > hi) hi = l;
   }
-  return sup.length + 1;
+  return Number.isFinite(lo) ? hi - lo : 0;
+}
+
+/**
+ * The same beam on the same weakened building, landing in two places.
+ *
+ * A structure that has lost a corner is standing but near its margin. Where the
+ * next weight lands decides whether it comes down, which is only expressible
+ * because the reaction solve knows where the weight is.
+ */
+function checkStructuralEccentricity(): CheckResult {
+  const drop = (bx: number, bz: number) => {
+    const w = freshWorld(7711);
+    stage(w, 40, 40);
+    quiet(w);
+    const b = w.buildings.find((x) => x.supports.length === 4 && !x.collapsed)!;
+    const sup = b.supports.map((id) => w.prop(id)).filter((p): p is NonNullable<typeof p> => !!p);
+    run(w, 2);
+    sup[0]!.hp = 0;
+    sup[0]!.collapsed = true;
+    const cx = (b.minX + b.maxX) / 2;
+    const cz = (b.minZ + b.maxZ) / 2;
+    const beam = w.addProp({
+      kind: "beam",
+      material: "wood",
+      x: cx + bx,
+      y: 3.2,
+      z: cz + bz,
+      sx: 0.3,
+      sy: 0.3,
+      sz: 2.6,
+      mass: 90,
+      hp: 60,
+    });
+    makeFrame(w.bodies, beam);
+    let peak = 0;
+    for (let i = 0; i < 600; i++) {
+      run(w, 1);
+      for (const p of sup) if (!p.collapsed && p.load > peak) peak = p.load;
+      if (b.collapsed) return { peak, fell: true };
+    }
+    return { peak, fell: b.collapsed };
+  };
+  // Toward the flank the cut post threw its load onto, versus the corner the
+  // same cut unloaded to nothing.
+  const onLoaded = drop(0, 0);
+  const onFree = drop(3.0, 2.4);
+  return {
+    name: "structural-eccentricity",
+    pass: onLoaded.peak > onFree.peak + 8 && onLoaded.fell && !onFree.fell,
+    detail:
+      `one corner cut, then a 90 kg beam: on the loaded span -> peak ${onLoaded.peak.toFixed(1)} kg, ` +
+      `collapsed=${onLoaded.fell}; on the unloaded corner -> peak ${onFree.peak.toFixed(1)} kg, ` +
+      `collapsed=${onFree.fell}. Same beam, same building: where it lands has to decide.`,
+  };
 }
 
 /**
@@ -942,6 +1053,8 @@ export function runFalsifiers(): CheckResult[] {
     severance("bodyTactics", "downed target->secured and dragged", measureSecure, 0.5),
     severance("bodyTactics", "damaged limb->aim low", measurePressingTheInjury, 0.2),
     severance("loadCascade", "lost support->load on the rest", measureCollapseCascade, 0.5),
+    severance("loadMoment", "support geometry->which one carries it", measureLoadSpread, 1),
+    checkStructuralEccentricity(),
     checkFallingTimber(),
     checkAblation(),
     checkCoactivity(),
