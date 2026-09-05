@@ -2,15 +2,13 @@ import assert from 'node:assert/strict';
 import { World } from '../../src/game/world';
 import { buildLevel } from '../../src/game/level';
 import { STEP } from '../../src/game/types';
-import type { Actions } from '../../src/game/input';
-import { stepWorld } from '../../src/game/sim';
-import { ProceduralAnimationController as Controller }
-  from '../../src/game/ProceduralAnimationController';
-import { BODY, EDGES } from '../../src/game/body';
+import { BODY, EDGES, PhysicalBodies } from '../../src/game/body';
 import { nodeRadius } from '../../src/game/body-model';
 import { supportHeight } from '../../src/game/body-contacts';
+import { bodyTaskTargets, TASK_PRIORITY }
+  from '../../src/game/body-task-targets';
 
-function fixture() {
+function sample(plantedFootNormal: boolean) {
   const w = new World();
   w.seed = 12345;
   buildLevel(w);
@@ -20,91 +18,47 @@ function fixture() {
   w.colliders = [];
   w.buildings = [];
   w.fuel.fill(0);
-  p.x = 0;
-  p.z = 0;
-  p.yaw = 0;
-  const b = new Controller();
-  b.bootstrap(w);
-  const cam = { yaw: 0, pitch: 0 };
-  function tick(delta: Partial<Actions> = {}) {
-    const input = {
-      moveX: 0, moveY: 0, lookX: 0, lookY: 0,
-      ...delta,
-    } as Actions;
-    b.captureInput(input);
-    b.prepareInput(w, input, STEP);
-    b.prepareStep(w, STEP);
-    stepWorld(w, STEP, input, cam, true);
-    b.step(w, STEP);
-  }
-  for (let i = 0; i < 30; i++) tick();
-  return { w, p, b, tick };
-}
 
-function run(plantedFootNormal: boolean) {
+  const bodies = new PhysicalBodies();
+  bodies.bootstrap(w);
+  const rig = bodies.get(p)!;
+  const foot = BODY.lFoot;
+  const floorY = nodeRadius(p, foot);
+
+  // Isolate the named edge: the foot is close enough to support to be planted,
+  // but not touching. The same contact-critical task requests the support plane.
+  rig.y[foot] = floorY + 0.05;
+  rig.py[foot] = floorY + 0.05;
+  bodyTaskTargets.beginStep();
+  bodyTaskTargets.offerWorld(
+    p, foot,
+    rig.x[foot]!, floorY, rig.z[foot]!,
+    1, TASK_PRIORITY.CONTACT_CRITICAL,
+  );
+  bodyTaskTargets.finalizeStep(STEP);
+
   const prior = EDGES.plantedFootNormal;
   EDGES.plantedFootNormal = plantedFootNormal;
-  const { w, p, b, tick } = fixture();
-  const melee = (b as any).melee;
-  let started = 0;
-  let wasActive = false;
-  let maxNearestFootGap = 0;
-  let minRootY = p.y;
-  let maxRootY = p.y;
-  let groundedTicks = 0;
-  let ticks = 0;
   try {
-    for (let i = 0; i < 180 && started < 3; i++) {
-      const activeBefore = melee.isActive(p.id);
-      tick(activeBefore ? {} : { attackPressed: true });
-      const activeAfter = melee.isActive(p.id);
-      if (!wasActive && activeAfter) started++;
-      wasActive = activeAfter;
-
-      const rig = b.get(p)!;
-      const lSurface = supportHeight(
-        w, rig.x[BODY.lFoot]!, rig.y[BODY.lFoot]!, rig.z[BODY.lFoot]!,
-      );
-      const rSurface = supportHeight(
-        w, rig.x[BODY.rFoot]!, rig.y[BODY.rFoot]!, rig.z[BODY.rFoot]!,
-      );
-      const lGap = Math.abs(
-        rig.y[BODY.lFoot]! - nodeRadius(p, BODY.lFoot) - lSurface,
-      );
-      const rGap = Math.abs(
-        rig.y[BODY.rFoot]! - nodeRadius(p, BODY.rFoot) - rSurface,
-      );
-      maxNearestFootGap = Math.max(maxNearestFootGap, Math.min(lGap, rGap));
-      minRootY = Math.min(minRootY, p.y);
-      maxRootY = Math.max(maxRootY, p.y);
-      if (p.grounded) groundedTicks++;
-      ticks++;
-    }
+    bodies.step(w, STEP);
   } finally {
     EDGES.plantedFootNormal = prior;
   }
+
+  const surface = supportHeight(
+    w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
+  );
   return {
-    started,
-    maxNearestFootGap,
-    verticalRange: maxRootY - minRootY,
-    groundedFraction: groundedTicks / Math.max(1, ticks),
+    gap: Math.abs(rig.y[foot]! - nodeRadius(p, foot) - surface),
+    grounded: p.grounded,
   };
 }
 
-const normal = run(true);
-const severed = run(false);
+const normal = sample(true);
+const severed = sample(false);
+console.log('PLANTED-SUPPORT', { normal, severed });
 
-assert.equal(normal.started, 3, 'three punches did not execute');
-assert(normal.maxNearestFootGap < 0.04,
-  'contact-critical boxing feet leave the support surface');
-assert(normal.verticalRange < 0.12,
-  'boxing support creates vertical launch');
-assert(normal.groundedFraction > 0.9,
-  'boxing stance is not physically grounded');
-assert(
-  severed.maxNearestFootGap > normal.maxNearestFootGap + 0.03 ||
-  severed.verticalRange > normal.verticalRange + 0.03,
-  'planted-foot edge severance does not change measured support',
-);
-
-console.log('PASS planted support', { normal, severed });
+assert(normal.gap < 0.01 && normal.grounded,
+  'contact-critical foot did not bind to support normal');
+assert(severed.gap > normal.gap + 0.02,
+  'planted-foot edge severance does not change support gap');

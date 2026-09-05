@@ -359,6 +359,46 @@ function deriveActorFromRig(
   }
 }
 
+function plantedSupportMask(
+  w: World,
+  a: Actor,
+  rig: BodyRig,
+  mode: BodyMode,
+) {
+  if (!EDGES.plantedFootNormal || mode === "dynamic" || a.grabbedBy) return 0;
+  let mask = 0;
+  const scale = bodyScale(a);
+  for (const foot of [BODY.lFoot, BODY.rFoot]) {
+    if (bodyTaskTargets.priorityFor(a, foot) <
+        TASK_PRIORITY.CONTACT_CRITICAL) continue;
+    const floorY = supportHeight(
+      w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
+    ) + nodeRadius(a, foot);
+    if (Math.abs(rig.y[foot]! - floorY) > 0.085 * scale) continue;
+    if (Math.abs(bodyTaskTargets.targetYFor(a, foot) - floorY) >
+        0.025 * scale) continue;
+    mask |= 1 << foot;
+  }
+  return mask;
+}
+
+function anchorPlantedSupport(
+  w: World,
+  a: Actor,
+  rig: BodyRig,
+  supportMask: number,
+) {
+  if (!supportMask) return;
+  for (const foot of [BODY.lFoot, BODY.rFoot]) {
+    if (!(supportMask & (1 << foot))) continue;
+    const floorY = supportHeight(
+      w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
+    ) + nodeRadius(a, foot);
+    rig.y[foot] = rig.py[foot] = floorY;
+    rig.groundedNodes = Math.max(1, rig.groundedNodes);
+  }
+}
+
 export class PhysicalBodies {
   private rigs = new Map<number, BodyRig>();
 
@@ -416,37 +456,11 @@ export class PhysicalBodies {
       }
 
       // "Planted" has one physical meaning: a contact-critical foot whose
-      // task itself lies on the support surface may use that surface as its
-      // normal boundary. This applies equally to punches, kicks, bracing and
-      // future closed-chain actions. Horizontal motion remains free.
-      let supportMask = 0;
-      let leftY = 0, rightY = 0;
-      if (EDGES.plantedFootNormal && mode !== "dynamic" && !a.grabbedBy) {
-        for (const foot of [BODY.lFoot, BODY.rFoot]) {
-          if (bodyTaskTargets.priorityFor(a, foot) <
-              TASK_PRIORITY.CONTACT_CRITICAL) continue;
-          const floorY = supportHeight(
-            w, rig.x[foot]!, rig.y[foot]!, rig.z[foot]!,
-          ) + nodeRadius(a, foot);
-          // Do not teleport a remote foot onto the floor. Bind the normal
-          // constraint only when the physical foot is already near support and
-          // its task explicitly requests that same support height.
-          if (Math.abs(rig.y[foot]! - floorY) >
-              0.085 * bodyScale(a)) continue;
-          if (Math.abs(bodyTaskTargets.targetYFor(a, foot) -
-              floorY) > 0.025 * bodyScale(a)) continue;
-          supportMask |= 1 << foot;
-          if (foot === BODY.lFoot) leftY = floorY;
-          else rightY = floorY;
-        }
-      }
+      // task itself lies on the support surface uses that surface as its normal
+      // boundary. Horizontal motion remains free for traction and pivots.
+      const supportMask = plantedSupportMask(w, a, rig, mode);
       integrateBody(w, rig, dt, mode);
-      if (supportMask & (1 << BODY.lFoot)) {
-        rig.y[BODY.lFoot] = rig.py[BODY.lFoot] = leftY;
-      }
-      if (supportMask & (1 << BODY.rFoot)) {
-        rig.y[BODY.rFoot] = rig.py[BODY.rFoot] = rightY;
-      }
+      anchorPlantedSupport(w, a, rig, supportMask);
 
       const floor = supportHeight(
         w,
@@ -477,14 +491,7 @@ export class PhysicalBodies {
         );
         collideRig(w, a, rig, dt, iter === 0);
         solveSelfContacts(a, rig);
-        if (supportMask & (1 << BODY.lFoot)) {
-          rig.y[BODY.lFoot] = rig.py[BODY.lFoot] = leftY;
-          rig.groundedNodes = Math.max(1, rig.groundedNodes);
-        }
-        if (supportMask & (1 << BODY.rFoot)) {
-          rig.y[BODY.rFoot] = rig.py[BODY.rFoot] = rightY;
-          rig.groundedNodes = Math.max(1, rig.groundedNodes);
-        }
+        anchorPlantedSupport(w, a, rig, supportMask);
       }
 
       if (mode === "stumble") {
@@ -539,8 +546,9 @@ export class PhysicalBodies {
 
     for (const a of humans) {
       const rig = this.ensure(a);
-
-      solveLinks(a, rig, rig.mode === "dynamic" ? 0.82 : 0.76);
+      const supportMask = plantedSupportMask(w, a, rig, rig.mode);
+      solveLinks(a, rig, rig.mode === "dynamic" ? 0.82 : 0.76, supportMask);
+      anchorPlantedSupport(w, a, rig, supportMask);
       deriveActorFromRig(a, rig, dt);
 
       if (rig.mode === "recover" && a.getupT <= 0) {
