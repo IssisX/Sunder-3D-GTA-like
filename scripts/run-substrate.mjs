@@ -21,3 +21,4 @@ registerHooks({
   },
 });
 await import('../tests/substrate/probe.ts');
+await import('../tests/substrate/punch-launch-diagnostic.ts');
