@@ -292,8 +292,12 @@ export class AnimationController extends AnimatedPhysicalBodies {
             : 0.4;
       const phaseSpeed =
         physicalSpeed + Math.max(0, commandSpeed - physicalSpeed) * intentBlend;
-      const cycleDistance =
-        lerp(1.45, 2.55, this.runBlend[slot]!) * bodyScale(a);
+      // A planted leg cannot cover more than its fore/aft reach while
+      // the body passes over it. The old sprint cycle asked a 0.68 m leg
+      // to remain planted across 1.48 m, lifting both feet and stalling.
+      const stanceTravel = lerp(0.58, 0.78,
+        this.runBlend[slot]!) * bodyScale(a);
+      const cycleDistance = stanceTravel / (1 - SWING_PORTION);
       if (phaseSpeed > 0.035 && cycleDistance > 1e-5) {
         const adv = Math.min(0.5, (phaseSpeed * h / cycleDistance) * TAU);
         let p = this.phase[slot]! + adv;
@@ -343,7 +347,13 @@ export class AnimationController extends AnimatedPhysicalBodies {
 
     const localForward = moveX * fx + moveZ * fz;
     const localSide = moveX * rx + moveZ * rz;
-    const bob = Math.cos(p * 2) * lerp(0.008, 0.024, rb) * speedN;
+    // Keep stance targets reachable as horizontal stride grows. Without
+    // lowering the hips, IK shortens a long step by lifting its support foot.
+    const halfSpan = lerp(0.29, 0.39, rb) * speedN;
+    const stanceDrop = 0.68 - Math.sqrt(
+      Math.max(0, 0.68 ** 2 - halfSpan ** 2));
+    const bob = Math.cos(p * 2) * lerp(0.008, 0.024, rb)
+      * speedN - stanceDrop;
     const sway = Math.sin(p) * lerp(0.012, 0.035, rb) * speedN;
     const pitch = -localForward * lerp(0.025, 0.11, rb) * speedN;
     const roll = -localSide * lerp(0.035, 0.1, rb) * speedN;
@@ -630,3 +640,4 @@ export class AnimationController extends AnimatedPhysicalBodies {
     return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
 }
+

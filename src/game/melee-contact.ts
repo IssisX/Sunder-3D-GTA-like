@@ -7,6 +7,16 @@ import { impactDynamics } from "./impact-dynamics";
 const KICK_BLUNT = 1.15;
 const KICK_MASS = 3.2;
 
+// The striking hand carries some forearm mass into contact. Inventory mass
+// (0.4 kg for a fist) understates that load. This is a bounded gameplay
+// approximation, not a whole-body effective-mass calculation.
+function strikingMass(atk: Actor, kind: "strike" | "kick") {
+  if (kind === "kick") return KICK_MASS;
+  return atk.weapon === "fist"
+    ? clamp(atk.mass * 0.022, 1.2, 2.0)
+    : WEAPON_STATS[atk.weapon].mass;
+}
+
 function addKnown(a: Actor, id: number) {
   if (!a.known.includes(id)) a.known.push(id);
 }
@@ -81,7 +91,7 @@ export function applyActorMeleeContact(
 
   const stats = WEAPON_STATS[atk.weapon];
   const blunt = kind === "kick" ? KICK_BLUNT : stats.blunt;
-  const mass = kind === "kick" ? KICK_MASS : stats.mass;
+  const mass = strikingMass(atk, kind);
   const cut = kind === "kick" ? 0 : stats.cut;
   const pierce = kind === "kick" ? 0 : stats.pierce;
   const fire = kind === "kick" ? 0 : stats.fire;
@@ -177,7 +187,7 @@ export function applyPropMeleeContact(
   if (p.collapsed || p.heldBy) return;
   const stats = WEAPON_STATS[atk.weapon];
   const blunt = kind === "kick" ? KICK_BLUNT : stats.blunt;
-  const mass = kind === "kick" ? KICK_MASS : stats.mass;
+  const mass = strikingMass(atk, kind);
   const dmg = (4.5 + speed * 1.2) * (0.7 + blunt * 0.55 + mass * 0.12);
 
   p.hp -= dmg;

@@ -4,6 +4,7 @@ import { injurySum } from "./world";
 import {
   BODY,
   BODY_NODE_COUNT,
+  NODE_INV_MASS,
   NODE_REGION,
   bodyScale,
   nodeVelocityComponent,
@@ -68,6 +69,8 @@ function modeAuthority(mode: BodyMode) {
  * position servo. Contacts and anatomical constraints remain authoritative.
  */
 export class ActiveBodyControl {
+  private readonly taskDvX = new Float32Array(BODY_NODE_COUNT);
+  private readonly taskDvZ = new Float32Array(BODY_NODE_COUNT);
   private readonly state: MechanicalState = makeMechanicalState();
 
   driveTasksPreIntegration(
@@ -107,7 +110,13 @@ export class ActiveBodyControl {
     const baseMaxDv =
       (mode === "recover" ? 5.2 : mode === "stumble" ? 3.0 : 7.2) * scale;
 
+    this.taskDvX.fill(0);
+    this.taskDvZ.fill(0);
+    let momentumX = 0;
+    let momentumZ = 0;
+    let mass = 0;
     for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      mass += 1 / NODE_INV_MASS[node]!;
       const taskPriority = bodyTaskTargets.priorityFor(a, node);
       if (taskPriority <= 0) continue;
 
@@ -192,9 +201,21 @@ export class ActiveBodyControl {
         dvz *= q;
       }
 
-      rig.px[node] -= dvx * h;
+      this.taskDvX[node] = dvx;
+      this.taskDvZ[node] = dvz;
+      momentumX += dvx / NODE_INV_MASS[node]!;
+      momentumZ += dvz / NODE_INV_MASS[node]!;
       rig.py[node] -= dvy * h;
-      rig.pz[node] -= dvz * h;
+    }
+
+    // Internal posture motors redistribute horizontal momentum. Only the
+    // support reaction and contacts may accelerate the body as a whole.
+    // Otherwise tracking a pelvis-relative pose brakes locomotion every tick.
+    const commonX = momentumX / mass;
+    const commonZ = momentumZ / mass;
+    for (let node = 0; node < BODY_NODE_COUNT; node++) {
+      rig.px[node] -= (this.taskDvX[node]! - commonX) * h;
+      rig.pz[node] -= (this.taskDvZ[node]! - commonZ) * h;
     }
   }
 
@@ -297,3 +318,4 @@ export class ActiveBodyControl {
 }
 
 export const activeBodyControl = new ActiveBodyControl();
+

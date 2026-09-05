@@ -56,17 +56,6 @@ export class GameAudio {
     return buf;
   }
 
-  setBeds(rain: number, fire: number, danger: number, timeOfDay: number) {
-    // Deliberately disabled. The previous continuous rain/fire beds were filtered
-    // looped white noise and the drone was too thin to justify a permanent bed.
-    // Keep the API because Game owns this call site; re-enable only when a richer
-    // state-derived soundscape exists.
-    void rain;
-    void fire;
-    void danger;
-    void timeOfDay;
-  }
-
   play(kind: string, mag = 1, pan = 0) {
     if (!this.ctx || !this.sfx || !this.noise) return;
     const now = this.ctx.currentTime;
@@ -175,3 +164,4 @@ export class GameAudio {
     }
   }
 }
+

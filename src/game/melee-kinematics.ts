@@ -204,17 +204,18 @@ export class MeleeKinematics {
         const right = this.nextPunchRight[slot]!;
         this.punchRight[slot] = right;
         this.nextPunchRight[slot] = right ? 0 : 1;
-        this.duration[slot] = right ? 0.4 : 0.33;
+        this.duration[slot] = right ? 0.34 : 0.28;
       } else {
         this.punchRight[slot] = 1;
         const thrust = a.weapon === "spear" || a.weapon === "pitchfork" || a.weapon === "knife";
         this.duration[slot] = Math.max(0.28, Math.min(0.58, (thrust ? 0.39 : 0.44) / Math.sqrt(speed)));
       }
-      a.strikeCd = Math.max(a.strikeCd, 0.4 / speed);
+      a.strikeCd = Math.max(a.strikeCd,
+        a.weapon === "fist" ? this.duration[slot]! : 0.4 / speed);
       a.stamina = Math.max(0, a.stamina - 0.05);
       if (a.kind === "player") a.alert = Math.max(a.alert, 0.1);
     } else {
-      this.duration[slot] = 0.58;
+      this.duration[slot] = 0.48;
       a.stamina = Math.max(0, a.stamina - 0.075);
       const rig = this.bodies.get(a);
       if (rig?.initialized) {
@@ -269,7 +270,14 @@ export class MeleeKinematics {
     const scale = bodyScale(a);
     const upper = ARM_UPPER * scale;
     const lower = ARM_LOWER * scale;
-    const sx = rig.x[rootNode]!, sy = rig.y[rootNode]!, sz = rig.z[rootNode]!;
+    const tasked = bodyTaskTargets.priorityFor(a, rootNode)
+      >= TASK_PRIORITY.ACTION;
+    const sx = tasked ? bodyTaskTargets.targetXFor(a, rootNode)
+      : rig.x[rootNode]!;
+    const sy = tasked ? bodyTaskTargets.targetYFor(a, rootNode)
+      : rig.y[rootNode]!;
+    const sz = tasked ? bodyTaskTargets.targetZFor(a, rootNode)
+      : rig.z[rootNode]!;
     let dx = tx - sx, dy = ty - sy, dz = tz - sz;
     let d = Math.hypot(dx, dy, dz);
     if (d < 1e-6) return;
@@ -497,63 +505,77 @@ export class MeleeKinematics {
   }
 
   private offerKickTasks(a: Actor, rig: BodyRig, slot: number, u: number) {
-    let lean: number;
-    if (u < 0.2) lean = smoother01(u / 0.2);
-    else if (u < 0.42) lean = 1;
-    else if (u < 0.78) lean = 1 - smoother01((u - 0.42) / 0.36);
-    else lean = 0;
-
-    const root = pulse(u, 0.0, 0.24, 0.82);
-    const pelvis = pulse(u, 0.055, 0.34, 0.84);
-    const spine = pulse(u, 0.11, 0.4, 0.86);
-    const hip = pulse(u, 0.24, 0.52, 0.88);
-    const knee = pulse(u, 0.33, 0.6, 0.9);
-    const foot = pulse(u, 0.42, 0.67, 0.91);
-    const compression = pulse(u, 0.0, 0.22, 0.5);
-    const counter = pulse(u, 0.52, 0.73, 0.94);
-
-    this.offerLocal(a, BODY.pelvis, -0.065 * pelvis, 0.82 - 0.06 * compression, -0.055 * lean + 0.025 * hip, 1);
-    this.offerLocal(a, BODY.chest, 0.035 * spine, 1.2 - 0.045 * compression, 0.16 * lean - 0.025 * counter, 1);
-    this.offerLocal(a, BODY.head, 0.014 * spine, 1.575 - 0.02 * compression, 0.075 * lean - 0.008 * counter, 0.82);
-    this.offerLocal(a, BODY.lShoulder, -0.27, 1.31 - 0.02 * compression, 0.13 * lean + 0.085 * counter, 0.9);
-    this.offerLocal(a, BODY.rShoulder, 0.27, 1.31 - 0.02 * compression, 0.13 * lean - 0.12 * counter, 0.92);
-    this.offerLocal(a, BODY.rHip, 0.13, 0.755 - 0.025 * compression, 0.16 * hip, 1);
-    this.offerLocal(a, BODY.lHip, -0.15, 0.755 - 0.025 * compression, -0.03 * pelvis, 0.92);
-
+    // Lift on the input edge, chamber across the body, then drive the
+    // heel through the target. Coupling owns the supporting body geometry.
+    // Anchor action height to the captured support surface. Using the solved
+    // pelvis-derived Actor height here feeds every pose lift into the next
+    // target and makes a stationary kick climb away from the ground.
+    const floor = this.supportY[slot]! - nodeRadius(a, BODY.lFoot);
+    const heightOffset = (floor - a.y) / bodyScale(a);
+    this.offerLocal(a, BODY.pelvis, 0, 0.82 + heightOffset, 0, 1);
+    this.offerLocal(a, BODY.chest, 0, 1.2 + heightOffset, 0, 1);
+    this.offerLocal(a, BODY.head, 0, 1.58 + heightOffset, 0, 0.9);
     this.solveLegTask(
-      a,
-      rig,
-      true,
-      this.supportX[slot]!,
-      this.supportY[slot]!,
-      this.supportZ[slot]!,
-      1,
-      0.56,
+      a, rig, true,
+      this.supportX[slot]!, this.supportY[slot]!,
+      this.supportZ[slot]!, 1, 0.56,
     );
 
-    let lx: number, ly: number, lz: number;
-    if (u < 0.18) {
-      const q = smoother01(u / 0.18);
-      lx = 0.13 + 0.008 * q; ly = 0.08 + 0.04 * q; lz = -0.03 + 0.025 * q;
-    } else if (u < 0.4) {
-      const q = smoother01((u - 0.18) / 0.22);
-      lx = 0.138 + 0.025 * q; ly = 0.12 + 0.42 * q; lz = -0.005 + 0.15 * q;
+    let lift: number, extension: number;
+    if (u < 0.28) {
+      lift = smooth01(u / 0.28);
+      extension = 0;
+    } else if (u < 0.56) {
+      lift = 1;
+      extension = smoother01((u - 0.28) / 0.28);
     } else if (u < 0.64) {
-      const q = smoother01((u - 0.4) / 0.24);
-      lx = 0.163 - 0.06 * q; ly = 0.54 + 0.035 * q; lz = 0.145 + 0.72 * q;
-    } else if (u < 0.74) {
-      const q = smooth01((u - 0.64) / 0.1);
-      lx = 0.103 - 0.03 * q; ly = 0.575 - 0.012 * q; lz = 0.865 + 0.095 * q;
-    } else if (u < 0.88) {
-      const q = smoother01((u - 0.74) / 0.14);
-      lx = 0.073 + 0.075 * q; ly = 0.563 - 0.17 * q; lz = 0.96 - 0.73 * q;
+      lift = 1;
+      extension = 1;
+    } else if (u < 0.82) {
+      lift = 1;
+      extension = 1 - smoother01((u - 0.64) / 0.18);
     } else {
-      const q = smoother01((u - 0.88) / 0.12);
-      lx = 0.148 - 0.018 * q; ly = 0.393 - 0.313 * q; lz = 0.23 - 0.26 * q;
+      lift = 1 - smoother01((u - 0.82) / 0.18);
+      extension = 0;
     }
-    this.solveLegTaskLocal(a, rig, false, lx, ly, lz, 1, 0.98);
-    this.solveArmTaskLocal(a, rig, false, -0.2, 1.08 + 0.08 * knee, 0.16 - 0.14 * foot, 0.84, 0.84);
-    this.solveArmTaskLocal(a, rig, true, 0.2, 1.08 + 0.06 * knee, 0.2 + 0.08 * foot, 0.82, 0.84);
+    this.offerLocal(a, BODY.rFoot,
+      0.13 + 0.12 * lift - 0.2 * extension,
+      0.1 + 0.56 * lift + 0.22 * extension + heightOffset,
+      -0.03 + 0.16 * lift + 0.65 * extension, 1);
+    // Guard rises immediately; final arm IK follows the coupled shoulders.
+    this.solveArmTaskLocal(a, rig, false,
+      -0.22, 1.34 + heightOffset, 0.22, 1, 0.94);
+    this.solveArmTaskLocal(a, rig, true,
+      0.22, 1.34 + heightOffset, 0.22, 1, 0.94);
+  }
+
+  finishCoupledTasks(w: World) {
+    for (const a of w.actors) {
+      const slot = this.slot(a.id);
+      if (slot < 0 || this.kind[slot] !== KICK) continue;
+      const rig = this.bodies.get(a);
+      if (!rig?.initialized) continue;
+      // Use the final turned shoulder frame, not Actor.yaw. That yaw is
+      // the player's chosen attack direction, which remains unchanged.
+      const lx = bodyTaskTargets.targetXFor(a, BODY.lShoulder);
+      const lz = bodyTaskTargets.targetZFor(a, BODY.lShoulder);
+      const rx = bodyTaskTargets.targetXFor(a, BODY.rShoulder);
+      const rz = bodyTaskTargets.targetZFor(a, BODY.rShoulder);
+      const width = Math.max(1e-5, Math.hypot(rx - lx, rz - lz));
+      const sideX = (rx - lx) / width;
+      const sideZ = (rz - lz) / width;
+      const scale = bodyScale(a);
+      for (let side = -1; side <= 1; side += 2) {
+        const node = side > 0 ? BODY.rShoulder : BODY.lShoulder;
+        this.solveArmTask(a, rig, side > 0,
+          bodyTaskTargets.targetXFor(a, node)
+            + (sideZ * 0.23 - sideX * side * 0.04) * scale,
+          bodyTaskTargets.targetYFor(a, node) + 0.025 * scale,
+          bodyTaskTargets.targetZFor(a, node)
+            + (-sideX * 0.23 - sideZ * side * 0.04) * scale,
+          1, 0.94);
+      }
+    }
   }
 
   private resolveContact(w: World, a: Actor, rig: BodyRig, slot: number, dt: number, u: number) {
@@ -561,7 +583,7 @@ export class MeleeKinematics {
     const fist = kind === PUNCH && a.weapon === "fist";
     const right = this.punchRight[slot] !== 0;
     const active = kind === KICK
-      ? u >= 0.52 && u <= 0.76
+      ? u >= 0.28 && u <= 0.67
       : fist
         ? u >= (right ? 0.38 : 0.34) && u <= (right ? 0.71 : 0.67)
         : u >= 0.36 && u <= 0.72;

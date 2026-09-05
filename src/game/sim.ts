@@ -130,8 +130,8 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
     clamp(injurySum(p.injuries.lleg) + injurySum(p.injuries.rleg), 0, 1.6) * 0.35;
   const load = 1 / (1 + p.carry / 90);
   const mud = surfaceAt(w, p.x, p.z) === "mud" ? 0.72 : 1;
-  let max = p.crouch ? 1.5 : 3.45;
-  if (input.sprint && p.stamina > 0.08 && wishMag > 0.2 && !p.crouch) max = 6.6;
+  let max = p.crouch ? 1.62 : 4.6;
+  if (input.sprint && p.stamina > 0.08 && wishMag > 0.2 && !p.crouch) max = 7.6;
   max *= leg * load * mud * (0.55 + p.consciousness * 0.45) * (1 - p.fatigue * 0.35);
   if (p.grabbedId) max *= 0.72;
   p.intendSpeed = wishMag * max;
@@ -139,8 +139,6 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   if (wishMag > 0.08) {
     const ty = Math.atan2(-p.intendX, -p.intendZ);
     p.yaw = lerpAng(p.yaw, ty, 1 - Math.exp(-dt * 8));
-  } else {
-    p.yaw = lerpAng(p.yaw, cam.yaw, 1 - Math.exp(-dt * 4));
   }
 
   if (input.sprint && wishMag > 0.2 && !p.crouch) {

@@ -67,23 +67,10 @@ export class SupportMotionController {
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
 
-    // Physical game-speed calibration. The gameplay intent value remains useful
-    // to AI/state logic, while the player body is allowed to converge to a more
-    // decisive world-space pace. This still goes through the same support/grip/
-    // injury envelope below; it is not root translation.
+    // Intent speed is shared by gait, posture and ground reaction.
     const requestedSpeed = Math.max(0, a.intendSpeed);
-    let speedScale = 1;
-    if (a.kind === "player") {
-      if (a.crouch) {
-        speedScale = 1.12;
-      } else {
-        const sprintBlend = clamp01((requestedSpeed - 4.0) / 2.6);
-        speedScale = 1.6 + (1.22 - 1.6) * sprintBlend;
-      }
-    }
-
-    let targetVx = a.intendX * requestedSpeed * speedScale;
-    let targetVz = a.intendZ * requestedSpeed * speedScale;
+    let targetVx = a.intendX * requestedSpeed;
+    let targetVz = a.intendZ * requestedSpeed;
     const rootErrX = a.x - rig.x[BODY.pelvis]!;
     const rootErrZ = a.z - rig.z[BODY.pelvis]!;
     const errGain = a.kind === "player" ? 9.5 : 6.2;
@@ -179,3 +166,4 @@ export class SupportMotionController {
 }
 
 export const supportMotion = new SupportMotionController();
+

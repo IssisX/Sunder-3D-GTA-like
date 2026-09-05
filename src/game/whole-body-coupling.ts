@@ -76,7 +76,10 @@ export class WholeBodyCoupling {
       const rHandD = this.taskDistance(a, rig, BODY.rHand, TASK_PRIORITY.ACTION);
 
       let detected = NONE;
-      if (Math.max(lFootD, rFootD) > 0.09 * scale) detected = KICK;
+      if (bodyTaskTargets.priorityFor(a, BODY.lFoot)
+          >= TASK_PRIORITY.ACTION ||
+          bodyTaskTargets.priorityFor(a, BODY.rFoot)
+          >= TASK_PRIORITY.ACTION) detected = KICK;
       else if (a.weapon === "fist" && Math.max(lHandD, rHandD) > 0.05 * scale) detected = PUNCH;
 
       if (detected !== this.kind[slot]!) {
@@ -182,7 +185,8 @@ export class WholeBodyCoupling {
     rFootD: number,
   ) {
     const scale = bodyScale(a);
-    const attackLeft = lFootD > rFootD;
+    const attackLeft = bodyTaskTargets.targetYFor(a, BODY.lFoot)
+      > bodyTaskTargets.targetYFor(a, BODY.rFoot);
     const side = attackLeft ? -1 : 1;
     const attackFoot = attackLeft ? BODY.lFoot : BODY.rFoot;
     const attackKnee = attackLeft ? BODY.lKnee : BODY.rKnee;
@@ -242,14 +246,16 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.ACTION,
     );
 
-    // Turn the pelvis close to side-on. Preserve hip width while rotating about
-    // the planted leg. The shoulders lag so the torso carries visible torsion.
-    const theta = side * turn * 1.5;
+    // True transverse-axis rotation instead of shear offsets. At peak turn the
+    // pelvis rotates about 70 degrees toward the attack while preserving hip
+    // width. Shoulders lag slightly, producing a real hip-to-torso torque chain.
+    const theta = side * turn * 1.48;
     const c = Math.cos(theta);
     const s = Math.sin(theta);
     const hipRightX = rx * c + fx * s;
     const hipRightZ = rz * c + fz * s;
-    const shoulderTheta = theta * 0.82;
+
+    const shoulderTheta = theta * 0.94;
     const cs = Math.cos(shoulderTheta);
     const ss = Math.sin(shoulderTheta);
     const shoulderRightX = rx * cs + fx * ss;
@@ -279,34 +285,33 @@ export class WholeBodyCoupling {
       TASK_PRIORITY.CONTACT_CRITICAL,
     );
 
-    // Side-kick chamber and heel drive. The knee folds high and inward first;
-    // the foot then drives down the target line from the side-on pelvis instead
-    // of simply extending forward from a square stance.
-    const footSide = side * (0.28 + chamber * 0.11 - extension * 0.28) * scale;
-    const footForward = (0.015 + chamber * 0.055 + extension * 0.94) * scale;
-    const footHeight = (0.1 + chamber * 0.43 + extension * 0.48) * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      attackFoot,
-      pelvisX + rx * footSide + fx * footForward,
-      a.y + footHeight,
-      pelvisZ + rz * footSide + fz * footForward,
-      1,
-      TASK_PRIORITY.ACTION,
-    );
-
-    const kneeSide = side * (0.3 + chamber * 0.09 - extension * 0.12) * scale;
-    const kneeForward = (0.035 + chamber * 0.08 + extension * 0.54) * scale;
-    const kneeHeight = (0.42 + chamber * 0.29 + extension * 0.13) * scale;
-    bodyTaskTargets.offerWorld(
-      a,
-      attackKnee,
-      pelvisX + rx * kneeSide + fx * kneeForward,
-      a.y + kneeHeight,
-      pelvisZ + rz * kneeSide + fz * kneeForward,
-      1,
-      TASK_PRIORITY.ACTION,
-    );
+    // Preserve the requested heel trajectory. Fit a two-bone leg to the
+    // final turned hip; a second authored foot path used to erase the kick.
+    let dx = rawFootX + pelvisX - basePelvisX - attackHipX;
+    let dy = rawFootY - attackHipY;
+    let dz = rawFootZ + pelvisZ - basePelvisZ - attackHipZ;
+    const distance = Math.max(1e-6, Math.hypot(dx, dy, dz));
+    dx /= distance; dy /= distance; dz /= distance;
+    const reach = Math.max(0.36 * scale,
+      Math.min(0.667 * scale, distance));
+    const along = reach * 0.5;
+    const bend = Math.sqrt(Math.max(0,
+      (0.34 * scale) ** 2 - along * along));
+    let poleX = rx * side * 0.5;
+    let poleY = 0.8;
+    let poleZ = rz * side * 0.5;
+    const dot = poleX * dx + poleY * dy + poleZ * dz;
+    poleX -= dx * dot; poleY -= dy * dot; poleZ -= dz * dot;
+    const poleLength = Math.max(1e-6,
+      Math.hypot(poleX, poleY, poleZ));
+    bodyTaskTargets.offerWorld(a, attackFoot,
+      attackHipX + dx * reach, attackHipY + dy * reach,
+      attackHipZ + dz * reach, 1, TASK_PRIORITY.ACTION);
+    bodyTaskTargets.offerWorld(a, attackKnee,
+      attackHipX + dx * along + poleX / poleLength * bend,
+      attackHipY + dy * along + poleY / poleLength * bend,
+      attackHipZ + dz * along + poleZ / poleLength * bend,
+      1, TASK_PRIORITY.ACTION);
 
     // Torso counterleans over the support side while remaining rotated. This
     // prevents the rigid upright-Lego silhouette and keeps COM over the base.
@@ -418,3 +423,4 @@ export class WholeBodyCoupling {
     return id < 0 || id >= ENTITY_ID_CAP ? -1 : this.slotById[id]!;
   }
 }
+

@@ -44,7 +44,7 @@ export class HumanRootAuthority {
   private readonly x = new Float32Array(ENTITY_ID_CAP);
   private readonly y = new Float32Array(ENTITY_ID_CAP);
   private readonly z = new Float32Array(ENTITY_ID_CAP);
-  private readonly yaw = new Float32Array(ENTITY_ID_CAP);
+  private readonly yaw = new Float64Array(ENTITY_ID_CAP);
   private readonly valid = new Uint8Array(ENTITY_ID_CAP);
 
   capture(w: World) {
@@ -96,3 +96,4 @@ export class HumanRootAuthority {
     this.valid.fill(0);
   }
 }
+

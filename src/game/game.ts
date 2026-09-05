@@ -1,6 +1,6 @@
 import { STEP, defaultHud, type HudState, type Region, REGIONS } from "./types";
 import { World, injurySum, clamp } from "./world";
-import { Input, isTouchDevice } from "./input";
+import { Input, isTouchDevice, type Actions } from "./input";
 import { GameAudio } from "./audio";
 import { buildLevel } from "./level";
 import { hintFor, stepWorld, type Cam } from "./sim";
@@ -218,10 +218,7 @@ export class Game {
       this.acc += raw;
       let steps = 0;
       while (this.acc >= STEP && steps < 5) {
-        this.bodies.prepareInput(this.world, input, STEP);
-        this.bodies.prepareStep(this.world, STEP);
-        stepWorld(this.world, STEP, input, this.cam, simPlaying);
-        this.bodies.step(this.world, STEP);
+        this.fixedStep(input, simPlaying);
         this.acc -= STEP;
         steps++;
         this.drainAudio();
@@ -238,14 +235,19 @@ export class Game {
     }
     this.pushHud();
     const p = this.world.player();
-    const fires = this.world.fireCount;
-    this.audio.setBeds(this.world.rain, fires, this.world.wanted, this.world.day);
     if (p && Math.hypot(p.vx, p.vz) > 1.4 && p.grounded && simPlaying) {
       if (((this.world.time * (p.loco === "sprint" ? 5 : 3)) | 0) !== (((this.world.time - raw) * 3) | 0)) {
         this.audio.play(p.loco === "sprint" ? "sprint" : "step", 0.35, 0);
       }
     }
   };
+
+  private fixedStep(input: Actions, playing: boolean) {
+    this.bodies.prepareInput(this.world, input, STEP);
+    this.bodies.prepareStep(this.world, STEP);
+    stepWorld(this.world, STEP, input, this.cam, playing);
+    this.bodies.step(this.world, STEP);
+  }
 
   private drainAudio() {
     const p = this.world.player();
@@ -359,6 +361,23 @@ export class Game {
     const self = this;
     window.__controlsTest = {
       getYaw: () => self.world.player().yaw,
+      frameStep: (ticks: number) => {
+        self.stop();
+        for (let i = 0; i < ticks; i++) {
+          const input = self.input.sample();
+          self.bodies.captureInput(input);
+          self.fixedStep(input, true);
+          self.view.sync(self.world, self.cam, 1, STEP, false);
+          self.bodyView.sync(self.world.actors, 1);
+        }
+        self.view.render();
+        self.pushHud();
+      },
+      getBody: () => {
+        const r = self.bodies.get(self.world.player())!;
+        return { x: Array.from(r.x), y: Array.from(r.y),
+          z: Array.from(r.z) };
+      },
       getSpeed: () => Math.hypot(self.world.player().vx, self.world.player().vz),
       getPos: () => {
         const p = self.world.player();
@@ -385,6 +404,8 @@ declare global {
   interface Window {
     __controlsTest?: {
       getYaw: () => number;
+      frameStep: (ticks: number) => void;
+      getBody: () => { x: number[]; y: number[]; z: number[] };
       getSpeed: () => number;
       getPos?: () => { x: number; y: number; z: number; loco: string; grounded: boolean };
       setKeys?: (codes: string[]) => void;

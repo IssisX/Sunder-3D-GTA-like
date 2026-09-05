@@ -88,6 +88,10 @@ export class ProceduralAnimationController extends AnimationController {
     super.prepareBodyStep(w, dt);
     this.melee.prepareStep(w, dt);
     this.coupling.prepare(w);
+    this.melee.finishCoupledTasks(w);
+
+    // Measured COM velocity error supplies acceleration/braking/turning posture.
+    // Corrective steps and combat remain higher-priority than this layer.
     this.centroidal.prepare(w, dt);
     bodyTaskTargets.finalizeStep(dt);
 

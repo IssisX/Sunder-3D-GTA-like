@@ -130,7 +130,7 @@ function closestGrabNode(
   y: number,
   z: number,
 ) {
-  let best = BODY.chest;
+  let best: number = BODY.chest;
   let bestD = Infinity;
 
   for (const i of GRAB_NODES) {
@@ -499,3 +499,4 @@ export class PhysicalBodies {
     }
   }
 }
+
