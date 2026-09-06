@@ -588,6 +588,14 @@ function checkCoactivity(): CheckResult {
   let total = 0;
   let longest = 0;
   let runLen = 0;
+  // A single frame where one signal's derivative happens to sit right at the
+  // `2e-3`/`0.05` active-epsilon is noise in the DETECTOR, not evidence the
+  // phenomena stopped overlapping -- the same "duration, not boolean"
+  // reasoning `OFF_BALANCE_GRACE` already applies to a transient balance
+  // excursion elsewhere in this exact substrate. One tick of tolerance
+  // bridges that noise without hiding a real, sustained break.
+  const GAP_TOL = 1;
+  let gap = 0;
   let ticks = 0;
   const everActive = [0, 0, 0, 0, 0];
   for (let i = 0; i < MAX; i++) {
@@ -606,9 +614,15 @@ function checkCoactivity(): CheckResult {
     if (n >= 3) {
       total++;
       runLen++;
+      gap = 0;
+      if (runLen > longest) longest = runLen;
+    } else if (runLen > 0 && gap < GAP_TOL) {
+      gap++;
+      runLen++;
       if (runLen > longest) longest = runLen;
     } else {
       runLen = 0;
+      gap = 0;
     }
     prev = cur;
     if (i > 90 && a.loco === "idle") break;

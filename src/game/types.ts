@@ -281,6 +281,33 @@ export interface Actor {
   catchT: number;
   /** Which leg is swinging for the catch step: 0 left, 1 right. */
   catchLeg: number;
+  /**
+   * Stride reach captured once, the instant this catch step is committed, m.
+   *
+   * `catchReach` used to be recomputed every tick from the CURRENT
+   * `intendSpeed`, so it collapsed to its floor the moment intent changed for
+   * an unrelated reason -- throwing a punch legitimately zeroes forward
+   * intent, and a body already mid-recovery read that as losing the reach
+   * that was saving it, and ragdolled. What a body committed a foot to reach
+   * for does not un-commit because it also decided to swing an arm; freezing
+   * the entry stride for the life of this catch is what lets the two coexist.
+   * Leg motor and stamina still apply live, since an injury sustained mid-
+   * catch legitimately still costs you.
+   */
+  catchStrideM: number;
+  /** Has the caught foot's real touchdown already resynced gait phase this catch. */
+  catchLanded: boolean;
+  /**
+   * Involuntary balance-recovery lean, forward/back and side/side, m-scale
+   * like `leanX`/`leanZ` but a separate channel: `leanX/leanZ` are the body's
+   * own voluntary lean (travel, a hauled load) and are assigned outright by
+   * their owners each tick, while this is what the capture-point deviation
+   * pulls the chest, head and free arms toward before a step is even needed.
+   * Summed with `leanX`/`leanZ` at the point they are read, not merged into
+   * them, so an involuntary correction never overwrites a voluntary one.
+   */
+  recoverX: number;
+  recoverZ: number;
   /** Trip recovery timer, s. */
   tripT: number;
   /** Strongest node closing speed this tick, m/s. Read-only expression input. */

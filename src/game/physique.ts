@@ -93,6 +93,15 @@ const POSE_LOST = 0.34;
  * foot is going decides whether it gets there in time.
  */
 const CATCH_STRIDES = 2.2;
+/**
+ * Largest involuntary counterweight lean, local m-scale, matching the
+ * existing voluntary `leanZ`/`leanX` neighbourhood (0.18-0.22) so the two
+ * channels read as one body's worth of tilt once summed, not two competing
+ * scales.
+ */
+const RECOVER_LEAN_MAX = 0.2;
+/** How fast the counterweight engages and relaxes, s^-1: a fast reflex, not a deliberate lean. */
+const RECOVER_RATE = 10;
 /** How fast a body settles into or out of a crouch, s^-1. */
 const CROUCH_RATE = 6;
 /** Closing speed, m/s, above which a contact interrupts a get-up. */
@@ -278,13 +287,36 @@ function writePose(w: World, a: Actor, dt: number) {
 
     lz[6] = lz[6]! - Math.sin(ph) * stride * 0.62;
 
-    // torso leans into travel and away from the load being dragged
-    const lean = clamp(a.leanZ, -0.22, 0.22) * s;
-    const roll = clamp(a.leanX, -0.18, 0.18) * s;
+    // Counterweight: free arms spread and rise with the trouble, biased
+    // toward whichever side is actually helping -- outward for a lateral
+    // catch, up and back for a forward/backward one -- read from the same
+    // recoverX/recoverZ the torso below leans with, not a separate guess.
+    // This runs before the strike/kick overrides further down, so an active
+    // strike still has the final say over its own arm.
+    if (a.recoverX !== 0 || a.recoverZ !== 0) {
+      const spread = Math.hypot(a.recoverX, a.recoverZ) * s;
+      lx[4] = lx[4]! - spread * 0.9 - a.recoverX * s * 0.5;
+      lx[6] = lx[6]! + spread * 0.9 - a.recoverX * s * 0.5;
+      ly[4] = ly[4]! + spread * 0.7;
+      ly[6] = ly[6]! + spread * 0.7;
+      lz[4] = lz[4]! + a.recoverZ * s * 0.6;
+      lz[6] = lz[6]! + a.recoverZ * s * 0.6;
+    }
+
+    // torso leans into travel, away from a dragged load, and opposite the
+    // capture point once one has left the base -- three sources, one tilt.
+    const lean = clamp(a.leanZ + a.recoverZ, -0.22, 0.22) * s;
+    const roll = clamp(a.leanX + a.recoverX, -0.18, 0.18) * s;
     lz[1] = lz[1]! + lean;
     lz[0] = lz[0]! + lean * 1.35;
     lx[1] = lx[1]! + roll;
     lx[0] = lx[0]! + roll * 1.3;
+    // The hips share a smaller fraction of the SAME counterweight -- a real
+    // recovery shifts weight at the hip, not only the chest -- kept out of
+    // the voluntary travel/haul lean above so that established behaviour is
+    // untouched.
+    lz[2] = lz[2]! + a.recoverZ * s * 0.35;
+    lx[2] = lx[2]! + a.recoverX * s * 0.35;
     // Crouching is hip and knee FLEXION, not a uniform vertical squash. Scaling
     // every node's height compresses the spine past its joint limit, and the
     // solver then fights the pose hard enough to be read as losing the stance.
@@ -343,6 +375,9 @@ function writePose(w: World, a: Actor, dt: number) {
     ly[5] = ly[5]! + Math.max(0, -Math.sin(ph)) * lift;
   }
 
+  const c = Math.cos(a.yaw);
+  const sn = Math.sin(a.yaw);
+
   if (humanoid) {
     const thigh = restLen(plan, 2, 7) * s;
     const shin = restLen(plan, 7, 8) * s;
@@ -372,6 +407,60 @@ function writePose(w: World, a: Actor, dt: number) {
       for (const i of [0, 1, 2, 3, 4, 5, 6]) ly[i] = ly[i]! - dip;
     }
 
+    // The catch step overrides one foot's target with the capture point --
+    // the place the body would actually have to step to arrest the fall it
+    // is already in -- in the SAME local frame twoLink reads below, and
+    // BEFORE twoLink runs. This used to be a late world-space patch on
+    // B.tx/ty/tz, applied AFTER twoLink: the knee got solved for wherever
+    // the gait-swing foot guess had been, then the ankle jumped to the catch
+    // placement afterward, leaving one two-bone chain asked to satisfy two
+    // disagreeing end points in the same tick. It cannot, and instead
+    // oscillates fighting between them -- which is why the caught foot swung
+    // through the air every tick but could never settle enough to register
+    // ground contact.
+    if (a.catchT > 0) {
+      const foot = a.catchLeg === 0 ? 8 : 10;
+      const hCom = Math.max(0.2, B.comY[slot]! - a.y);
+      const tau = Math.sqrt(hCom / GRAVITY);
+      const cx = B.comX[slot]! + B.comVX[slot]! * tau;
+      const cz = B.comZ[slot]! + B.comVZ[slot]! * tau;
+      const dx = cx - B.comX[slot]!;
+      const dz = cz - B.comZ[slot]!;
+      const dm = Math.sqrt(dx * dx + dz * dz);
+      const ox = dm > 1e-4 ? (dx / dm) * 0.1 : 0;
+      const oz = dm > 1e-4 ? (dz / dm) * 0.1 : 0;
+      const tX = cx + ox - a.x;
+      const tZ = cz + oz - a.z;
+      // World displacement from the body origin, rotated into the same
+      // body-local frame the rest of the pose -- and twoLink below -- reads.
+      const footY = 0.1 * s;
+      let fx = tX * c - tZ * sn;
+      let fz = tX * sn + tZ * c;
+      // Capped against the leg's actual 3D reach from the HIP -- the same
+      // legReach the gait's own hip-dip above is measured against -- not a
+      // flat horizontal number. A step this close to the ground has already
+      // spent most of that reach on the vertical drop from hip to ankle, so
+      // a horizontal-only cap sized as if the step were level let twoLink's
+      // own out-of-reach clamp (which measures the true 3D hip-to-ankle
+      // distance a few lines below) silently override the target almost
+      // every tick, snapping the ankle back up toward the hip along
+      // whatever direction that tick's request pointed. That silent
+      // override -- not the physics -- was the caught foot's endless,
+      // never-landing bounce.
+      const vDrop = ly[2]! - footY;
+      const maxHoriz = Math.sqrt(Math.max(0, legReach * legReach - vDrop * vDrop));
+      const hx = fx - lx[2]!;
+      const hz = fz - lz[2]!;
+      const hm = Math.sqrt(hx * hx + hz * hz);
+      if (hm > maxHoriz) {
+        fx = lx[2]! + (hx / hm) * maxHoriz;
+        fz = lz[2]! + (hz / hm) * maxHoriz;
+      }
+      lx[foot] = fx;
+      lz[foot] = fz;
+      ly[foot] = footY;
+    }
+
     // Knees and elbows are solved from the hips/shoulders and the end effectors
     // rather than posed independently, so every target is reachable.
     // knees break forward and slightly outward, elbows backward and outward:
@@ -382,8 +471,6 @@ function writePose(w: World, a: Actor, dt: number) {
     twoLink(1, 5, 6, upper, fore, 0.42, -0.16, 0.89);
   }
 
-  const c = Math.cos(a.yaw);
-  const sn = Math.sin(a.yaw);
   const b = B.base(slot);
   // How far toward the intended pose the body is even trying to go. At stance
   // authority 0 the target is wherever the body already is, so a limp body is
@@ -416,33 +503,6 @@ function writePose(w: World, a: Actor, dt: number) {
     B.stepReady[slot] = 1;
   } else {
     B.stepReady[slot] = 0;
-  }
-
-  // The catch step overrides one foot target with the capture point: the place
-  // the body would actually have to step to arrest the fall it is already in.
-  if (a.catchT > 0 && humanoid) {
-    const foot = a.catchLeg === 0 ? 8 : 10;
-    const hCom = Math.max(0.2, B.comY[slot]! - a.y);
-    const tau = Math.sqrt(hCom / GRAVITY);
-    const cx = B.comX[slot]! + B.comVX[slot]! * tau;
-    const cz = B.comZ[slot]! + B.comVZ[slot]! * tau;
-    const dx = cx - B.comX[slot]!;
-    const dz = cz - B.comZ[slot]!;
-    const dm = Math.sqrt(dx * dx + dz * dz);
-    const ox = dm > 1e-4 ? (dx / dm) * 0.1 : 0;
-    const oz = dm > 1e-4 ? (dz / dm) * 0.1 : 0;
-    const reach = 0.82 * s;
-    let tX = cx + ox - a.x;
-    let tZ = cz + oz - a.z;
-    const tm = Math.sqrt(tX * tX + tZ * tZ);
-    if (tm > reach) {
-      tX = (tX / tm) * reach;
-      tZ = (tZ / tm) * reach;
-    }
-    const kf = b + foot;
-    B.tx[kf] = a.x + tX;
-    B.ty[kf] = a.y + 0.1 * s;
-    B.tz[kf] = a.z + tZ;
   }
 }
 
@@ -791,6 +851,8 @@ function consume(w: World, a: Actor, dt: number) {
   let peak = 0;
   let peakRegion: Region = "torso";
   let footContact = false;
+  /** Did the committed catch foot itself register real ground contact this tick. */
+  let catchFootTouched = false;
   let lowest = Infinity;
   let headDv = 0;
   // Peak closing speed on the trunk only. A blow to the body interrupts a
@@ -804,6 +866,9 @@ function consume(w: World, a: Actor, dt: number) {
     if (yb < lowest) lowest = yb;
     if (!B.touched[k]) continue;
     if (i === plan.feet[0] || i === plan.feet[1]) footContact = true;
+    if (a.catchT > 0 && n === 11 && i === plan.feet[a.catchLeg] && !a.catchLanded) {
+      catchFootTouched = true;
+    }
     const jn = B.jimp[k]!;
     if (jn <= 0) continue;
     const ri = REGION_OF[B.region[k]!]!;
@@ -910,6 +975,42 @@ function consume(w: World, a: Actor, dt: number) {
     a.loco !== "pin" &&
     a.loco !== "vault";
 
+  // --- counterweight: the smallest trouble, answered before a step --------
+  //
+  // Reads the SAME residual deviation `margin` was just built from -- the
+  // point this body would actually have to catch itself at -- so the
+  // direction a body leans is the direction it is actually failing to
+  // arrest, not a guess. This is deliberately continuous and reflexive:
+  // no threshold, no commitment, just a bounded pull toward whichever
+  // shift would bring the capture point back over the base, fading in
+  // and out with how far out it already is and how hard the body is
+  // even trying (`controllable`). The catch-STEP below is the next,
+  // discrete rung on the same ladder once this alone is not enough.
+  if (controllable && EDGES.supportBalance) {
+    const devX = B.captureX[slot]! - a.x;
+    const devZ = B.captureZ[slot]! - a.z;
+    const devM = Math.hypot(devX, devZ) || 1;
+    // How much of margin's own trouble to answer, saturating at the same
+    // depth that already means "off balance the instant it happens" --
+    // by the time a real catch step is warranted this is already maxed.
+    const trouble = clamp(-margin / -OFF_BALANCE_DEEP, 0, 1);
+    const c = Math.cos(a.yaw);
+    const sn = Math.sin(a.yaw);
+    // World deviation into the same body-local frame writePose builds its
+    // pose in, so this can be added directly to leanX/leanZ there.
+    const localX = (devX * c - devZ * sn) / devM;
+    const localZ = (devX * sn + devZ * c) / devM;
+    const targetRZ = trouble > 0 ? -localZ * trouble * RECOVER_LEAN_MAX : 0;
+    const targetRX = trouble > 0 ? -localX * trouble * RECOVER_LEAN_MAX : 0;
+    const k = 1 - Math.exp(-dt * RECOVER_RATE);
+    a.recoverZ += (targetRZ - a.recoverZ) * k;
+    a.recoverX += (targetRX - a.recoverX) * k;
+  } else {
+    const k = 1 - Math.exp(-dt * RECOVER_RATE);
+    a.recoverZ -= a.recoverZ * k;
+    a.recoverX -= a.recoverX * k;
+  }
+
   if (a.catchT > 0) a.catchT = Math.max(0, a.catchT - dt);
   if (a.tripT > 0) a.tripT = Math.max(0, a.tripT - dt);
   // Flight is not a balance failure, so the airborne sentinel must not feed the
@@ -944,11 +1045,27 @@ function consume(w: World, a: Actor, dt: number) {
       // saw them, and the fright produced more walking bodies to fall over.
       // Leg motor sets the reach, so this is also why a sound body strides
       // through what puts a damaged one on the floor.
-      const catchReach =
-        strideAmp(a.intendSpeed, B.scale[slot]!) *
-        CATCH_STRIDES *
-        legMotor(a) *
-        (a.stamina > 0.03 ? 1 : 0.4);
+      //
+      // The STRIDE term is frozen at `a.catchStrideM` only while a catch is
+      // already committed (`a.catchT > 0`); a fresh decision -- nothing
+      // committed yet -- reads the same live formula a catch would freeze,
+      // since there is nothing in progress yet to protect. Without this
+      // split, a body that had never caught before read `a.catchStrideM`'s
+      // zeroed default as its reach and fell with NO tolerance on its very
+      // first excursion, before the commit branch below ever ran to give it
+      // one. Once committed, intent is not recomputed: a body mid-catch
+      // throwing a punch legitimately zeroes forward intent -- that is not
+      // the body giving up the reach it already committed a foot to, and
+      // recomputing it from intent every tick read it as exactly that:
+      // intent hit zero, catchReach collapsed to its floor, and the very
+      // next tick's margin (already deep, mid-recovery) fell past a bound
+      // that had quietly shrunk out from under it. Leg motor and stamina
+      // stay LIVE either way, since an injury sustained mid-catch genuinely
+      // still costs you.
+      const physSpeed = Math.hypot(B.comVX[slot]!, B.comVZ[slot]!);
+      const liveStrideM = strideAmp(Math.max(a.intendSpeed, physSpeed), B.scale[slot]!);
+      const strideM = a.catchT > 0 ? a.catchStrideM : liveStrideM;
+      const catchReach = strideM * CATCH_STRIDES * legMotor(a) * (a.stamina > 0.03 ? 1 : 0.4);
       if (margin < FALL_MARGIN - catchReach || a.consciousness < STANCE_CONSCIOUS) {
         collapse(w, a);
       } else if (a.catchT <= 0) {
@@ -956,6 +1073,12 @@ function consume(w: World, a: Actor, dt: number) {
         if (lm > 0.34 && a.stamina > 0.03 && a.tripT <= 0) {
           a.catchLeg = a.motor.lleg >= a.motor.rleg ? 0 : 1;
           a.catchT = 0.36;
+          a.catchLanded = false;
+          // Entry momentum, not entry intent: a shove can leave a body moving
+          // fast with no forward intent behind it at all -- the same live
+          // number just used above to decide whether to even reach this
+          // branch is what gets frozen for the rest of the catch.
+          a.catchStrideM = liveStrideM;
           a.stamina = Math.max(0, a.stamina - 0.025);
           if (a.loco !== "stumble") {
             a.loco = "stumble";
@@ -965,6 +1088,21 @@ function consume(w: World, a: Actor, dt: number) {
           collapse(w, a);
         }
       }
+    }
+    // Gait resumes from the foot that actually caught you. Without this the
+    // walk clock free-runs through the whole recovery off whatever speed the
+    // body happens to have mid-stumble, and normal gait picks back up wherever
+    // that drifted to -- not necessarily the foot just planted -- so the first
+    // stride out of a catch could ask the JUST-LANDED foot to immediately
+    // swing again. Snapping to the nearest phase where the caught foot is the
+    // planted one, at the real moment it registers ground contact rather than
+    // an arbitrary timer edge, means the next stride is always the other foot
+    // swinging through from a real plant, the same as an unassisted step.
+    if (catchFootTouched) {
+      a.catchLanded = true;
+      const target = a.catchLeg === 0 ? Math.PI : 0;
+      const twoPi = Math.PI * 2;
+      a.walkPhase = target + Math.round((a.walkPhase - target) / twoPi) * twoPi;
     }
   } else if (a.loco === "ragdoll" || a.loco === "pin") {
     a.stanceAuth = Math.max(0, a.stanceAuth - dt * (LIMP_RATE + 6 * (1 - a.consciousness)));

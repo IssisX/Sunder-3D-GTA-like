@@ -484,6 +484,15 @@ export class Bodies {
   comVZ = new Float32Array(this.cap);
   /** Support-polygon margin at the capture point, m. Negative means falling. */
   margin = new Float32Array(this.cap);
+  /**
+   * World XZ of the capture point `supportMargin` projects the residual
+   * (unintended) motion to, m. Already computed every tick to produce
+   * `margin`; kept here so a consumer can read the DIRECTION a body is
+   * falling, not only how far -- the deviation this body needs a counterweight
+   * or a caught foot to answer, not a second solve of the same projection.
+   */
+  captureX = new Float32Array(this.cap);
+  captureZ = new Float32Array(this.cap);
   /** Total mass of other bodies resting on this one, kg. */
   pileLoad = new Float32Array(this.cap);
   /** Number of nodes bearing load this tick. Zero means airborne, not falling. */
@@ -804,6 +813,8 @@ export class Bodies {
           : patch + hullSignedDist(this.hullX, this.hullZ, this.hullOrder, hn, cx, cz);
     }
     this.margin[slot] = d;
+    this.captureX[slot] = cx;
+    this.captureZ[slot] = cz;
     return d;
   }
 
