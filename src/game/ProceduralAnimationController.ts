@@ -18,6 +18,7 @@ import { CentroidalLocomotion } from "./centroidal-locomotion";
 import { ActionContinuity } from "./action-continuity";
 import { ReactiveBalance } from "./reactive-balance";
 import { CommittedCatchStep } from "./committed-catch-step";
+import { KineticFightFlow } from "./kinetic-fight-flow";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -27,8 +28,9 @@ import { CommittedCatchStep } from "./committed-catch-step";
  *   world sim: compatibility prediction for legacy game systems
  *   root firewall: discard temporary capsule translation for body-owned humans
  *   post-world/pre-body: locomotion + capture-step commitment + melee task generation
- *   action continuity: preserve incoming step/momentum through action + recovery
  *   whole-body coupling: support / COM / stance tasks derived from actions
+ *   kinetic fight flow: support-relative action arc from real carrier/support/momentum
+ *   action continuity: preserve incoming step/momentum through action + recovery
  *   reactive balance: measured COM/momentum/support bend free whole-body tasks
  *   centroidal coupling: acceleration/braking/turning posture from real COM state
  *   task finalization: position + target-velocity field
@@ -46,6 +48,7 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly centroidal = new CentroidalLocomotion(this);
   private readonly balance = new ReactiveBalance(this);
   private readonly catchStep = new CommittedCatchStep(this);
+  private readonly fightFlow = new KineticFightFlow(this);
   private playerJumpRequested = false;
 
   override bootstrap(w: World) {
@@ -58,6 +61,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.coupling.bootstrap(w);
     this.continuity.bootstrap(w);
     this.catchStep.bootstrap(w);
+    this.fightFlow.bootstrap(w);
     this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
@@ -72,6 +76,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.coupling.clear();
     this.continuity.clear();
     this.catchStep.clear();
+    this.fightFlow.clear();
     this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
@@ -86,6 +91,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.coupling.reset(a);
     this.continuity.reset(a);
     this.catchStep.reset(a);
+    this.fightFlow.reset(a);
     this.balance.reset(a);
     this.rootAuthority.reset(a);
     if (a.kind === "player") this.playerJumpRequested = false;
@@ -127,6 +133,12 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.prepareStep(w, dt);
     this.coupling.prepare(w);
     this.melee.finishCoupledTasks(w);
+
+    // The specialist action is already defined here. Swing its existing body
+    // geometry around real support BEFORE continuity captures terminal action
+    // state, so recovery inherits the pronounced achieved chain instead of a
+    // separate cinematic pose.
+    this.fightFlow.prepare(w, dt);
     this.continuity.couple(w, dt);
 
     // Balance is evaluated after action/continuity targets exist. It can bend
