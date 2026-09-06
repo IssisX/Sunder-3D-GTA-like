@@ -64,7 +64,7 @@ For every artifact-changing turn, end with a compact reality report that surface
 
 A fallback or reduced artifact must be identified **before** the user opens or evaluates it. Never call a reduced, synthetic, reconstructed, debug, benchmark, or stripped artifact simply a "preview" when that wording could imply the canonical game.
 
-Reserve **real preview / real build / playable current version** for an artifact produced from the current canonical `ChatGPT-version` product code and current world/content. A hosting/build wrapper may differ, but the game, world, assets, controls, simulation, and current modifications being evaluated must be the canonical ones. If that artifact cannot be produced, say so plainly rather than substituting a surrogate without disclosure.
+Reserve **real preview / real build / playable current version** for an artifact produced from the current canonical branch's product code and current world/content. A hosting/build wrapper may differ, but the game, world, assets, controls, simulation, and current modifications being evaluated must be the canonical ones. If that artifact cannot be produced, say so plainly rather than substituting a surrogate without disclosure.
 
 Never let a fallback artifact silently become a new baseline. Never use omitted/degraded systems in a fallback as evidence that the canonical game regressed. Never conceal failed work, partial work, unverified behavior, or a quality compromise merely to make a handoff appear complete.
 
