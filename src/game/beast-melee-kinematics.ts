@@ -7,10 +7,12 @@ import {
   nodeRadius,
 } from "./body-model";
 import { applyBeastMeleeContact } from "./beast-melee-contact";
+import { socialIncidents } from "./social-incident";
 
 const ENTITY_CAP = 8192;
 const WOLF_DURATION = 0.28;
 const BEAR_DURATION = 0.4;
+const OTHER_DURATION = 0.34;
 
 export const EDGES = {
   spatialCarrier: true,
@@ -38,11 +40,12 @@ function segmentPointDist2(
 }
 
 /**
- * Predatory-beast melee authority.
+ * Beast melee authority.
  *
- * AI may request an attack by arming legacy strikeT. This controller consumes
- * that request before the old timer reaches its damage window, then resolves
- * the attack only from the swept world-space volume of the visible head.
+ * Predators can still request an attack through their existing AI timer. A
+ * prey/herd animal only gains attack authority when a real social incident has
+ * marked it as a defender. Either way, consequences still require the visible
+ * head carrier to sweep through a target body.
  */
 export class BeastMeleeKinematics {
   private readonly active = new Uint8Array(ENTITY_CAP);
@@ -83,17 +86,29 @@ export class BeastMeleeKinematics {
   step(w: World, dt: number) {
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
-      if (!predator(a) || a.id < 0 || a.id >= ENTITY_CAP) continue;
+      if (a.kind !== "beast" || a.id < 0 || a.id >= ENTITY_CAP) continue;
       const id = a.id;
+      const incidentTargetId = socialIncidents.fightTarget(id);
+      const incidentTarget = incidentTargetId ? w.actor(incidentTargetId) : null;
+      const legacyIntent = predator(a) && a.strikeT > 0;
+      let incidentIntent = false;
+      if (incidentTarget?.alive && a.attackCd <= 0) {
+        const dx = incidentTarget.x - a.x;
+        const dz = incidentTarget.z - a.z;
+        const reach = a.radius + incidentTarget.radius + (a.species === "cow" ? 1.0 : 0.72);
+        incidentIntent = dx * dx + dz * dz <= reach * reach;
+      }
 
-      // Beast AI still owns attack intent/cooldown. Consume its timer before
-      // the legacy range/cone resolver can ever reach its active damage phase.
-      if (!this.active[id] && a.strikeT > 0) {
+      if (!this.active[id] && (legacyIntent || incidentIntent)) {
         this.active[id] = 1;
         this.time[id] = 0;
-        this.duration[id] = a.species === "bear" ? BEAR_DURATION : WOLF_DURATION;
+        this.duration[id] = a.species === "bear" ? BEAR_DURATION : a.species === "wolf" ? WOLF_DURATION : OTHER_DURATION;
         this.hitId[id] = -1;
         this.hasPrev[id] = 0;
+        if (incidentIntent && incidentTarget) {
+          a.targetId = incidentTarget.id;
+          a.attackCd = a.species === "cow" ? 1.15 : 0.92;
+        }
       }
       if (!this.active[id]) continue;
       a.strikeT = 0;
@@ -139,17 +154,26 @@ export class BeastMeleeKinematics {
   private radius = 0;
 
   private carrierPoint(a: Actor) {
-    // These ratios track the existing rendered head placement. The carrier is
-    // not an invisible reach extension: only actual root/yaw motion moves it.
-    const bear = a.species === "bear";
-    const forward = a.radius * (bear ? 1.65 : 1.83);
-    const height = a.height * (bear ? 0.54 : 0.595);
+    const forwardRatio =
+      a.species === "bear" ? 1.65 :
+      a.species === "wolf" ? 1.83 :
+      a.species === "cow" ? 1.83 :
+      a.species === "pig" ? 1.74 :
+      a.species === "goat" ? 1.28 : 1.98;
+    const heightRatio =
+      a.species === "bear" ? 0.54 :
+      a.species === "wolf" ? 0.595 :
+      a.species === "cow" ? 0.596 :
+      a.species === "pig" ? 0.62 :
+      a.species === "goat" ? 0.713 : 0.557;
+    const forward = a.radius * forwardRatio;
+    const height = a.height * heightRatio;
     const fx = -Math.sin(a.yaw);
     const fz = -Math.cos(a.yaw);
     this.cx = a.x + fx * forward;
     this.cy = a.y + height;
     this.cz = a.z + fz * forward;
-    this.radius = a.radius * (bear ? 0.72 : 0.72);
+    this.radius = a.radius * (predator(a) || a.species === "cow" ? 0.72 : 0.58);
   }
 
   private resolveSweep(

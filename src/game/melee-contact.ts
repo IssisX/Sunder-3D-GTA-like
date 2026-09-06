@@ -1,7 +1,7 @@
 import type { Actor, Prop, Region } from "./types";
 import { FIRE_CELL, WEAPON_STATS } from "./types";
 import type { World } from "./world";
-import { canSeeThrough, clamp } from "./world";
+import { clamp } from "./world";
 import { impactDynamics } from "./impact-dynamics";
 import {
   assessImpact,
@@ -9,6 +9,7 @@ import {
   reducedEffectiveMass,
 } from "./impact-mediation";
 import { representativeNode } from "./body-model";
+import { socialIncidents } from "./social-incident";
 
 const KICK_BLUNT = 1.15;
 const KICK_MASS = 3.2;
@@ -22,50 +23,6 @@ function strikingMass(atk: Actor, kind: "strike" | "kick") {
 
 function addKnown(a: Actor, id: number) {
   if (!a.known.includes(id)) a.known.push(id);
-}
-
-function registerWitnesses(w: World, atk: Actor, vic: Actor) {
-  for (let i = 0; i < w.actors.length; i++) {
-    const o = w.actors[i]!;
-    if (!o.alive || o.id === atk.id || o.kind === "player" || o.species !== "human") continue;
-
-    if (o.id === vic.id) {
-      addKnown(o, atk.id);
-      o.alert = 1;
-      o.targetId = atk.id;
-      o.lastSeenX = atk.x;
-      o.lastSeenZ = atk.z;
-      o.lastSeenT = w.time;
-      w.addMemory(o, "threat", atk.x, atk.z, atk.id, 1);
-      continue;
-    }
-
-    const dx = atk.x - o.x;
-    const dz = atk.z - o.z;
-    const d2 = dx * dx + dz * dz;
-    if (d2 > 15 * 15) continue;
-    const d = Math.sqrt(d2) || 1;
-    if (!canSeeThrough(w, o.x, o.z, atk.x, atk.z) && d > 4) continue;
-
-    const fx = -Math.sin(o.yaw);
-    const fz = -Math.cos(o.yaw);
-    const dot = (dx * fx + dz * fz) / d;
-    if (d > 5.5 && dot < -0.05) continue;
-
-    const certainty = clamp(1 - d / 18, 0.35, 0.92);
-    w.addMemory(o, "threat", atk.x, atk.z, atk.id, certainty);
-    o.alert = Math.max(o.alert, 0.75);
-
-    if (o.faction === "guard") {
-      addKnown(o, atk.id);
-      o.targetId = atk.id;
-      o.lastSeenX = atk.x;
-      o.lastSeenZ = atk.z;
-      o.lastSeenT = w.time;
-    } else {
-      o.fear = Math.min(1, o.fear + 0.18 * (1 - o.courage));
-    }
-  }
 }
 
 function normalizeDirection(atk: Actor, x: number, y: number, z: number) {
@@ -172,8 +129,11 @@ export function applyActorMeleeContact(
   if (atk.kind === "player") {
     if (vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.22);
     else if (vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.12);
-    registerWitnesses(w, atk, vic);
   }
+
+  // A real swept contact creates one local incident. It does not broadcast
+  // hostility to every visible human in the area.
+  socialIncidents.reportAggression(w, atk, vic, kind, contactImpact.damageScale);
 
   if (contactImpact.damaging) {
     const damageForce = force * contactImpact.damageScale;

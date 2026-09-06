@@ -63,3 +63,13 @@ If an action needs travel time, wind-up, charge, leverage, or preparation for ph
 ## PREVIEW FIDELITY CONTRACT
 
 After substantive gameplay changes, prefer a reproducible playable build from the canonical branch over bespoke demo shells. Preview infrastructure must import/use canonical game modules rather than copying, simplifying, or reimplementing the game. Any intentional wrapper difference must be surfaced in the handoff reality report.
+
+## LAW OF COMPLETE MODULAR DELIVERY
+
+Modularity is an internal organization and output-packaging rule, never a reason to defer.
+
+When a request requires multiple modules, files, prompts, documents, components, or subsystems, deliver every feasible required artifact in the same response. Each artifact must be complete within its role and connect coherently to the others.
+
+Do not list modules that should be created - create them. Do not describe interfaces that need implementation - implement them. Do not provide a file tree without the file contents when the user asked for the build. Do not use modularity to split one complete request across artificial future turns.
+
+If output-size limits make literal inclusion of every low-value generated artifact impossible, prioritize the executable core, all critical integrations, and a deterministic generator or build script that produces the remaining repetitive artifacts. Never omit the logic that makes the system function.

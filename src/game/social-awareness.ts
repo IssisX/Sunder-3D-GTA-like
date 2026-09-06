@@ -1,6 +1,7 @@
 import type { Actor } from "./types";
 import type { World } from "./world";
 import { canSeeThrough, clamp } from "./world";
+import { socialIncidents } from "./social-incident";
 
 const ENTITY_ID_CAP = 8192;
 const RADIO_HOLD = 0.08;
@@ -74,12 +75,14 @@ export class SocialAwarenessController {
       this.restoreRadioHolds(w);
     }
     w.wanted = clamp(this.realWanted + delta, 0, 1);
+    socialIncidents.step(w, Math.max(0, w.time - this.beginTime));
     this.active = false;
   }
 
   reset() {
     this.realWanted = 0; this.proxyWanted = 0; this.active = false; this.beginTime = 0;
     this.knownPlayerBefore.fill(0); this.radioHeld.fill(0);
+    socialIncidents.reset();
   }
 
   private localizePlayerKnowledge(w: World) {

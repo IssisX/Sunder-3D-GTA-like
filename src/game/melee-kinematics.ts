@@ -7,6 +7,8 @@ import { CONTACT_NODES, NODE_REGION, bodyScale, nodeRadius } from "./body-model"
 import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 import { applyActorMeleeContact, applyPropMeleeContact } from "./melee-contact";
 import { chooseKickAttackLeft } from "./action-support";
+import { agentRandom } from "./agent-independence";
+import { socialIncidents } from "./social-incident";
 
 const ENTITY_ID_CAP = 8192;
 const ACTION_CAP = 128;
@@ -139,21 +141,30 @@ export class MeleeKinematics {
       if (slot < 0) slot = this.register(a);
       if (slot < 0) continue;
 
-      if (
-        a.kind !== "player" &&
-        this.kind[slot] === NONE &&
-        a.faction === "guard" &&
-        a.attackCd <= 0 &&
-        a.known.includes(player.id) &&
-        canAct(a)
-      ) {
-        const dx = player.x - a.x;
-        const dz = player.z - a.z;
-        const reach = WEAPON_STATS[a.weapon].reach + player.radius + 0.35;
-        if (dx * dx + dz * dz <= reach * reach) {
-          this.begin(w, a, slot, PUNCH);
-          a.attackCd = 0.7 / (0.7 + a.competence);
-          a.targetId = player.id;
+      if (a.kind !== "player" && this.kind[slot] === NONE && a.attackCd <= 0 && canAct(a)) {
+        const incidentTargetId = socialIncidents.fightTarget(a.id);
+        const incidentTarget = incidentTargetId ? w.actor(incidentTargetId) : null;
+        const guardTarget =
+          !incidentTarget && a.faction === "guard" && a.known.includes(player.id)
+            ? player
+            : null;
+        const target = incidentTarget?.alive ? incidentTarget : guardTarget;
+        if (target?.alive) {
+          const dx = target.x - a.x;
+          const dz = target.z - a.z;
+          const reach = WEAPON_STATS[a.weapon].reach + target.radius + 0.35;
+          if (dx * dx + dz * dz <= reach * reach) {
+            const kick =
+              Boolean(incidentTarget) &&
+              a.weapon === "fist" &&
+              a.grounded &&
+              agentRandom(w, a) < 0.12 + a.competence * 0.16;
+            this.begin(w, a, slot, kick ? KICK : PUNCH);
+            a.attackCd =
+              (kick ? 0.88 : 0.7) / (0.7 + a.competence) +
+              agentRandom(w, a) * 0.14;
+            a.targetId = target.id;
+          }
         }
       }
 
@@ -625,15 +636,27 @@ export class MeleeKinematics {
       const o = w.actors[i]!;
       if (o.id === a.id || !o.alive) continue;
       const or = this.bodies.get(o);
-      if (!or?.initialized) continue;
-      for (let j = 0; j < CONTACT_NODES.length; j++) {
-        const node = CONTACT_NODES[j]!;
-        const rr = radius + nodeRadius(o, node);
-        const d2 = segmentPointDist2(px, py, pz, cx, cy, cz, or.x[node]!, or.y[node]!, or.z[node]!);
+      if (or?.initialized) {
+        for (let j = 0; j < CONTACT_NODES.length; j++) {
+          const node = CONTACT_NODES[j]!;
+          const rr = radius + nodeRadius(o, node);
+          const d2 = segmentPointDist2(px, py, pz, cx, cy, cz, or.x[node]!, or.y[node]!, or.z[node]!);
+          if (d2 <= rr * rr && d2 < bestD2) {
+            bestD2 = d2;
+            bestActor = o;
+            bestNode = node;
+          }
+        }
+      } else if (o.kind === "beast") {
+        const rr = radius + Math.max(o.radius, o.height * 0.28);
+        const d2 = segmentPointDist2(
+          px, py, pz, cx, cy, cz,
+          o.x, o.y + o.height * 0.5, o.z,
+        );
         if (d2 <= rr * rr && d2 < bestD2) {
           bestD2 = d2;
           bestActor = o;
-          bestNode = node;
+          bestNode = -1;
         }
       }
     }
@@ -642,13 +665,13 @@ export class MeleeKinematics {
     const vy = (cy - py) / Math.max(dt, 1e-5);
     const vz = (cz - pz) / Math.max(dt, 1e-5);
     const speed = Math.hypot(vx, vy, vz);
-    if (bestActor && bestNode >= 0) {
+    if (bestActor) {
       this.hitId[slot] = bestActor.id;
       applyActorMeleeContact(
         w,
         a,
         bestActor,
-        NODE_REGION[bestNode]!,
+        bestNode >= 0 ? NODE_REGION[bestNode]! : "torso",
         kind === KICK ? "kick" : "strike",
         speed,
         vx,
