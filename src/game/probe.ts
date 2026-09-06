@@ -888,6 +888,31 @@ function measurePressingTheInjury() {
   return able > 15 ? crouched / able : 0;
 }
 
+/**
+ * A shout informs witnesses, not the whole faction equally.
+ *
+ * One guard sees the player and shouts. A second guard is within the shout's
+ * hearing radius but 18 m from the player -- far enough that it cannot see
+ * them. Reading local evidence, the far guard hears that something happened
+ * and goes to investigate, but is not handed a target lock it never earned.
+ * Severed, `callAllies` reverts to a flat radius that hands every faction
+ * member the player's exact position and full certainty regardless of what
+ * they could actually perceive.
+ */
+function measureCallAlliesWitness() {
+  const w = freshWorld(5151);
+  const player = stage(w, 0, 0);
+  const guards = w.actors.filter((o) => o.faction === "guard" && o.alive);
+  const near = guards[0]!;
+  const far = guards[1]!;
+  for (const o of guards) if (o.id !== near.id && o.id !== far.id) place(w, o, 40, -40);
+  place(w, near, 1, 0);
+  place(w, far, 1, 18);
+  w.wanted = 0;
+  run(w, 40);
+  return far.known.includes(player.id) ? 1 : 0;
+}
+
 /* ------------------------------------------------------------------ *
  * Props as physical objects
  * ------------------------------------------------------------------ */
@@ -1156,6 +1181,7 @@ export function runFalsifiers(): CheckResult[] {
     severance("bodyTactics", "damaged limb->aim low", measurePressingTheInjury, 0.2),
     severance("loadCascade", "lost support->load on the rest", measureCollapseCascade, 0.5),
     severance("loadMoment", "support geometry->which one carries it", measureLoadSpread, 1),
+    severance("localEvidence", "shout->only witnessed allies gain a lock", measureCallAlliesWitness, 0.5),
     checkStructuralEccentricity(),
     checkDownRecovers(),
     checkFallingTimber(),

@@ -106,6 +106,17 @@ export const EDGES = {
    * far side identically.
    */
   loadMoment: true,
+  /**
+   * Perceived threat -> hostility and belief, rather than the global tension
+   * meter alone (see humanAI, callAllies, panicSource in sim.ts).
+   *
+   * Cut this and a guard goes hostile the instant `wanted` rises anywhere on
+   * the map, with no line of sight and nothing heard; an ally shout hands
+   * every faction member within a flat radius the player's exact position and
+   * full certainty regardless of distance or walls; and a frightened villager
+   * always flees the player, even when a wolf or a fire is what scared them.
+   */
+  localEvidence: true,
 };
 
 /* ------------------------------------------------------------------ *

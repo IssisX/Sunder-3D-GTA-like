@@ -658,13 +658,25 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
   // walking a beat or fleeing a fire.
   a.crouch = false;
   const seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
-  const hostile = a.known.includes(player.id) || (a.faction === "guard" && w.wanted > 0.2);
+  // General tension is not a substitute for perceiving something. Without the
+  // `seesPlayer || a.alert > 0.3` clause, a guard three streets over turns
+  // hostile the instant `wanted` rises anywhere on the map -- no line of
+  // sight, nothing heard, nothing reported. `alert` already rises only from
+  // real local causes (this guard's own sight, a nearby sound, an ally's
+  // shout), so gating on it is asking "do you actually have a reason", not
+  // inventing a new sensor.
+  const hostile =
+    a.known.includes(player.id) ||
+    (a.faction === "guard" &&
+      w.wanted > 0.2 &&
+      (!EDGES.localEvidence || seesPlayer || a.alert > 0.3));
   const panic = a.fear > 0.55 + a.courage * 0.35;
 
   if (panic && a.faction !== "guard") {
     a.ai = "flee";
-    const awayX = a.x - player.x;
-    const awayZ = a.z - player.z;
+    const src = EDGES.localEvidence ? panicSource(w, a, player) : player;
+    const awayX = a.x - src.x;
+    const awayZ = a.z - src.z;
     const m = Math.hypot(awayX, awayZ) || 1;
     seek(w, a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
     if (a.shoutCd <= 0) {
@@ -969,17 +981,83 @@ function followTracks(w: World, a: Actor) {
 }
 
 function callAllies(w: World, a: Actor, player: Actor) {
-  for (const o of w.nearby(a.x, a.z, 22)) {
+  if (!EDGES.localEvidence) {
+    // The old law: every faction member in a flat bubble is handed the
+    // player's exact position and full certainty, deaf and blind to distance
+    // or walls.
+    for (const o of w.nearby(a.x, a.z, 22)) {
+      if (o.faction !== a.faction || o.id === a.id) continue;
+      w.addMemory(o, "threat", player.x, player.z, player.id, 0.7);
+      if (!o.known.includes(player.id)) o.known.push(player.id);
+      o.alert = Math.max(o.alert, 0.8);
+      o.lastSeenX = a.lastSeenX;
+      o.lastSeenZ = a.lastSeenZ;
+      o.lastSeenT = w.time;
+    }
+    w.wanted = Math.min(1, w.wanted + 0.25);
+    w.whisper("A shout carries.");
+    return;
+  }
+  // A shout is heard, not broadcast. Reusing the reach law `stepPerception`
+  // already uses for every other sound means an ally three streets over hears
+  // that something happened and goes to look -- the existing alert->investigate
+  // path below already walks toward any threat memory on its own -- while only
+  // someone close enough to hear it clearly, or who can just see the player
+  // themselves, gets a real target lock. What every ally used to get
+  // unconditionally.
+  const reach = 22 * (1 - w.rain * 0.2);
+  for (const o of w.nearby(a.x, a.z, reach)) {
     if (o.faction !== a.faction || o.id === a.id) continue;
-    w.addMemory(o, "threat", player.x, player.z, player.id, 0.7);
-    if (!o.known.includes(player.id)) o.known.push(player.id);
-    o.alert = Math.max(o.alert, 0.8);
-    o.lastSeenX = a.lastSeenX;
-    o.lastSeenZ = a.lastSeenZ;
-    o.lastSeenT = w.time;
+    const d = Math.hypot(o.x - a.x, o.z - a.z);
+    const certainty = clamp(1 - d / reach, 0.2, 1);
+    const canConfirm =
+      Math.hypot(o.x - player.x, o.z - player.z) < 16 &&
+      canSeeThrough(w, o.x, o.z, player.x, player.z);
+    if (canConfirm) {
+      // Confirms it themselves, the same as any other witness.
+      w.addMemory(o, "threat", player.x, player.z, player.id, 1);
+      if (!o.known.includes(player.id)) o.known.push(player.id);
+      o.lastSeenX = player.x;
+      o.lastSeenZ = player.z;
+      o.lastSeenT = w.time;
+    } else {
+      // Heard trouble, not told where it is: a report at the SHOUTER's
+      // position, weaker with distance.
+      w.addMemory(o, "threat", a.x, a.z, player.id, certainty * 0.6);
+    }
+    o.alert = Math.max(o.alert, 0.5 + certainty * 0.3);
   }
   w.wanted = Math.min(1, w.wanted + 0.25);
   w.whisper("A shout carries.");
+}
+
+/**
+ * Where a panicking body's fear actually points, so it runs from what
+ * frightened it rather than always the player -- a wolf, a fire, a scream
+ * from someone else. Falls back to the player only when nothing better is
+ * known, which is the one case the old, unconditional version got right.
+ */
+function panicSource(w: World, a: Actor, player: Actor) {
+  if (a.lastHitBy && w.time - a.lastHitT < 8) {
+    const attacker = w.actor(a.lastHitBy);
+    if (attacker) return { x: attacker.x, z: attacker.z };
+  }
+  let best = 0;
+  let sx = player.x;
+  let sz = player.z;
+  for (const m of a.memories) {
+    const age = Math.max(0, w.time - m.t);
+    if (age > 12) continue;
+    const weight = m.kind === "threat" ? 3 : m.kind === "fire" ? 2.5 : m.kind === "body" ? 1.3 : 0;
+    if (!weight) continue;
+    const score = (m.certainty * weight) / (1 + age * 0.18);
+    if (score > best) {
+      best = score;
+      sx = m.x;
+      sz = m.z;
+    }
+  }
+  return { x: sx, z: sz };
 }
 
 function spreadFear(w: World, a: Actor) {
