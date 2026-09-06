@@ -69,6 +69,37 @@ const PROP_BIRTH_SPEED = 10;
  */
 const COLLAPSE_EDGE_KICK = 0.06;
 const COLLAPSE_DROP_KICK = 0.5;
+/**
+ * How fast the sight of a body that is no longer news keeps working on a
+ * witness, as a fraction of the discovery shock per second. Well above the
+ * 0.05/s fear decay, so standing over the fallen still wears on you; far below
+ * the discovery itself, so it is dread rather than a fresh horror sixty times
+ * a second.
+ */
+const BODY_DREAD_RATE = 0.35;
+/**
+ * Ceiling on the fear a heard scream alone may produce.
+ *
+ * Sits below the lowest panic threshold (`0.55 + courage*0.35`, so 0.55 at
+ * courage 0), which is what holds the crowd's loop gain under one: a scream
+ * can bring a listener to the edge and never over it, so screaming cannot
+ * propagate itself. Crossing the line takes something witnessed.
+ */
+const SCREAM_ALARM_CAP = 0.5;
+/**
+ * Hardest an able body can change its ground speed, m/s^2.
+ *
+ * A bound, not a target: it exists to rule out the 0 -> 5.4 m/s inside one
+ * tick (about 324 m/s^2) that every AI path used to ask for, not to make
+ * anyone sluggish. Set low it becomes one, and a body that cannot build
+ * momentum cannot push past an obstacle at all -- guards then stall in front
+ * of anything in the way rather than shouldering through it. Scaled by leg
+ * motor at the point of use: the decision to run arrives instantly, the legs
+ * still have to produce it.
+ */
+const GROUND_ACCEL = 14;
+/** Stopping is not the same problem as starting; you can always just stop. */
+const GROUND_BRAKE = 14;
 /** Parts that came down this tick; reused, never reallocated. */
 const fellScratch: Prop[] = [];
 /**
@@ -406,7 +437,17 @@ function stepPerception(w: World, dt: number) {
         w.addMemory(a, "sound", s.x, s.z, s.who, clamp(1 - d / reach, 0.2, 1));
         if (s.kind === "scream" || s.kind === "collapse" || s.kind === "weapon")
           a.alert = Math.min(1, a.alert + 0.4);
-        if (s.kind === "scream") a.fear = Math.min(1, a.fear + 0.2 * (1 - a.courage));
+        // A scream ALARMS; it does not panic. Panic screams, so if hearing a
+        // scream could push a listener over the panic line, one scream bought
+        // several more and the crowd became an oscillator: the whole town
+        // saturated in under a second from a single cry. Capping what a scream
+        // alone can do below the lowest panic threshold makes the loop gain
+        // less than one by construction -- the crowd still turns and looks,
+        // and still goes up when there is something to see, but the sound can
+        // no longer be its own cause. What tips someone over is witnessing.
+        if (s.kind === "scream" && a.fear < SCREAM_ALARM_CAP) {
+          a.fear += Math.min(0.2 * (1 - a.courage), SCREAM_ALARM_CAP - a.fear);
+        }
       }
     }
     const others = w.nearby(a.x, a.z, visRange);
@@ -438,12 +479,19 @@ function stepPerception(w: World, dt: number) {
         if (!a.known.includes(o.id)) a.known.push(o.id);
       }
       if (!o.alive || isHelpless(o)) {
-        w.addMemory(a, "body", o.x, o.z, o.id, 1);
+        const fresh = w.addMemory(a, "body", o.x, o.z, o.id, 1);
         // How badly wrecked, and whether it is one of ours. A man pinned under
         // a heap in the street is a different sight from a body in a ditch.
         const wreck = incapacity(o) * (o.faction === a.faction ? 1.5 : 0.8);
         const heap = Math.min(1, o.pileLoad / 90);
-        a.fear = Math.min(1, a.fear + (0.14 + wreck * 0.22 + heap * 0.2) * (1 - a.courage));
+        // The shock is in the DISCOVERY. This was an event-sized jolt applied
+        // on every tick the body stayed in view -- sixty shocks a second, so a
+        // single man on the ground pinned every witness at maximum fear for as
+        // long as he lay there. A panicking crowd sprints, and sprinting
+        // bodies fall over, which made more bodies: the sight of the fallen
+        // was manufacturing the thing it was reacting to.
+        const shock = (0.14 + wreck * 0.22 + heap * 0.2) * (1 - a.courage);
+        a.fear = Math.min(1, a.fear + (fresh ? shock : shock * BODY_DREAD_RATE * dt));
         if (a.faction === "guard" && o.faction === "guard" && a.shoutCd <= 0) {
           a.alert = 1;
           a.shoutCd = 4;
@@ -521,25 +569,43 @@ function stepAI(w: World, dt: number) {
       a.intendSpeed = 0;
       continue;
     }
-    a.aiT -= dt;
-    a.fear = clamp(a.fear - dt * 0.05, 0, 1);
-    const nearbyFire = closestFire(w, a.x, a.z);
-    if (nearbyFire && nearbyFire.d < 3.2) {
-      const dx = a.x - nearbyFire.x;
-      const dz = a.z - nearbyFire.z;
-      const m = Math.hypot(dx, dz) || 1;
-      a.intendX = dx / m;
-      a.intendZ = dz / m;
-      a.intendSpeed = 5;
-      a.ai = "flee";
-      continue;
-    }
-    if (a.species !== "human") {
-      beastAI(w, a, dt);
-      continue;
-    }
-    humanAI(w, a, dt, nearbyFire);
+    const prevSpeed = a.intendSpeed;
+    decideAI(w, a, dt);
+    // Intent is not achievement. Every AI path assigns a speed outright, so a
+    // startled villager went from standing to a 5.4 m/s sprint inside one tick
+    // -- near four g. The gait target leapt a stride ahead of the body it
+    // belonged to, the pose error read as "physically overpowered", and the
+    // villager face-planted; the fallen then frightened everyone who could see
+    // them, which produced more sprinting, which produced more falling. What a
+    // body may ASK for is unbounded. What its legs deliver is not, and a
+    // damaged leg is slow off the mark as well as slow at speed.
+    const want = a.intendSpeed;
+    const limit =
+      want > prevSpeed ? GROUND_ACCEL * (0.3 + 0.7 * legMotor(a)) * dt : GROUND_BRAKE * dt;
+    a.intendSpeed = clamp(want, prevSpeed - limit, prevSpeed + limit);
   }
+}
+
+/** One actor's AI decision for this tick. Sets intent; does not bound it. */
+function decideAI(w: World, a: Actor, dt: number) {
+  a.aiT -= dt;
+  a.fear = clamp(a.fear - dt * 0.05, 0, 1);
+  const nearbyFire = closestFire(w, a.x, a.z);
+  if (nearbyFire && nearbyFire.d < 3.2) {
+    const dx = a.x - nearbyFire.x;
+    const dz = a.z - nearbyFire.z;
+    const m = Math.hypot(dx, dz) || 1;
+    a.intendX = dx / m;
+    a.intendZ = dz / m;
+    a.intendSpeed = 5;
+    a.ai = "flee";
+    return;
+  }
+  if (a.species !== "human") {
+    beastAI(w, a, dt);
+    return;
+  }
+  humanAI(w, a, dt, nearbyFire);
 }
 
 function closestFire(w: World, x: number, z: number) {
@@ -602,9 +668,12 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     const m = Math.hypot(awayX, awayZ) || 1;
     seek(w, a, a.x + (awayX / m) * 10, a.z + (awayZ / m) * 10, 5.4);
     if (a.shoutCd <= 0) {
+      // One scream, one channel. `spreadFear` used to run here as well,
+      // applying the identical +0.2*(1-courage) that the scream sound already
+      // delivers on arrival -- the same event billed twice, and the second
+      // copy had no distance falloff or hearing model behind it.
       w.emitSound(a.x, a.z, 0.9, "scream", a.id);
       a.shoutCd = 2.4;
-      spreadFear(w, a);
     }
     return;
   }
@@ -920,7 +989,7 @@ function spreadFear(w: World, a: Actor) {
   }
 }
 
-function beastAI(w: World, a: Actor, _dt: number) {
+function beastAI(w: World, a: Actor, dt: number) {
   if (a.species === "deer" || a.species === "goat" || a.species === "pig" || a.species === "cow") {
     const threat = w.nearby(a.x, a.z, a.species === "deer" ? 14 : 8).find((o) => {
       if (o.id === a.id || !o.alive) return false;
@@ -935,7 +1004,13 @@ function beastAI(w: World, a: Actor, _dt: number) {
     const fire = closestFire(w, a.x, a.z);
     if (threat || (fire && fire.d < 8) || a.fear > 0.4) {
       a.ai = "flee";
-      a.fear = Math.min(1, a.fear + 0.3);
+      // Only a real cause adds fear, and it adds it as a RATE. A flat 0.3 every
+      // tick meant the `a.fear > 0.4` arm of this very condition fed itself:
+      // once an animal crossed 0.4 it manufactured its own terror at 18/s
+      // against a decay of 0.05/s, so it could never calm down again -- and it
+      // screamed the whole time, which is what pushed every human in earshot
+      // into the same state.
+      if (threat || (fire && fire.d < 8)) a.fear = Math.min(1, a.fear + 0.9 * dt);
       const tx = threat ? threat.x : fire ? fire.x : a.x;
       const tz = threat ? threat.z : fire ? fire.z : a.z;
       seek(w, a, a.x + (a.x - tx) * 2, a.z + (a.z - tz) * 2, a.species === "cow" ? 4.2 : 6.5);
@@ -2403,11 +2478,21 @@ function stepStructures(w: World, dt: number) {
     }
     if (failed && live - failed > 0) w.whisper("Timber groans overhead.");
 
-    // The building is gone when nothing elevated is left standing on it.
+    // The building is gone when none of its parts are left.
+    //
+    // `FOUNDED_Y` answers "is this part carried by the support group?" -- a
+    // question about load. Asking it here made it answer "does this part still
+    // exist?", which is a different question, and it got a wrong answer for
+    // every structure that has nothing elevated in the first place. The bridge
+    // is the proof: a deck at 0.15 m on piers sunk to -0.80 m has no part above
+    // FOUNDED_Y at all, so it read as already destroyed on the first tick of
+    // every game -- announcing its own collapse, frightening the whole map, and
+    // igniting a panic that never ended. A part that has not collapsed is still
+    // standing, whatever height it stands at.
     let standing = 0;
     for (const id of b.parts) {
       const p = w.prop(id);
-      if (p && !p.collapsed && p.y > FOUNDED_Y) standing++;
+      if (p && !p.collapsed) standing++;
     }
     if (standing === 0) {
       b.collapsed = true;

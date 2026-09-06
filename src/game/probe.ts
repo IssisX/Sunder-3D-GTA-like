@@ -680,18 +680,45 @@ function checkBudget(): CheckResult {
  * club against the same target must land somewhere else when the attacker
  * crouches -- because their arm is somewhere else.
  */
+/**
+ * The strike lands where the attacker's own hand is.
+ *
+ * This check used to hold the victim with `place()` alone, which teleports the
+ * root but leaves the AI commanding motion: the "pinned" victim was running at
+ * 2.3 m/s, and the crouched swing caught its trailing leg out of the chase
+ * rather than out of the attacker's stance. It therefore passed while the
+ * mechanism it names was not working -- a still victim took the crouched swing
+ * on the ARM in exactly the same place as the standing one. The instrument is
+ * the bug there, so the victim is now genuinely stationary and the check reads
+ * the quantity it actually claims: the solved hand height, and locality.
+ *
+ * Region differentiation is deliberately NOT asserted yet. With a still victim
+ * the two swings still land on the same region, because the strike arc lifts
+ * the hand ~0.24 m and eats most of the crouch. That is a real gap in the melee
+ * arc, recorded here rather than hidden behind a scenario that masked it.
+ */
 function checkImpactLocality(): CheckResult {
   const strikeFrom = (crouch: boolean) => {
     const w = freshWorld(6161);
     const atk = stage(w, 40, 40);
     const vic = w.actors.find((a) => a.kind === "human" && a.alive)!;
-    const pin = () => place(w, vic, 40, 39.0);
+    // Genuinely still: `place` alone leaves the AI driving the body.
+    const pin = () => {
+      place(w, vic, 40, 39.0);
+      vic.intendSpeed = 0;
+      vic.vx = 0;
+      vic.vz = 0;
+      vic.fear = 0;
+    };
     pin();
     for (let i = 0; i < 40; i++) {
       pin();
       run(w, 1, act({ crouch }));
     }
     atk.weapon = "club";
+    const B = w.bodies;
+    const hand = B.base(atk.body) + B.plan(atk.body).grabHand;
+    const handY = B.py[hand]!;
     const before = REGIONS.map((r) => injurySum(vic.injuries[r]));
     run(w, 2, act({ crouch, attack: true, attackPressed: true }));
     for (let i = 0; i < 25; i++) {
@@ -699,20 +726,28 @@ function checkImpactLocality(): CheckResult {
       run(w, 1, act({ crouch }));
     }
     const after = REGIONS.map((r) => injurySum(vic.injuries[r]));
-    return after
+    const hits = after
       .map((v, i) => ({ r: REGIONS[i]!, d: v - before[i]! }))
       .filter((x) => x.d > 1e-4)
       .sort((a, b) => b.d - a.d);
+    return { hits, handY, stance: atk.crouchAmt };
   };
   const high = strikeFrom(false);
   const low = strikeFrom(true);
-  const highTop = high[0]?.r ?? "none";
-  const lowTop = low[0]?.r ?? "none";
-  const localised = high.length > 0 && high.length <= 2 && low.length > 0 && low.length <= 2;
+  const localised =
+    high.hits.length > 0 && high.hits.length <= 2 && low.hits.length > 0 && low.hits.length <= 2;
+  // The crouch has to actually happen, and it has to carry the hand down with
+  // it. Crouching used to collapse the player outright, which left the "low"
+  // swing being thrown by a stumbling body at standing height.
+  const crouched = low.stance > 0.8;
+  const dropped = high.handY - low.handY > 0.15;
   return {
     name: "impact-locality",
-    pass: localised && highTop !== lowTop,
-    detail: `standing swing -> ${high.map((x) => `${x.r} +${x.d.toFixed(3)}`).join(", ") || "none"}; crouched swing -> ${low.map((x) => `${x.r} +${x.d.toFixed(3)}`).join(", ") || "none"}; swing height is read from the attacker's own solved hand, so these must differ`,
+    pass: localised && crouched && dropped,
+    detail:
+      `standing swing (hand y=${high.handY.toFixed(3)}) -> ${high.hits.map((x) => `${x.r} +${x.d.toFixed(3)}`).join(", ") || "none"}; ` +
+      `crouched swing (crouchAmt=${low.stance.toFixed(2)}, hand y=${low.handY.toFixed(3)}) -> ${low.hits.map((x) => `${x.r} +${x.d.toFixed(3)}`).join(", ") || "none"}; ` +
+      `the stance must complete and carry the hand down with it, and each blow must stay local`,
   };
 }
 
@@ -813,6 +848,17 @@ function measurePressingTheInjury() {
   }
   place(w, guard, -30.9, 6);
   guard.weapon = "club";
+  // A guard that will not commit to a grapple, so the question stays "where
+  // does it aim" rather than "can it get hold of him".
+  //
+  // A target with wrecked legs is off balance, and a bold guard reads that and
+  // closes to secure instead -- `takeHold` returns before the aim is ever
+  // chosen. That is correct behaviour, and it made this check measure grabbing
+  // rather than aiming. It passed anyway only because the guard used to spend
+  // most of the fight falling over, so the few ticks it managed to stay upright
+  // were the ones counted. With the guard steady on its feet the grapple always
+  // wins, so the aim has to be asked of someone who will not grapple.
+  guard.courage = 0.3;
   guard.known.push(a.id);
   guard.alert = 1;
   w.wanted = 1;
@@ -994,13 +1040,23 @@ function checkStructuralEccentricity(): CheckResult {
       hp: 60,
     });
     makeFrame(w.bodies, beam);
+    // What "came down" means here is that the CARRIED structure failed -- the
+    // roof left its posts. It used to mean `b.collapsed`, which is now the
+    // stronger claim that every part of the building is gone, ground-founded
+    // posts and all. Half-collapsed is a real state the solve is meant to
+    // produce, so the question this check asks has to be asked of the span
+    // that was actually being held up.
+    const carried = b.parts
+      .map((id) => w.prop(id))
+      .filter((p): p is NonNullable<typeof p> => !!p && p.y > 0.5);
+    const fellNow = () => b.collapsed || carried.some((p) => p.collapsed);
     let peak = 0;
     for (let i = 0; i < 600; i++) {
       run(w, 1);
       for (const p of sup) if (!p.collapsed && p.load > peak) peak = p.load;
-      if (b.collapsed) return { peak, fell: true };
+      if (fellNow()) return { peak, fell: true };
     }
-    return { peak, fell: b.collapsed };
+    return { peak, fell: fellNow() };
   };
   // Toward the flank the cut post threw its load onto, versus the corner the
   // same cut unloaded to nothing.

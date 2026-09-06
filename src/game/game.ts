@@ -288,6 +288,12 @@ export class Game {
 
   private flushSave() {
     const p = this.world.player();
+    // Never overwrite a resumable save with an unresumable one. Once the
+    // player is dead or being carried off, the last state worth returning to
+    // is the one already on disk -- the autosave timer does not stop just
+    // because the run has ended, so without this the four-second tick would
+    // faithfully record the corpse.
+    if (!p.alive || this.world.phase === "dead" || this.world.phase === "captured") return;
     writeSave({
       version: 1,
       time: this.world.time,

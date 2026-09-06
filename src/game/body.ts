@@ -41,6 +41,23 @@ export const MAX_NODES = 11;
 export const MAX_FRAMES = 128;
 const MAX_BONES = 32;
 const MAX_LIMITS = 8;
+/**
+ * How far above the lowest contact a node still counts as standing on the
+ * ground, m. A foot bearing no load this instant is still a foot on the floor,
+ * and the base of support is where the body's parts ARE, not where the solver
+ * happened to bill an impulse.
+ */
+const SUPPORT_REST_TOL = 0.06;
+/**
+ * Horizontal speed under which such a node counts as RESTING there, m^2/s^2.
+ *
+ * Height alone is not enough: a swing foot passes low through the bottom of
+ * every stride, and counting it as support widens the base with a foot that is
+ * still in flight -- which flatters the balance test and shortens the stride
+ * the walker thinks it needs. A foot that is bearing is also a foot that is
+ * not going anywhere.
+ */
+const SUPPORT_REST_V2 = 0.12;
 /** Colliders cached per body between broadphase gathers. */
 const MAX_NEAR = 32;
 
@@ -693,21 +710,39 @@ export class Bodies {
     let m = 0;
     let lowest = Infinity;
     let patch = 0;
+    // Where the ground is, from whatever actually registered contact.
     for (let i = 0; i < n; i++) {
       const k = b + i;
       if (!this.touched[k]) continue;
-      this.hullX[m] = this.px[k]!;
-      this.hullZ[m] = this.pz[k]!;
-      patch += this.patch[k]!;
       if (this.py[k]! < lowest) lowest = this.py[k]!;
-      m++;
     }
-    if (m === 0) {
+    if (lowest === Infinity) {
       // Airborne. There is no base of support to be inside or outside of, so
       // this is not a balance failure -- it is flight, and the landing decides.
       this.supportCount[slot] = 0;
       this.margin[slot] = -0.5;
       return -0.5;
+    }
+    // A part resting ON that ground is support whether or not it happened to
+    // register an impulse this tick. Taking only the nodes with a live contact
+    // meant a momentarily unloaded foot left the base -- and unloading a foot
+    // for a moment is exactly what a crouch, a weight shift or a slow step
+    // does. The base then collapsed to a single point, and a one-point base
+    // puts the capture point outside it for any lean at all: the body read as
+    // falling while standing still. Crouching alone was enough to put the
+    // player on the floor.
+    for (let i = 0; i < n; i++) {
+      const k = b + i;
+      if (!this.touched[k]) {
+        if (this.py[k]! > lowest + SUPPORT_REST_TOL) continue;
+        const vx = this.vnx[k]!;
+        const vz = this.vnz[k]!;
+        if (vx * vx + vz * vz > SUPPORT_REST_V2) continue;
+      }
+      this.hullX[m] = this.px[k]!;
+      this.hullZ[m] = this.pz[k]!;
+      patch += this.patch[k]!;
+      m++;
     }
     this.supportCount[slot] = m;
     // Anticipated base of support.

@@ -36,6 +36,20 @@ export interface SaveBlob {
   wanted: number;
 }
 
+/**
+ * The state a reloaded body is guaranteed to wake in.
+ *
+ * A save is a place you can resume from. Writing blood and consciousness
+ * verbatim meant an autosave taken while you were bleeding out restored you
+ * into the same dying second every time: the first tick after the load ran
+ * the injury step, found blood at or under the death threshold, and killed
+ * you with "you bled out" before you had a frame of control. Blood never
+ * regenerates fast enough to outrun that, so the load was unwinnable -- not
+ * hard, unwinnable. Waking weak is a resumable state; waking dead is not.
+ */
+const REVIVE_BLOOD = 0.35;
+const REVIVE_CONSCIOUSNESS = 0.6;
+
 export function loadSave(): SaveBlob | null {
   try {
     const raw = localStorage.getItem(KEY);
@@ -55,6 +69,18 @@ export function loadSave(): SaveBlob | null {
     if (!Number.isFinite(data.player.consciousness)) {
       const blood = Number.isFinite(data.player.blood) ? data.player.blood : 1;
       data.player.consciousness = blood < 0.25 ? Math.max(0, Math.min(1, blood * 2)) : 1;
+    }
+    // Wake viable. Applied on READ so that saves already written into a dying
+    // state -- which is exactly the save anyone who died holding the autosave
+    // timer is carrying -- become resumable instead of staying a loop.
+    if (!Number.isFinite(data.player.blood) || data.player.blood < REVIVE_BLOOD) {
+      data.player.blood = REVIVE_BLOOD;
+    }
+    if (
+      !Number.isFinite(data.player.consciousness) ||
+      data.player.consciousness < REVIVE_CONSCIOUSNESS
+    ) {
+      data.player.consciousness = REVIVE_CONSCIOUSNESS;
     }
     return data;
   } catch {

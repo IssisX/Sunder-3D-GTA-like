@@ -382,16 +382,30 @@ export class World {
     });
   }
 
-  addMemory(a: Actor, kind: Memory["kind"], x: number, z: number, who: number, certainty: number) {
+  /**
+   * Records what this actor now knows. Returns true when this is the FIRST
+   * time they have known it, which is what separates a discovery from a thing
+   * they have been looking at for a while -- the difference between the shock
+   * of finding a body and the sight of one lying where it has lain a minute.
+   */
+  addMemory(
+    a: Actor,
+    kind: Memory["kind"],
+    x: number,
+    z: number,
+    who: number,
+    certainty: number,
+  ): boolean {
     const existing = a.memories.find((m) => m.kind === kind && m.who === who);
     if (existing) {
       existing.x = x;
       existing.z = z;
       existing.t = this.time;
       existing.certainty = Math.max(existing.certainty, certainty);
-      return;
+      return false;
     }
     this.remember(a, { kind, x, z, who, certainty });
+    return true;
   }
 
   inWater(x: number, z: number, y: number) {

@@ -81,6 +81,20 @@ const OFF_BALANCE_DEEP = -0.19;
  * physically overpowered and the stance is lost.
  */
 const POSE_LOST = 0.34;
+/**
+ * Share of the stride a body can throw ahead of itself to catch a capture
+ * point that has left its base, dimensionless.
+ *
+ * The reach is the STRIDE, not a fixed distance: a walking body reclaims what
+ * a walking step covers, a running one covers more, and a body standing still
+ * has no step in flight to land on and goes down from a shove exactly as it
+ * always did. Reusing `strideAmp` for this rather than inventing a length
+ * keeps one gait law in one place -- the same number that decides where the
+ * foot is going decides whether it gets there in time.
+ */
+const CATCH_STRIDES = 2.2;
+/** How fast a body settles into or out of a crouch, s^-1. */
+const CROUCH_RATE = 6;
 /** Closing speed, m/s, above which a contact interrupts a get-up. */
 const KNOCK_V = 3.4;
 /** Landing speed a fully able pair of legs can absorb without going down, m/s. */
@@ -213,8 +227,16 @@ function writePose(w: World, a: Actor, dt: number) {
   const s = B.scale[slot]!;
   const n = B.count[slot]!;
   // The raw crouch input is a boolean; smoothing it keeps an instant keypress
-  // from asking the solver for a pose change no body could make.
-  a.crouchAmt += ((a.crouch ? 1 : 0) - a.crouchAmt) * 0.22;
+  // from asking the solver for a pose change no body could make. The rate is
+  // a real one: a squat takes about four tenths of a second, and asking for it
+  // in a twentieth (which a flat 0.22 per tick was) drops the pose target
+  // through the body faster than the legs can follow it down. The body then
+  // chased its own target at better than half a metre per second, the capture
+  // point left the base, and the balance controller -- correctly, on the
+  // numbers it was given -- called it a fall. Crouching put the player on the
+  // floor. Done as a rate rather than a per-tick fraction so it does not
+  // depend on the step length.
+  a.crouchAmt += ((a.crouch ? 1 : 0) - a.crouchAmt) * (1 - Math.exp(-dt * CROUCH_RATE));
   // The gait clock lives with the gait pose so the two cannot disagree. Damaged
   // legs lengthen their own stance phase, which is what makes a limp read as a
   // limp rather than as a slower walk.
@@ -913,7 +935,21 @@ function consume(w: World, a: Actor, dt: number) {
     } else if (peak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
       collapse(w, a, 0.35 + peak * 0.04);
     } else if (losing) {
-      if (margin < FALL_MARGIN || a.consciousness < STANCE_CONSCIOUS) {
+      // A capture point outside the base is not yet a fall. A body catches
+      // itself by planting a foot, so what decides the excursion is whether a
+      // foot can still reach it -- and walking puts the capture point outside
+      // the stance foot on every single stride. Judged against the current
+      // base alone, ordinary walking read as falling, and villagers went down
+      // at a walking pace on flat ground; the fallen frightened everyone who
+      // saw them, and the fright produced more walking bodies to fall over.
+      // Leg motor sets the reach, so this is also why a sound body strides
+      // through what puts a damaged one on the floor.
+      const catchReach =
+        strideAmp(a.intendSpeed, B.scale[slot]!) *
+        CATCH_STRIDES *
+        legMotor(a) *
+        (a.stamina > 0.03 ? 1 : 0.4);
+      if (margin < FALL_MARGIN - catchReach || a.consciousness < STANCE_CONSCIOUS) {
         collapse(w, a);
       } else if (a.catchT <= 0) {
         const lm = legMotor(a);
