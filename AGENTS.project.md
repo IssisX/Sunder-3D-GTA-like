@@ -6,7 +6,21 @@ These instructions govern work on this repository in addition to `AGENTS.md`.
 
 For every substantive SUNDER development response, begin the technical reasoning from the canonical advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
 
+Classify from the user's actual objective breadth before mechanism availability. If success materially spans three or more interacting gameplay/simulation capabilities or systems, treat the work as broad compound integration even when one deep mechanism can provide their shared authoritative truth. Do not narrow an inherently multi-system objective merely because one useful local mechanism appears first.
+
 Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
+
+## COMPOUND INTEGRATION LAW
+
+For broad compound work, depth is causal, not numeric. Require at least three consequential system roles on one authoritative causal graph with a state-changing `A -> B -> C` path or justified feedback loop. One scalar or event fanning out to several passive readers, effects, presentation channels, or independent reactions is reuse/expression, not proof of compound integration.
+
+Prefer one deeper mechanical truth that naturally couples several roles over several parallel mechanisms when it preserves the user's objective. A new physical quantity does not need an artificial reader quota in legitimate focused/leaf work. In compound work, it earns its place by participating in state-changing causal propagation across the connected mechanism.
+
+Examples:
+- reuse only: `impact -> camera`, `impact -> audio`, `impact -> particles`;
+- compound coupling: `contact/load -> support/balance -> motor authority -> pose/locomotion`, with the same physical evidence also able to alter `injury/capability -> AI response`.
+
+Consequence count alone does not establish depth. Three passive readouts are still one feature. Mechanic/substrate value comes from authoritative state transfer, feedback, unplanned consequence, and player-visible control or failure.
 
 ## ONE-BINARY-CHECK LAW
 
