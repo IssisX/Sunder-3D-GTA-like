@@ -60,7 +60,9 @@ function calmCrowdAI(a: Actor) {
     (a.ai === "idle" ||
       a.ai === "wander" ||
       a.ai === "work" ||
+      a.ai === "wary" ||
       a.ai === "investigate" ||
+      a.ai === "warn" ||
       a.ai === "search")
   );
 }

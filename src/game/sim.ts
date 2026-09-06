@@ -32,6 +32,10 @@ import {
 
 const CAM_FORWARD = (yaw: number) => facing(yaw);
 const STEP_UP = 0.48;
+const GUARD_CHALLENGE_DURATION = 4.2;
+const GUARD_CHALLENGE_GRACE = 0.8;
+const GUARD_CHALLENGE_MIN = 2.05;
+const GUARD_CHALLENGE_MAX = 3.25;
 
 export interface Cam {
   yaw: number;
@@ -354,6 +358,81 @@ function activeThreatEvidence(a: Actor, o: Actor, w: World) {
   );
 }
 
+function latestLocalIncident(a: Actor, o: Actor, w: World) {
+  let best: Actor["memories"][number] | null = null;
+  for (const m of a.memories) {
+    if (
+      m.who !== o.id ||
+      (m.kind !== "threat" && m.kind !== "theft") ||
+      w.time - m.t > 7 ||
+      m.certainty <= 0.3
+    ) continue;
+    if (!best || m.t > best.t) best = m;
+  }
+  return best;
+}
+
+function canConfront(a: Actor, o: Actor, w: World) {
+  const dx = o.x - a.x;
+  const dz = o.z - a.z;
+  const d = Math.hypot(dx, dz);
+  if (d > 9) return false;
+  if (d > 2.2) {
+    const f = facing(a.yaw);
+    if ((dx * f.x + dz * f.z) / d < 0.08) return false;
+  }
+  return d < 3 || canSeeThrough(w, a.x, a.z, o.x, o.z);
+}
+
+function maintainStandoff(a: Actor, o: Actor, min: number, max: number, speed: number) {
+  const dx = o.x - a.x;
+  const dz = o.z - a.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 1e-4) {
+    a.intendSpeed = 0;
+    return d;
+  }
+  if (d > max) return seek(a, o.x, o.z, speed);
+  if (d < min) {
+    return seek(a, a.x - (dx / d) * (min - d + 0.7), a.z - (dz / d) * (min - d + 0.7), speed * 0.82);
+  }
+  a.intendSpeed = 0;
+  a.yaw = lerpAng(a.yaw, Math.atan2(-dx, -dz), 0.25);
+  return d;
+}
+
+function giveSpace(a: Actor, o: Actor, distance: number, speed: number) {
+  const dx = a.x - o.x;
+  const dz = a.z - o.z;
+  const d = Math.hypot(dx, dz);
+  if (d >= distance) {
+    a.intendSpeed = 0;
+    return d;
+  }
+  if (d < 1e-4) {
+    const f = facing(a.yaw);
+    return seek(a, a.x - f.x * distance, a.z - f.z * distance, speed);
+  }
+  return seek(a, a.x + (dx / d) * (distance - d + 0.6), a.z + (dz / d) * (distance - d + 0.6), speed);
+}
+
+function hostileActionNearby(a: Actor, o: Actor) {
+  return (
+    (o.strikeT > 0 || o.kickT > 0 || o.shoveT > 0) &&
+    dist2(a.x, a.z, o.x, o.z) < 3.6 * 3.6
+  );
+}
+
+function markCombatEvidence(w: World, a: Actor, o: Actor) {
+  a.targetId = o.id;
+  a.lastSeenX = o.x;
+  a.lastSeenZ = o.z;
+  a.lastSeenT = w.time;
+  a.alert = 1;
+  w.addMemory(a, "threat", o.x, o.z, o.id, 1);
+  if (!a.known.includes(o.id)) a.known.push(o.id);
+}
+
 function herdThreat(a: Actor, o: Actor, w: World) {
   if (o.species === "wolf" || o.species === "bear") return true;
   if (recentDirectHarm(a, o, w)) return true;
@@ -405,6 +484,8 @@ function stepAI(w: World, dt: number) {
       continue;
     }
     a.aiT -= dt * agentTempoScale(a);
+    a.encounterT = Math.max(0, a.encounterT - dt);
+    if (a.encounterT === 0) a.encounterId = 0;
     a.fear = clamp(a.fear - dt * 0.05, 0, 1);
     const nearbyFire = closestFire(w, a.x, a.z);
     if (nearbyFire && nearbyFire.d < 3.2) {
@@ -492,8 +573,11 @@ function seek(a: Actor, x: number, z: number, speed: number) {
 
 function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d: number } | null) {
   const player = w.player();
-  const seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
-  const hostile = activeThreatEvidence(a, player, w);
+  let seesPlayer = a.targetId === player.id && w.time - a.lastSeenT < 0.6;
+  const directHarm = recentDirectHarm(a, player, w);
+  const threatMemory = recentThreatMemory(a, player, w);
+  let hostile = activeThreatEvidence(a, player, w);
+  if (a.faction === "civilian" && directHarm) a.fear = Math.max(a.fear, 0.96);
   const panic = a.fear > 0.55 + a.courage * 0.35;
   const danger = panic ? panicSource(w, a, fire) : null;
 
@@ -529,7 +613,59 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
     return;
   }
 
+  if (a.faction === "civilian" && !directHarm && threatMemory && a.alert > 0.35) {
+    // A witnessed weapon action makes a civilian create space first. Panic is
+    // reserved for direct harm or a genuinely dangerous local source.
+    a.ai = "wary";
+    giveSpace(a, player, 4.2, 2.6);
+    return;
+  }
+
+  if (a.faction === "guard" && !hostile) {
+    const incident = latestLocalIncident(a, player, w);
+    const seesIncidentActor = canConfront(a, player, w);
+    if (
+      incident &&
+      a.alert > 0.4 &&
+      incident.t > a.encounterSeenT + 1e-4 &&
+      seesIncidentActor
+    ) {
+      // A guard can challenge only someone it can actually see. The timer is
+      // per-agent and bounded, so an old memory cannot become a permanent trap.
+      a.encounterId = player.id;
+      a.encounterT = GUARD_CHALLENGE_DURATION;
+      a.encounterSeenT = incident.t;
+      if (a.shoutCd <= 0) {
+        w.emitSound(a.x, a.z, 0.64, "shout", a.id);
+        a.shoutCd = 3.2;
+      }
+    }
+
+    if (a.encounterId === player.id && a.encounterT > 0) {
+      if (!seesIncidentActor) {
+        a.ai = "investigate";
+        if (incident) seek(a, incident.x, incident.z, 3.6);
+        else a.intendSpeed = 0;
+        return;
+      }
+      const elapsed = GUARD_CHALLENGE_DURATION - a.encounterT;
+      if (elapsed >= GUARD_CHALLENGE_GRACE && hostileActionNearby(a, player)) {
+        markCombatEvidence(w, a, player);
+        a.encounterId = 0;
+        a.encounterT = 0;
+        hostile = true;
+        seesPlayer = true;
+      } else {
+        a.ai = "warn";
+        maintainStandoff(a, player, GUARD_CHALLENGE_MIN, GUARD_CHALLENGE_MAX, 3.3);
+        return;
+      }
+    }
+  }
+
   if (a.faction === "guard" && hostile) {
+    a.encounterId = 0;
+    a.encounterT = 0;
     if (seesPlayer) {
       a.ai = "combat";
       const d = Math.hypot(player.x - a.x, player.z - a.z);

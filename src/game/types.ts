@@ -42,7 +42,9 @@ export type AiState =
   | "idle"
   | "wander"
   | "work"
+  | "wary"
   | "investigate"
+  | "warn"
   | "pursue"
   | "search"
   | "combat"
@@ -180,6 +182,11 @@ export interface Actor {
   wayX: number;
   wayZ: number;
   targetId: number;
+  // A local, non-combat encounter. This is deliberately separate from targetId:
+  // noticing somebody must not silently become permission to attack them.
+  encounterId: number;
+  encounterT: number;
+  encounterSeenT: number;
   lastSeenX: number;
   lastSeenZ: number;
   lastSeenT: number;
