@@ -17,6 +17,7 @@ import { HumanRootAuthority } from "./human-root-authority";
 import { CentroidalLocomotion } from "./centroidal-locomotion";
 import { ActionContinuity } from "./action-continuity";
 import { ReactiveBalance } from "./reactive-balance";
+import { CommittedCatchStep } from "./committed-catch-step";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -25,7 +26,7 @@ import { ReactiveBalance } from "./reactive-balance";
  *   pre-world: snapshot solved humanoid root + input/action/AI intent shaping
  *   world sim: compatibility prediction for legacy game systems
  *   root firewall: discard temporary capsule translation for body-owned humans
- *   post-world/pre-body: locomotion + melee end-effector task generation
+ *   post-world/pre-body: locomotion + capture-step commitment + melee task generation
  *   action continuity: preserve incoming step/momentum through action + recovery
  *   whole-body coupling: support / COM / stance tasks derived from actions
  *   reactive balance: measured COM/momentum/support bend free whole-body tasks
@@ -44,6 +45,7 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly rootAuthority = new HumanRootAuthority();
   private readonly centroidal = new CentroidalLocomotion(this);
   private readonly balance = new ReactiveBalance(this);
+  private readonly catchStep = new CommittedCatchStep(this);
   private playerJumpRequested = false;
 
   override bootstrap(w: World) {
@@ -55,6 +57,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.bootstrap(w);
     this.coupling.bootstrap(w);
     this.continuity.bootstrap(w);
+    this.catchStep.bootstrap(w);
     this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
@@ -68,6 +71,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.clear();
     this.coupling.clear();
     this.continuity.clear();
+    this.catchStep.clear();
     this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
@@ -81,6 +85,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.reset(a);
     this.coupling.reset(a);
     this.continuity.reset(a);
+    this.catchStep.reset(a);
     this.balance.reset(a);
     this.rootAuthority.reset(a);
     if (a.kind === "player") this.playerJumpRequested = false;
@@ -115,8 +120,9 @@ export class ProceduralAnimationController extends AnimationController {
     this.rootAuthority.restoreBodyOwnedRoots(w);
 
     super.prepareBodyStep(w, dt);
-    // Capture the gait-selected footwork before the specialist action wins the
-    // task priorities. This lets the strike inherit the step rather than reset it.
+    // Ordinary gait computes the capture point/foot. Commitment then keeps the
+    // chosen foot and landing coherent before action continuity sees the step.
+    this.catchStep.prepare(w, dt);
     this.continuity.captureLocomotion(w);
     this.melee.prepareStep(w, dt);
     this.coupling.prepare(w);

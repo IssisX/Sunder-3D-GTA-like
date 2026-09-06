@@ -8,11 +8,37 @@ For every substantive SUNDER development response, begin the technical reasoning
 
 Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
 
+## DEEP MECHANICAL LEVERAGE LAW
+
+For every substantive mechanics/kinematics slice, search first for one deeper authoritative mechanical truth already latent in the current source or demanded by the observed defect. Prefer one physical quantity, constraint, contact relationship, support relationship, momentum relationship, or action-continuity mechanism whose consequences naturally propagate into several visible behaviors over adding parallel features or local corrections.
+
+Depth > breadth. Continue deeper only while the next dependency changes what the player can visibly cause, feel, control, or observe. Stop when another layer would buy only abstraction, code volume, mathematical ornament, or a tiny isolated effect. When naturally available, prefer one mechanism that improves three or more visible consequences over three independent fixes.
+
+For locomotion/fighting, lower-body support, foot placement, load transfer, COM control, momentum, inertia, traction, catch steps, and action-to-footwork continuity outrank upper-body polish. Upper-body behavior must remain cohesive, but it may not substitute for unresolved footwork or support mechanics.
+
 ## ONE-BINARY-CHECK LAW
 
 For each substantive change: implement once, run one targeted binary check, report pass/fail, stop. If that check fails, fix once, re-run that same check once, then stop.
 
 No soak tests, confidence reruns, long-horizon proving, duplicate verification, or unrelated test batteries. The check must target the changed causal edge. Full-suite tests and playable builds run only when explicitly required by the task, not automatically for confidence.
+
+## GITHUB MUTATION TRANSACTION LAW
+
+Substantive SUNDER repository changes are atomic Git transactions, not a sequence of convenience writes.
+
+Before any write, read the exact canonical branch HEAD and its tree. Build every changed code/test/instruction/workflow file as an unattached Git blob first. Unattached blobs are scratch data only - they are not staged, delivered, or canonical.
+
+Immediately before promotion, re-read the canonical branch HEAD. If it changed, reconcile the complete change against that new state and rebuild the tree; never overwrite concurrent work. Then create exactly one tree from the current canonical base tree, exactly one commit whose parent is the current canonical HEAD, and move the branch ref exactly once with a normal fast-forward update.
+
+For substantive code transactions, do not use contents-API `create_file`, `update_file`, or `delete_file` convenience writes, because each mutates the shared branch before the complete slice exists. Do not create temp/junk/placeholder files, placeholder commit messages, partial commits, or verification commits. Do not force-update a shared branch in normal development. A force update is permitted only for an explicit, verified recovery operation where no concurrent work can be lost.
+
+Run the targeted check only against the final promoted commit. If a safe Git-data primitive is not currently loaded, discover/load it; do not substitute a lower-integrity shortcut merely because it is convenient.
+
+## SHORTCUT MINIMIZATION LAW
+
+Shortcut, surrogate, fallback, reconstruction, and convenience techniques are last-resort escape hatches, not normal execution strategy. Never trade mechanism quality, canonical provenance, branch integrity, or complete integration for speed or tool convenience when the canonical path is available.
+
+If a shortcut is genuinely unavoidable, use the narrowest one possible, expose it before handoff, and never allow it to become evidence about canonical behavior or a new baseline.
 
 ## DAMAGE MEDIATION LAW
 
