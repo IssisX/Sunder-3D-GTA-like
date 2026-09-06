@@ -14,4 +14,4 @@ registerHooks({
     return { format: 'module', source, shortCircuit: true };
   },
 });
-await import('../tests/substrate/social-incident-probe.ts');
+await import('../tests/substrate/reactive-balance-probe.ts');

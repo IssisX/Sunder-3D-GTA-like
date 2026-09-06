@@ -16,6 +16,7 @@ import { bodyTaskTargets } from "./body-task-targets";
 import { HumanRootAuthority } from "./human-root-authority";
 import { CentroidalLocomotion } from "./centroidal-locomotion";
 import { ActionContinuity } from "./action-continuity";
+import { ReactiveBalance } from "./reactive-balance";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -27,6 +28,7 @@ import { ActionContinuity } from "./action-continuity";
  *   post-world/pre-body: locomotion + melee end-effector task generation
  *   action continuity: preserve incoming step/momentum through action + recovery
  *   whole-body coupling: support / COM / stance tasks derived from actions
+ *   reactive balance: measured COM/momentum/support bend free whole-body tasks
  *   centroidal coupling: acceleration/braking/turning posture from real COM state
  *   task finalization: position + target-velocity field
  *   pre-integration: bounded joint actuation + support translation/yaw wrench
@@ -41,6 +43,7 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly continuity = new ActionContinuity(this);
   private readonly rootAuthority = new HumanRootAuthority();
   private readonly centroidal = new CentroidalLocomotion(this);
+  private readonly balance = new ReactiveBalance(this);
   private playerJumpRequested = false;
 
   override bootstrap(w: World) {
@@ -52,6 +55,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.bootstrap(w);
     this.coupling.bootstrap(w);
     this.continuity.bootstrap(w);
+    this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -64,6 +68,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.clear();
     this.coupling.clear();
     this.continuity.clear();
+    this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -76,6 +81,7 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.reset(a);
     this.coupling.reset(a);
     this.continuity.reset(a);
+    this.balance.reset(a);
     this.rootAuthority.reset(a);
     if (a.kind === "player") this.playerJumpRequested = false;
   }
@@ -117,6 +123,10 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.finishCoupledTasks(w);
     this.continuity.couple(w, dt);
 
+    // Balance is evaluated after action/continuity targets exist. It can bend
+    // the core of an action and recruit genuinely free limbs, but never steals
+    // the fist/foot carrier or a planted contact-critical foot.
+    this.balance.prepare(w, dt);
     this.centroidal.prepare(w, dt);
     bodyTaskTargets.finalizeStep(dt);
 
