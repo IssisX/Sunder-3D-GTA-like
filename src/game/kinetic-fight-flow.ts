@@ -136,10 +136,6 @@ export class KineticFightFlow {
         this.side[slot] = this.candidateSide;
         this.carrierClass[slot] = this.candidateClass;
       } else {
-        // Once the carrier stops requesting travel, existing physical angular
-        // momentum and impact disturbance are allowed to carry the follow-through
-        // briefly. This is not a timed animation pose: the measured body state
-        // decides whether any swing remains worth preserving.
         const angular = clamp01(
           Math.abs(this.state.angularY) / Math.max(1, a.mass * 0.18),
         );
@@ -174,8 +170,6 @@ export class KineticFightFlow {
       const priority = bodyTaskTargets.priorityFor(a, node);
       if (priority < TASK_PRIORITY.ACTION) continue;
       const isFoot = node === BODY.lFoot || node === BODY.rFoot;
-      // CONTACT_CRITICAL feet are support/catch authority, not attack carriers.
-      // The real kick foot remains ACTION priority in MeleeKinematics.
       if (isFoot && priority >= TASK_PRIORITY.CONTACT_CRITICAL) continue;
       const distance = Math.hypot(
         bodyTaskTargets.targetXFor(a, node) - rig.x[node]!,
@@ -189,8 +183,7 @@ export class KineticFightFlow {
       const vz = nodeVelocityComponent(rig.z[node]!, rig.pz[node]!, dt);
       this.candidateNode = node;
       this.candidateClass = isFoot ? FOOT : HAND;
-      this.candidateSide =
-        node === BODY.rHand || node === BODY.rFoot ? 1 : -1;
+      this.candidateSide = node === BODY.rHand || node === BODY.rFoot ? 1 : -1;
       this.candidateDistance = normalized;
       this.candidateSpeed = Math.hypot(vx, vy, vz);
     }
@@ -201,12 +194,7 @@ export class KineticFightFlow {
     }
   }
 
-  private applySwing(
-    a: Actor,
-    rig: BodyRig,
-    slot: number,
-    swing: number,
-  ) {
+  private applySwing(a: Actor, rig: BodyRig, slot: number, swing: number) {
     const side = this.side[slot]!;
     const carrierClass = this.carrierClass[slot]!;
     const scale = bodyScale(a);
@@ -253,9 +241,6 @@ export class KineticFightFlow {
       pivotZ = rig.z[BODY.pelvis]!;
     }
 
-    // The pelvis takes a small arc around the actual support centroid. The feet
-    // themselves are NEVER repositioned here; contact/catch-step authority stays
-    // intact and the body has to earn this rotation through support reaction.
     if (bodyTaskTargets.priorityFor(a, BODY.pelvis) >= TASK_PRIORITY.LOCOMOTION) {
       const px = bodyTaskTargets.targetXFor(a, BODY.pelvis);
       const py = bodyTaskTargets.targetYFor(a, BODY.pelvis);
@@ -272,9 +257,9 @@ export class KineticFightFlow {
       bodyTaskTargets.offerWorld(
         a,
         BODY.pelvis,
-        pivotX + rotatedX + sideX * 0.035 * drive * scale,
+        pivotX + rotatedX + sideX * 0.05 * drive * scale,
         py - 0.018 * drive * scale,
-        pivotZ + rotatedZ + sideZ * 0.035 * drive * scale,
+        pivotZ + rotatedZ + sideZ * 0.05 * drive * scale,
         1,
         TASK_PRIORITY.ACTION,
       );
@@ -304,8 +289,6 @@ export class KineticFightFlow {
       );
     }
 
-    // Lower body participates visibly in hand strikes without inventing a stance.
-    // Whichever knee is actually backed by support compresses and loads the arc.
     if (carrierClass === HAND) {
       if (this.state.leftSupported) this.compressSupportedKnee(a, BODY.lKnee, drive, scale);
       if (this.state.rightSupported) this.compressSupportedKnee(a, BODY.rKnee, drive, scale);
