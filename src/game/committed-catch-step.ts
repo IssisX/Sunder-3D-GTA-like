@@ -1,4 +1,5 @@
 import type { Actor } from "./types";
+import { GRAVITY } from "./types";
 import type { World } from "./world";
 import { BODY, bodyScale, nodeRadius, type BodyRig } from "./body-model";
 import { supportHeight } from "./body-contacts";
@@ -43,11 +44,15 @@ function lerp(a: number, b: number, t: number) {
 /**
  * Adds physical commitment to the existing capture-step planner.
  *
- * AnimationController remains the single source of capture-point direction and
- * candidate foot choice. This layer prevents that already-valid plan from
- * flipping feet or teleporting its landing after the body has committed. The
- * solved foot/contact decides when landing occurs, then ordinary gait takes
- * over only when its next foot targets agree with the new support geometry.
+ * Normal locomotion remains the source of capture-step candidates while the
+ * body is still in follow mode. Once the solved body has already crossed into
+ * stumble, this same authority can derive the missing recovery candidate from
+ * real COM, support and residual momentum instead of letting recovery disappear
+ * simply because ordinary gait generation is suspended.
+ *
+ * The chosen foot cannot flip or teleport its landing after commitment. Actual
+ * solved support confirms landing, the new support accepts load, and ordinary
+ * gait takes over only when its next foot targets agree with that support.
  */
 export class CommittedCatchStep {
   private readonly slotById = new Int16Array(ENTITY_ID_CAP);
@@ -128,7 +133,12 @@ export class CommittedCatchStep {
         if (this.landingFoot[slot]!) continue;
       }
 
-      const candidate = this.correctiveCandidate(a, rig);
+      let candidate = this.correctiveCandidate(a, rig);
+      if (!candidate && (a.loco === "stumble" || rig.mode === "stumble")) {
+        this.offerStumbleCandidate(w, a, rig, scale);
+        candidate = this.correctiveCandidate(a, rig);
+      }
+
       let foot = this.foot[slot]!;
       if (!foot) {
         if (!candidate) continue;
@@ -156,6 +166,130 @@ export class CommittedCatchStep {
 
       this.advanceFlight(w, a, rig, slot, foot, h, scale);
       this.suppressCompetingCatch(a, rig, foot);
+    }
+  }
+
+  private offerStumbleCandidate(
+    w: World,
+    a: Actor,
+    rig: BodyRig,
+    scale: number,
+  ) {
+    if (this.state.supportCount <= 0) return;
+
+    let supportX = 0;
+    let supportZ = 0;
+    if (this.state.leftSupported) {
+      supportX += rig.x[BODY.lFoot]!;
+      supportZ += rig.z[BODY.lFoot]!;
+    }
+    if (this.state.rightSupported) {
+      supportX += rig.x[BODY.rFoot]!;
+      supportZ += rig.z[BODY.rFoot]!;
+    }
+    supportX /= this.state.supportCount;
+    supportZ /= this.state.supportCount;
+
+    let intentX = a.intendX;
+    let intentZ = a.intendZ;
+    const im = Math.hypot(intentX, intentZ);
+    if (im > 1e-5) {
+      intentX /= im;
+      intentZ /= im;
+    } else {
+      intentX = 0;
+      intentZ = 0;
+    }
+
+    const alongIntent = this.state.velX * intentX + this.state.velZ * intentZ;
+    const intendedSpeed = im > 1e-5
+      ? Math.max(0, Math.min(Math.max(0, a.intendSpeed), alongIntent))
+      : 0;
+    const residualVx = this.state.velX - intentX * intendedSpeed;
+    const residualVz = this.state.velZ - intentZ * intendedSpeed;
+    const residualSpeed = Math.hypot(residualVx, residualVz);
+
+    const supportY = Math.min(rig.y[BODY.lFoot]!, rig.y[BODY.rFoot]!);
+    const comH = Math.max(0.42 * scale, this.state.comY - supportY);
+    const omega0 = Math.sqrt(GRAVITY / comH);
+    const captureX = this.state.comX + residualVx / Math.max(1e-5, omega0);
+    const captureZ = this.state.comZ + residualVz / Math.max(1e-5, omega0);
+    let stepX = captureX - supportX;
+    let stepZ = captureZ - supportZ;
+    const error = Math.hypot(stepX, stepZ);
+    const trigger = (0.18 + this.state.supportScore * 0.08) * scale;
+    if (error <= trigger && this.state.disturbance < 0.22) return;
+
+    if (error > 1e-5) {
+      stepX /= error;
+      stepZ /= error;
+    } else if (residualSpeed > 1e-5) {
+      stepX = residualVx / residualSpeed;
+      stepZ = residualVz / residualSpeed;
+    } else if (im > 1e-5) {
+      stepX = intentX;
+      stepZ = intentZ;
+    } else {
+      stepX = -Math.sin(a.yaw);
+      stepZ = -Math.cos(a.yaw);
+    }
+
+    let foot: 1 | 2;
+    if (this.state.leftSupported && !this.state.rightSupported) {
+      foot = 2;
+    } else if (this.state.rightSupported && !this.state.leftSupported) {
+      foot = 1;
+    } else {
+      const rx = Math.cos(a.yaw);
+      const rz = -Math.sin(a.yaw);
+      const lateral = stepX * rx + stepZ * rz;
+      if (Math.abs(lateral) > 0.18) {
+        foot = lateral > 0 ? 2 : 1;
+      } else {
+        const leftAlong =
+          (rig.x[BODY.lFoot]! - supportX) * stepX +
+          (rig.z[BODY.lFoot]! - supportZ) * stepZ;
+        const rightAlong =
+          (rig.x[BODY.rFoot]! - supportX) * stepX +
+          (rig.z[BODY.rFoot]! - supportZ) * stepZ;
+        foot = leftAlong <= rightAlong ? 1 : 2;
+      }
+    }
+
+    const speedN = clamp01(Math.max(a.intendSpeed, residualSpeed) / 6.3);
+    const maxStep = (0.48 + speedN * 0.28) * scale;
+    const step = Math.min(
+      maxStep,
+      Math.max(0.28 * scale, error + speedN * 0.1 * scale),
+    );
+    const tx = supportX + stepX * step + intentX * speedN * 0.06 * scale;
+    const tz = supportZ + stepZ * step + intentZ * speedN * 0.06 * scale;
+    const node = foot === 1 ? BODY.lFoot : BODY.rFoot;
+    const floor = supportHeight(w, tx, rig.y[node]! + 0.7 * scale, tz);
+    bodyTaskTargets.offerWorld(
+      a,
+      node,
+      tx,
+      floor + nodeRadius(a, node) + 0.04 * scale,
+      tz,
+      1,
+      TASK_PRIORITY.CORRECTIVE_STEP,
+    );
+
+    const supportNode = foot === 1 ? BODY.rFoot : BODY.lFoot;
+    const supportStillValid = foot === 1
+      ? this.state.rightSupported
+      : this.state.leftSupported;
+    if (supportStillValid) {
+      bodyTaskTargets.offerWorld(
+        a,
+        supportNode,
+        rig.x[supportNode]!,
+        rig.y[supportNode]!,
+        rig.z[supportNode]!,
+        1,
+        TASK_PRIORITY.CONTACT_CRITICAL,
+      );
     }
   }
 

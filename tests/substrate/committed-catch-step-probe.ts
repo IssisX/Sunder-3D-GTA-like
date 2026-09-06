@@ -6,8 +6,10 @@ import { STEP } from '../../src/game/types';
 import { BODY, PhysicalBodies } from '../../src/game/body';
 import { bodyTaskTargets, TASK_PRIORITY }
   from '../../src/game/body-task-targets';
-import { CommittedCatchStep, EDGES }
+import { CommittedCatchStep, EDGES as CATCH_EDGES }
   from '../../src/game/committed-catch-step';
+import { HumanRootAuthority, EDGES as ROOT_EDGES }
+  from '../../src/game/human-root-authority';
 
 function isolated() {
   const w = new World();
@@ -46,7 +48,7 @@ function offer(
   bodyTaskTargets.offerWorld(p, node, x, y, z, 1, priority);
 }
 
-function sample(enabled: boolean) {
+function commitmentSample(enabled: boolean) {
   const { w, p, rig, catchStep } = isolated();
   p.intendSpeed = 2.8;
   const lStartX = rig.x[BODY.lFoot]!;
@@ -60,10 +62,9 @@ function sample(enabled: boolean) {
   const rFlipX = rStartX - 0.46;
   const rFlipZ = rStartZ + 0.05;
 
-  const old = EDGES.committedCatchStep;
-  EDGES.committedCatchStep = enabled;
+  const old = CATCH_EDGES.committedCatchStep;
+  CATCH_EDGES.committedCatchStep = enabled;
   try {
-    // Frame 1: the existing capture planner chooses the left foot.
     bodyTaskTargets.beginStep();
     offer(p, BODY.lFoot, lLandingX, lStartY, lLandingZ, TASK_PRIORITY.CORRECTIVE_STEP);
     offer(p, BODY.rFoot, rStartX, rStartY, rStartZ, TASK_PRIORITY.LOCOMOTION);
@@ -71,9 +72,6 @@ function sample(enabled: boolean) {
     const firstLeftPriority = bodyTaskTargets.priorityFor(p, BODY.lFoot);
     const firstLeftMove = footMove(p, rig, BODY.lFoot);
 
-    // Frame 2: a fresh instantaneous planner would flip to the right foot.
-    // A committed physical catch must keep the already-moving left leg and
-    // prevent the support leg from teleporting into a second recovery step.
     bodyTaskTargets.beginStep();
     offer(p, BODY.lFoot, lStartX, lStartY, lStartZ, TASK_PRIORITY.LOCOMOTION);
     offer(p, BODY.rFoot, rFlipX, rStartY, rFlipZ, TASK_PRIORITY.CORRECTIVE_STEP);
@@ -89,9 +87,6 @@ function sample(enabled: boolean) {
     let handoffReleased = false;
 
     if (enabled) {
-      // Put the solved foot at the committed landing. Progress is still allowed
-      // to catch up over several fixed steps; support, not a timer, confirms
-      // that the landing actually happened.
       rig.x[BODY.lFoot] = lLandingX;
       rig.z[BODY.lFoot] = lLandingZ;
       rig.y[BODY.lFoot] = lStartY;
@@ -114,8 +109,6 @@ function sample(enabled: boolean) {
         }
       }
 
-      // Next gait request agrees with the new support: landed foot stays put,
-      // opposite foot wants to move. The catch layer should immediately yield.
       bodyTaskTargets.beginStep();
       offer(p, BODY.lFoot, lLandingX, lStartY, lLandingZ, TASK_PRIORITY.LOCOMOTION);
       offer(p, BODY.rFoot, rStartX + 0.26, rStartY, rStartZ, TASK_PRIORITY.LOCOMOTION);
@@ -138,14 +131,75 @@ function sample(enabled: boolean) {
       handoffReleased,
     };
   } finally {
-    EDGES.committedCatchStep = old;
+    CATCH_EDGES.committedCatchStep = old;
+  }
+}
+
+function stumbleSample(enabled: boolean) {
+  const { w, p, rig, catchStep } = isolated();
+  p.loco = 'stumble';
+  p.intendX = 0;
+  p.intendZ = 0;
+  p.intendSpeed = 0;
+
+  // Same solved pose, but the core carries sideways residual momentum while
+  // both feet are still near support. Ordinary locomotion contributes no task.
+  for (const node of [BODY.pelvis, BODY.chest, BODY.head]) {
+    rig.px[node] = rig.x[node]! - 0.055;
+    rig.pz[node] = rig.z[node]!;
+  }
+
+  const old = CATCH_EDGES.committedCatchStep;
+  CATCH_EDGES.committedCatchStep = enabled;
+  try {
+    bodyTaskTargets.beginStep();
+    catchStep.prepare(w, STEP);
+    const lp = bodyTaskTargets.priorityFor(p, BODY.lFoot);
+    const rp = bodyTaskTargets.priorityFor(p, BODY.rFoot);
+    const selected = lp > TASK_PRIORITY.CORRECTIVE_STEP
+      ? 1
+      : rp > TASK_PRIORITY.CORRECTIVE_STEP
+        ? 2
+        : 0;
+    const selectedNode = selected === 1 ? BODY.lFoot : selected === 2 ? BODY.rFoot : BODY.lFoot;
+    const supportNode = selected === 1 ? BODY.rFoot : BODY.lFoot;
+    return {
+      selected,
+      selectedMove: selected ? footMove(p, rig, selectedNode) : 0,
+      supportPriority: selected ? bodyTaskTargets.priorityFor(p, supportNode) : 0,
+    };
+  } finally {
+    CATCH_EDGES.committedCatchStep = old;
+  }
+}
+
+function recoveryFirewallSample(enabled: boolean) {
+  const { w, p } = isolated();
+  const authority = new HumanRootAuthority();
+  const old = ROOT_EDGES.preserveRecoveryState;
+  ROOT_EDGES.preserveRecoveryState = enabled;
+  try {
+    p.loco = 'stumble';
+    authority.capture(w);
+    p.loco = 'run';
+    authority.restoreBodyOwnedRoots(w);
+    const ordinaryRelabel = p.loco;
+
+    p.loco = 'stumble';
+    authority.capture(w);
+    p.loco = 'ragdoll';
+    authority.restoreBodyOwnedRoots(w);
+    const supersedingState = p.loco;
+    return { ordinaryRelabel, supersedingState };
+  } finally {
+    ROOT_EDGES.preserveRecoveryState = old;
   }
 }
 
 function measure(enabled: boolean) {
   const { w, catchStep } = isolated();
-  const old = EDGES.committedCatchStep;
-  EDGES.committedCatchStep = enabled;
+  const old = CATCH_EDGES.committedCatchStep;
+  CATCH_EDGES.committedCatchStep = enabled;
   try {
     const loops = 32;
     const t0 = performance.now();
@@ -155,18 +209,26 @@ function measure(enabled: boolean) {
     }
     return (performance.now() - t0) / loops;
   } finally {
-    EDGES.committedCatchStep = old;
+    CATCH_EDGES.committedCatchStep = old;
   }
 }
 
-const canonical = sample(true);
-const severed = sample(false);
+const canonical = commitmentSample(true);
+const severed = commitmentSample(false);
+const stumble = stumbleSample(true);
+const stumbleCut = stumbleSample(false);
+const firewall = recoveryFirewallSample(true);
+const firewallCut = recoveryFirewallSample(false);
 const enabledMs = measure(true);
 const severedMs = measure(false);
 
-console.log('PASS committed catch-step glue', {
+console.log('PASS committed catch-step complete seam', {
   canonical,
   severed,
+  stumble,
+  stumbleCut,
+  firewall,
+  firewallCut,
   enabledMsPerPrepare: enabledMs,
   severedMsPerPrepare: severedMs,
   incrementalMsPerPrepare: enabledMs - severedMs,
@@ -185,3 +247,15 @@ assert(canonical.landed && canonical.landingPriority > TASK_PRIORITY.CORRECTIVE_
   'actual support did not complete the committed landing');
 assert(canonical.handoffReleased,
   'landing did not hand back to ordinary gait when support geometry agreed');
+assert(stumble.selected !== 0 && stumble.selectedMove > 0.005,
+  'already-stumbling body did not generate a physical recovery step');
+assert(stumble.supportPriority >= TASK_PRIORITY.CONTACT_CRITICAL,
+  'stumble recovery did not preserve the opposite real support foot');
+assert.equal(stumbleCut.selected, 0,
+  'severing catch authority did not remove stumble recovery footwork');
+assert.equal(firewall.ordinaryRelabel, 'stumble',
+  'legacy speed classification erased body-earned stumble recovery');
+assert.equal(firewallCut.ordinaryRelabel, 'run',
+  'severing recovery-state authority did not expose the legacy relabel');
+assert.equal(firewall.supersedingState, 'ragdoll',
+  'recovery authority blocked a genuine higher-order body transition');
