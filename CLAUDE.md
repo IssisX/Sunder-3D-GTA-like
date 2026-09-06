@@ -30,8 +30,11 @@ obvious to a player. Treat them as the only two ways to lose.
 
 Not "it works". All six, stated explicitly to yourself, in this order:
 
-- **G1 Coupling.** Name ≥2 existing quantities it reads and ≥2 systems that
-  read it. Reads nothing and nothing reads it => it is a leaf => §S4.
+- **G1 Coupling.** Compound work: name ≥3 consequential system roles it binds
+  into one authoritative causal graph, carrying at least one state-changing
+  `A -> B -> C` path or a justified bounded loop. Pure fan-out — one producer
+  read by several passive consumers — does not qualify. Prefer one deeper truth
+  spanning those roles. Legitimate leaf or focused work => §S4.
 - **G2 Severance.** A new phenomenon has an `EDGES` entry and a falsifier in
   `probe.ts` whose measured number **changes when the edge is cut**.
   `npm run test:substrate` green. A phenomenon with no severance test is a
@@ -93,11 +96,15 @@ on every non-trivial task; S4–S5 whenever the work is user-visible.
 
 When several mechanisms would work, rank by:
 
-1. how many existing systems it lets talk to each other;
+1. causal reach and depth — the state-changing roles and edges it creates,
+   counting fan-out to passive readers for nothing;
 2. whether it **removes** a special case rather than adding one;
 3. whether it **generalizes an existing law** rather than paralleling it;
 4. whether it survives §S0.2;
 5. cost.
+
+Prefer one deeper mechanical truth that naturally couples several roles over
+parallel mechanisms, whenever it still preserves the objective.
 
 Standing preferences:
 
@@ -127,19 +134,27 @@ Standing preferences:
 - **One truth, many consumers.** Before adding state, find the existing
   quantity that already means this. Two systems carrying their own version of
   the same truth is a defect (§S5 E5).
-- **Multiplication threshold.** A new physical quantity must be read by ≥3
-  systems within the same change, or it is not a truth — it is a variable.
+- **Multiplication threshold.** In compound work, a new physical quantity must
+  participate in ≥3 consequential system roles across the same causal graph,
+  including at least one state-changing downstream consumer. Three passive or
+  effect-only readers do not qualify — that is one truth displayed three ways,
+  and it is still a variable. Legitimate focused or leaf work carries no
+  artificial reader quota.
 - **No effect invents its own magnitude.** Camera shake, sound, particles,
   decals, hitstop, AI reaction and HUD all read the same recorded event
   numbers. Seven independent versions of one event is the signature of a weak
   implementation, and it is why such impacts never feel heavy.
-- **Grade the work.** 1 consequence = a feature. 3 = a mechanic. Many,
-  including ones you did not enumerate = a substrate. Aim for substrate;
-  accept a mechanic; a feature needs a reason.
+- **Grade the work.** Consequence count alone does not define depth: three
+  passive readouts are still one feature. Mechanic and substrate value comes
+  from state-changing causal propagation and from consequences you did not
+  enumerate. Aim for substrate; accept a mechanic; a feature needs a reason.
 - Worked target shape: one damaged leg should reach stance, gait, reach,
   attack generation, evasion, balance margin, climbing, fall behaviour and
   enemy target selection **through one scalar** — not through nine call sites
-  that each check an injury number.
+  that each check an injury number. Prefer one authoritative scalar or field
+  propagating into many behaviours over call-site conditionals, but fan-out is
+  reuse and expression, not proof of compound coupling. What earns that claim
+  is consumers changing state that other consumers then read.
 
 ---
 
