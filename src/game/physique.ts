@@ -124,6 +124,36 @@ const CATCH_RECOMMIT_COOLDOWN = 0.25;
 const RECOVER_LEAN_MAX = 0.2;
 /** How fast the counterweight engages and relaxes, s^-1: a fast reflex, not a deliberate lean. */
 const RECOVER_RATE = 10;
+/**
+ * Trunk torsion spring, s^-2, and its damping, s^-1.
+ *
+ * The trunk is a sprung linkage between the hips and the shoulder girdle, not
+ * a free joint: loading a foot turns that hip in, turning winds the whole
+ * thing, and it returns when the load comes off. A strike spends what is
+ * stored here, which is why the same button is a different blow depending on
+ * what the body was doing when it was pressed.
+ *
+ * Stability, since this is a new loop (stance -> coil -> strike -> stance):
+ * omega = sqrt(40) = 6.32 rad/s, so omega*dt at 1/60 s is 0.105 -- two orders
+ * inside the explicit-integration limit of 2 -- and zeta = 8/(2*sqrt(40)) =
+ * 0.63 is underdamped enough to snap back rather than ooze. The coil is also
+ * hard-clamped and has its velocity killed at the clamp, so no drive can pump
+ * energy into it without bound.
+ */
+const COIL_SPRING = 40;
+const COIL_DAMP = 8;
+/** Most torsion a trunk will hold, rad. Past this the stance breaks instead. */
+const COIL_MAX = 0.9;
+/** Torsion a fully loaded foot is worth, rad. */
+const COIL_FROM_STANCE = 0.55;
+/** Torsion a turn stores, rad per rad/s of yaw rate. */
+const COIL_FROM_TURN = 0.22;
+/** How far the shoulder girdle drives through a strike, rad. */
+const GIRDLE_THROW = 0.52;
+/** How far the hips travel off the throwing side during a strike, m at unit scale. */
+const WEIGHT_SHIFT = 0.09;
+/** How fast a body with no motor authority gives up its stored torsion, s^-1. */
+const COIL_LIMP_RATE = 6;
 /** How fast a body settles into or out of a crouch, s^-1. */
 const CROUCH_RATE = 6;
 /** Closing speed, m/s, above which a contact interrupts a get-up. */
@@ -228,6 +258,30 @@ export function legMotor(a: Actor) {
 /** Mean motor over the two arms: what grab and strike strength depend on. */
 export function armMotor(a: Actor) {
   return (a.motor.larm + a.motor.rarm) * 0.5;
+}
+
+/**
+ * Where the weight actually sits between the two feet, in [-1, 1]: -1 is
+ * entirely on the left foot, +1 entirely on the right, 0 evenly split.
+ *
+ * Read out of the solved body rather than tracked as its own variable. "Weight
+ * on the back foot" already has a physical meaning here -- it is the centre of
+ * mass projected onto the line joining the feet -- so nothing has to maintain
+ * this, it cannot drift out of agreement with the physics, and it is already
+ * telling the truth during a stumble, a crouch or a catch step.
+ */
+export function stanceLoad(B: Bodies, slot: number): number {
+  const plan = B.plan(slot);
+  const b = B.base(slot);
+  const kl = b + plan.feet[0];
+  const kr = b + plan.feet[1];
+  const ax = B.px[kr]! - B.px[kl]!;
+  const az = B.pz[kr]! - B.pz[kl]!;
+  const d2 = ax * ax + az * az;
+  // Feet together: there is no side for the weight to be on.
+  if (d2 < 1e-6) return 0;
+  const t = ((B.comX[slot]! - B.px[kl]!) * ax + (B.comZ[slot]! - B.pz[kl]!) * az) / d2;
+  return clamp(2 * t - 1, -1, 1);
 }
 
 /**
@@ -390,12 +444,111 @@ function writePose(w: World, a: Actor, dt: number) {
       // knees track the hips down and fold forward; the soles stay put
     }
 
-    // strike: the right arm drives forward through the swing
-    if (a.strikeT > 0) {
-      const k = clamp(a.strikeT / 0.32, 0, 1); // 1 wound up, 0 extended
-      const ext = 1 - k;
-      lz[6] = lz[6]! - (0.16 + ext * 0.62) * s;
-      ly[6] = ly[6]! + (0.34 - ext * 0.1) * s;
+    // Strike: the whole chain throws it, the arm only carries it.
+    //
+    // What the eye reads as a heavy punch is the shoulder girdle driving
+    // through, the hips going with it, the guard hand coming back, the head
+    // turning in, and the rear foot pivoting under the weight it just gave
+    // up. Remove any of those and the identical arm motion reads as a poke,
+    // which is exactly what the previous four lines of right-arm-only pose
+    // produced. The five shapes differ in where the hand travels; all of them
+    // spend the same stored torsion, so which one is worth throwing is a
+    // property of how the body is already standing.
+    if (a.strikeT > 0 && a.strikeDur > 0.01) {
+      const right = a.strikeArm === 1;
+      const side = right ? 1 : -1;
+      const hand = right ? 6 : 4;
+      const guard = right ? 4 : 6;
+      const kind = a.strikeKind | 0;
+      const t = clamp(a.strikeT / a.strikeDur, 0, 1);
+      const u = 1 - t; // 0 on the first frame of the strike, 1 on the last
+      // Wind, drive, return. The hand goes out faster than it comes back: a
+      // thrown arm is fast, a recovered one is deliberate.
+      const wind = clamp((0.3 - u) / 0.3, 0, 1);
+      const drive = clamp((u - 0.24) / 0.4, 0, 1);
+      const back = clamp((u - 0.64) / 0.36, 0, 1);
+      const ext = drive * (1 - back * 0.92);
+      const arc = Math.sin(Math.PI * drive);
+      // A damaged arm throws a shorter punch, through the same motor authority
+      // the solver uses to decide how much of the pose actually happens.
+      const armR = 0.35 + 0.65 * a.motor[right ? "rarm" : "larm"]!;
+
+      // Hand travel in the trunk's own frame, before the girdle turns it.
+      // Reach stays inside the arm's real length: the extra distance a cross
+      // covers comes from the shoulder arriving, not from a longer arm.
+      let hx = 0;
+      let hy = 0;
+      let hz = 0;
+      if (kind === 1) {
+        // cross: rear hand, the straightest line there is
+        hz = -0.62 * ext;
+        hy = 0.3 * ext;
+        hx = -side * 0.12 * ext;
+      } else if (kind === 2) {
+        // hook: travels out, then across, elbow riding high
+        hz = -0.3 * ext - 0.26 * arc;
+        hx = side * (0.2 - 0.62 * ext);
+        hy = 0.34 * ext + 0.12 * arc;
+      } else if (kind === 3) {
+        // uppercut: drops under the guard, then rises through it
+        hz = -0.4 * ext;
+        hy = -0.26 * wind + 0.84 * ext;
+        hx = -side * 0.06 * ext;
+      } else if (kind === 4) {
+        // overhand: loops up and comes down over the top
+        hz = -0.6 * ext;
+        hy = 0.48 * wind + 0.34 * ext + 0.14 * arc;
+        hx = -side * 0.14 * ext;
+      } else {
+        // jab: lead hand, short, straight, first thing back
+        hz = -0.58 * ext;
+        hy = 0.3 * ext;
+        hx = -side * 0.05 * ext;
+      }
+      lx[hand] = lx[hand]! + hx * armR * s;
+      ly[hand] = ly[hand]! + hy * armR * s;
+      lz[hand] = lz[hand]! + hz * armR * s;
+
+      // The guard hand comes back to the chin. An arm left hanging while the
+      // other one throws is the clearest tell that only half a body is acting.
+      const up = Math.max(wind * 0.55, ext);
+      lx[guard] = lx[guard]! + side * 0.12 * ext * s;
+      ly[guard] = ly[guard]! + 0.18 * up * s;
+      lz[guard] = lz[guard]! + 0.18 * ext * s;
+
+      // Shoulder girdle: held back on the stored coil through the wind, driven
+      // through the target by the end. This rotation is what the hand rides,
+      // and it is why the same shape lands differently out of a different
+      // stance -- the coil it starts from is not the same number.
+      const girdle = a.coil * 0.9 * wind - side * GIRDLE_THROW * ext;
+      if (girdle !== 0) {
+        const gc = Math.cos(girdle);
+        const gs = Math.sin(girdle);
+        for (const i of [3, 4, 5, 6]) {
+          const px = lx[i]!;
+          const pz = lz[i]!;
+          lx[i] = px * gc - pz * gs;
+          lz[i] = px * gs + pz * gc;
+        }
+        lx[1] = lx[1]! + gs * 0.05 * s;
+        lx[0] = lx[0]! + gs * 0.08 * s;
+      }
+
+      // Hips travel off the throwing side. This is the weight leaving the rear
+      // foot, and it is the same displacement the support polygon reads, so a
+      // committed punch genuinely costs balance rather than being free.
+      lx[2] = lx[2]! - side * WEIGHT_SHIFT * ext * s;
+      // Chin tucks, head turns into the shot.
+      ly[0] = ly[0]! - 0.04 * ext * s;
+      lz[0] = lz[0]! - 0.05 * ext * s;
+
+      // Rear foot pivots under the weight it is giving up -- only for the
+      // shapes actually driven from the back foot.
+      if (kind === 1 || kind === 4) {
+        const rf = plan.feet[right ? 1 : 0]!;
+        ly[rf] = ly[rf]! + 0.05 * ext * s;
+        lx[rf] = lx[rf]! - side * 0.06 * ext * s;
+      }
     }
     if (a.kickT > 0) {
       const ext = 1 - clamp(a.kickT / 0.28, 0, 1);
@@ -1051,6 +1204,37 @@ function consume(w: World, a: Actor, dt: number) {
     const k = 1 - Math.exp(-dt * RECOVER_RATE);
     a.recoverZ -= a.recoverZ * k;
     a.recoverX -= a.recoverX * k;
+  }
+
+  // --- kinetic chain: what a strike will have to spend ---------------------
+  //
+  // Nothing here knows what a punch is. The trunk simply stores torsion as a
+  // consequence of how the body is standing and turning, and a strike is a
+  // withdrawal from it. That is what makes a combination emerge rather than be
+  // scripted: throwing the left hand unwinds the trunk into a right-loaded
+  // coil, so the cross is the shape the body is now actually set up for, and
+  // the cross reloads it for the hook. Nobody writes 1-2-3 down anywhere.
+  if (controllable) {
+    const load = stanceLoad(B, slot);
+    let dyaw = a.yaw - a.pyaw;
+    while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+    while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+    const turnRate = dt > 1e-6 ? clamp(dyaw / dt, -6, 6) : 0;
+    const target = clamp(
+      -load * COIL_FROM_STANCE + turnRate * COIL_FROM_TURN,
+      -COIL_MAX,
+      COIL_MAX,
+    );
+    a.coilVel += ((target - a.coil) * COIL_SPRING - a.coilVel * COIL_DAMP) * dt;
+    a.coil = clamp(a.coil + a.coilVel * dt, -COIL_MAX, COIL_MAX);
+    // Killing the velocity at the clamp is what bounds the loop: a drive that
+    // keeps pushing the same way cannot accumulate energy past the stop.
+    if (Math.abs(a.coil) >= COIL_MAX && a.coil * a.coilVel > 0) a.coilVel = 0;
+  } else {
+    // A body with no motor authority does not hold torsion.
+    const k = 1 - Math.exp(-dt * COIL_LIMP_RATE);
+    a.coil -= a.coil * k;
+    a.coilVel -= a.coilVel * k;
   }
 
   const catchWasActive = a.catchT > 0;

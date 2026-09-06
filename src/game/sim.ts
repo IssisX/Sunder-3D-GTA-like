@@ -43,6 +43,7 @@ import {
   isControllable,
   legMotor,
   releaseGrab,
+  stanceLoad,
   stepBodies,
   updateMotor,
 } from "./physique";
@@ -789,7 +790,16 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
       a.crouch = low && d < WEAPON_STATS[a.weapon].reach * 1.6 + 0.5;
 
       if (d < WEAPON_STATS[a.weapon].reach + 0.4 && a.attackCd <= 0) {
-        a.strikeT = 0.32;
+        // Enemies throw out of the same chain the player does, so a fight is
+        // two bodies trading shapes their stances actually set up rather than
+        // one varied fighter against a metronome. Their competence still owns
+        // the rate; the stance owns the shape.
+        const sel = chooseStrike(w, a);
+        a.strikeKind = sel.kind;
+        a.strikeArm = sel.arm;
+        a.strikeDur = sel.dur;
+        a.strikeT = sel.dur;
+        a.coilVel -= (sel.arm === 1 ? 1 : -1) * STRIKE_DISCHARGE * STRIKE_GAIN[sel.kind]!;
         a.strikeCd = 0.7 / (0.7 + a.competence);
         a.strikeHit = 0;
         a.attackCd = a.strikeCd;
@@ -1128,6 +1138,7 @@ function beastAI(w: World, a: Actor, dt: number) {
       a.targetId = prey.id;
       const d = seek(w, a, prey.x, prey.z, 6.4 * (0.85 + incapacity(prey) * 0.3));
       if (d < 1.3 && a.attackCd <= 0) {
+        a.strikeDur = 0.28;
         a.strikeT = 0.28;
         a.strikeHit = 0;
         a.attackCd = 0.8;
@@ -1161,6 +1172,7 @@ function beastAI(w: World, a: Actor, dt: number) {
       a.targetId = close.id;
       const d = seek(w, a, close.x, close.z, 5.6);
       if (d < 2 && a.attackCd <= 0) {
+        a.strikeDur = 0.4;
         a.strikeT = 0.4;
         a.strikeHit = 0;
         a.attackCd = 1.1;
@@ -1186,14 +1198,132 @@ function breakFence(w: World, a: Actor) {
   }
 }
 
+/** Trunk torsion, rad, that reads as "fully wound" when scoring shapes. */
+const COIL_REF = 0.9;
+/** Angular impulse a strike withdraws from the chain, rad/s at unit gain. */
+const STRIKE_DISCHARGE = 7;
+
+/**
+ * Which strike the body is actually set up to throw.
+ *
+ * Not a combination table and not a counter. Each shape scores against the
+ * chain state that already exists -- stored torsion, which foot carries the
+ * weight, how low the body is, how hard it is stepping in -- and the best fit
+ * wins. Because throwing unwinds the coil toward the throwing side, the shape
+ * that scores next is the one the previous punch just set up: a left jab
+ * leaves the trunk loaded for the right cross, and the cross reloads it for
+ * the left hook. The 1-2-3 is nowhere in this function; it falls out of where
+ * the weight ended up.
+ *
+ * Deterministic: reads solved state only, no RNG, so a replay throws the same
+ * punches in the same order.
+ */
+function chooseStrike(w: World, a: Actor): { kind: number; arm: number; dur: number } {
+  const load = a.body >= 0 ? stanceLoad(w.bodies, a.body) : 0;
+  const mag = Math.min(1, Math.abs(a.coil) / COIL_REF);
+  const low = a.crouchAmt;
+  const f = facing(a.yaw);
+  // How hard the body is travelling into the shot, 0..1.
+  const along = a.intendX * f.x + a.intendZ * f.z;
+  const adv = clamp((along * a.intendSpeed) / 4, 0, 1);
+  // The loaded hand is the one the coil can unwind toward; the lead hand is
+  // the other one, which is why the jab is thrown with the opposite arm.
+  const loaded = a.coil >= 0 ? 1 : 0;
+  const lead = 1 - loaded;
+  // Weight sitting on the same side as the loaded hand is a rear-foot stance.
+  const rear = clamp(a.coil >= 0 ? load : -load, 0, 1);
+  // Range to whoever is actually in front. This is the discriminator real
+  // striking uses between a straight and a turning punch: a cross needs room
+  // to travel, a hook and an uppercut need the opponent already inside it.
+  // Without it the straights dominated every reachable stance and the turning
+  // shapes could not be thrown at all.
+  let close = 0;
+  for (const o of w.nearby(a.x, a.z, 2.6)) {
+    if (o.id === a.id || !o.alive) continue;
+    const dx = o.x - a.x;
+    const dz = o.z - a.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 2.2 || (dx * f.x + dz * f.z) / (d || 1) < 0.2) continue;
+    close = Math.max(close, clamp((2.2 - d) / 1.1, 0, 1));
+  }
+
+  const sJab = 0.85 - mag * 0.45 - low * 0.3 + adv * 0.25 + close * 0.1;
+  const sCross = mag * 1.3 + rear * 0.35 - low * 0.25 - close * 0.4;
+  const sHook = mag * 0.95 + Math.abs(load) * 0.45 - adv * 0.3 + close * 0.85;
+  const sUpper = low * 1.25 + mag * 0.3 - adv * 0.2 + close * 0.75;
+  const sOver = adv * 1.15 + mag * 0.65 - low * 0.4 - close * 0.3;
+
+  let kind = 0;
+  let best = sJab;
+  if (sCross > best) { kind = 1; best = sCross; }
+  if (sHook > best) { kind = 2; best = sHook; }
+  if (sUpper > best) { kind = 3; best = sUpper; }
+  if (sOver > best) { kind = 4; best = sOver; }
+
+  // The jab is a lead-hand punch by definition; the rest are driven from the
+  // loaded side, which is what makes them cost the stance something.
+  const arm = kind === 0 ? lead : loaded;
+  const dur = kind === 0 ? 0.22 : kind === 1 ? 0.3 : kind === 2 ? 0.34 : kind === 3 ? 0.32 : 0.4;
+  return { kind, arm, dur };
+}
+
+/** Share of the chain a shape spends, and what it costs to throw. */
+const STRIKE_GAIN = [0.6, 1.5, 1.3, 1.1, 1.6];
+const STRIKE_COST = [0.03, 0.06, 0.06, 0.055, 0.08];
+
+/**
+ * Hand speed the kinetic chain actually delivers, m/s.
+ *
+ * This replaces `hypot(vx, vz) + 2.2`, under which a punch's speed was a
+ * property of how fast the body happened to be walking plus a constant -- so a
+ * committed cross out of a loaded stance and a flicked jab off the back foot
+ * arrived at exactly the same speed, and no amount of pose work could make
+ * them land differently. Three real terms instead:
+ *
+ *   spin   the girdle's tangential velocity at the hand's own radius,
+ *          |coilVel| [rad/s] * r [m] = m/s
+ *   carry  what the body is already travelling into the shot, along facing
+ *   push   the arm's own extension, gated by that arm's motor authority
+ *
+ * The radius is measured from the solved trunk to the solved hand rather than
+ * assumed, so a shorter body and a mid-swing arm both report honestly, and the
+ * lever genuinely lengthens as the punch extends.
+ */
+function chainSpeed(w: World, a: Actor, k: number): number {
+  const B = w.bodies;
+  const plan = B.plan(a.body);
+  const chest = B.base(a.body) + plan.chest;
+  const r = Math.hypot(
+    B.px[k]! - B.px[chest]!,
+    B.py[k]! - B.py[chest]!,
+    B.pz[k]! - B.pz[chest]!,
+  );
+  const f = facing(a.yaw);
+  const spin = Math.abs(a.coilVel) * r;
+  const carry = Math.max(0, a.vx * f.x + a.vz * f.z);
+  return spin + carry + 1.2 * armMotor(a);
+}
+
 function stepCombat(w: World, dt: number, input: Actions | null) {
   const p = w.player();
   if (input && p.consciousness > 0.4 && isControllable(p)) {
     if (input.attackPressed && p.strikeCd <= 0) {
-      p.strikeT = 0.3 / WEAPON_STATS[p.weapon].speed;
-      p.strikeCd = 0.42 / WEAPON_STATS[p.weapon].speed;
+      const sel = chooseStrike(w, p);
+      const speed = WEAPON_STATS[p.weapon].speed;
+      p.strikeKind = sel.kind;
+      p.strikeArm = sel.arm;
+      p.strikeDur = sel.dur / speed;
+      p.strikeT = p.strikeDur;
+      // A quick shape recovers quickly, so a jab can be followed while a
+      // committed overhand cannot: the combination's rhythm is a property of
+      // the shapes, not of a queue.
+      p.strikeCd = (sel.dur * 0.92) / speed;
       p.strikeHit = 0;
-      p.stamina = Math.max(0, p.stamina - 0.06);
+      // The withdrawal from the chain. This is what the punch is made of, and
+      // it is what leaves the trunk wound the other way for the next one.
+      const side = sel.arm === 1 ? 1 : -1;
+      p.coilVel -= side * STRIKE_DISCHARGE * STRIKE_GAIN[sel.kind]!;
+      p.stamina = Math.max(0, p.stamina - STRIKE_COST[sel.kind]!);
       w.emitSound(p.x, p.z, 0.35, "weapon", p.id);
     }
     if (input.kickPressed && p.kickT <= 0 && p.grounded) {
@@ -1252,9 +1382,12 @@ function resolveStrikes(w: World) {
     const plan = B.plan(a.body);
     const base = B.base(a.body);
 
-    if (a.strikeT > 0 && a.strikeT < 0.18 && a.strikeT > 0.04) {
+    const strikeDur = a.strikeDur > 0.01 ? a.strikeDur : 0.3;
+    if (a.strikeT > 0 && a.strikeT < strikeDur * 0.6 && a.strikeT > strikeDur * 0.22) {
       const st = WEAPON_STATS[a.weapon] ?? WEAPON_STATS.fist;
-      const k = base + plan.grabHand;
+      // The hand that is actually throwing. A left hook has to land with the
+      // left hand or the contact is a lie the pose already contradicts.
+      const k = base + (plan.hands[a.strikeArm === 0 ? 0 : 1] ?? plan.grabHand);
       // The weapon still lengthens real reach; it no longer substitutes for it.
       const strikerRad = B.rad[k]! + st.reach * 0.35;
       const broad = st.reach * (a.species === "bear" ? 1.6 : 1) + 1.2;
@@ -1264,8 +1397,7 @@ function resolveStrikes(w: World) {
         const node = B.sweptNode(o.body, B.rx[k]!, B.ry[k]!, B.rz[k]!, B.px[k]!, B.py[k]!, B.pz[k]!, strikerRad);
         if (node < 0) continue;
         a.strikeHit |= 1 << (o.id % 30);
-        const speed = Math.hypot(a.vx, a.vz) + 2.2;
-        hitActor(w, a, o, st, speed, "strike", node);
+        hitActor(w, a, o, st, chainSpeed(w, a, k), "strike", node);
       }
     }
 
@@ -1375,6 +1507,13 @@ function hitActor(
   }
   vic.vx += f.x * (jn / vic.mass) * 0.55;
   vic.vz += f.z * (jn / vic.mass) * 0.55;
+  // Newton's third, and the reason a committed punch costs position: the
+  // attacker takes the same impulse back through the arm that delivered it.
+  // Most of it goes to ground through the stance, which is why the share is
+  // small -- but it is not zero, so throwing everything into a shot that lands
+  // on a heavy target genuinely moves you, and the support polygon reads it.
+  atk.vx -= f.x * (jn / atk.mass) * 0.22;
+  atk.vz -= f.z * (jn / atk.mass) * 0.22;
 
   if (st.fire > 0 || atk.torchLit) {
     inj.burn += 0.25;

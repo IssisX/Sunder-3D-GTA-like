@@ -184,6 +184,29 @@ export interface Actor {
   strikeT: number;
   strikeCd: number;
   strikeHit: number;
+  /**
+   * Torsion stored in the trunk, rad: the shoulder girdle wound against the
+   * hips and the planted foot. Signed — positive winds the right shoulder
+   * back, negative the left.
+   *
+   * This is where a strike's power actually comes from. A punch is the last
+   * link of a chain that starts at the ground: the foot pushes, the hips turn,
+   * the trunk unwinds, and the arm only carries the result to the target. The
+   * arm generating its own speed is what made every punch identical and weak.
+   */
+  coil: number;
+  /**
+   * Rate the coil is unwinding, rad/s. A strike converts this into hand speed,
+   * so the same button produces a different blow depending on what the body
+   * had stored when it was pressed.
+   */
+  coilVel: number;
+  /** Strike shape being thrown: 0 jab, 1 cross, 2 hook, 3 uppercut, 4 overhand. */
+  strikeKind: number;
+  /** Hand throwing it: 0 left, 1 right. Chosen by which side the coil can unwind. */
+  strikeArm: number;
+  /** Full duration of the committed strike, s. Each shape carries its own. */
+  strikeDur: number;
   kickT: number;
   shoveT: number;
   vaultT: number;
