@@ -298,6 +298,13 @@ export interface Actor {
   /** Has the caught foot's real touchdown already resynced gait phase this catch. */
   catchLanded: boolean;
   /**
+   * Time remaining, s, before another catch step may commit after the last
+   * one's own timer ran out. See `CATCH_RECOMMIT_COOLDOWN` in physique.ts:
+   * without it, a still-unresolved sway re-triggered a brand new catch every
+   * ~0.36 s, each relocating the foot to a fresh live target, indefinitely.
+   */
+  catchCooldown: number;
+  /**
    * Involuntary balance-recovery lean, forward/back and side/side, m-scale
    * like `leanX`/`leanZ` but a separate channel: `leanX/leanZ` are the body's
    * own voluntary lean (travel, a hauled load) and are assigned outright by

@@ -475,19 +475,39 @@ function measureDragLoad() {
 function checkLocomotion(): CheckResult {
   const runs: string[] = [];
   let ok = true;
-  for (const mode of ["walk", "sprint", "broken leg"] as const) {
+  for (const mode of ["walk", "sprint", "broken leg", "transitions"] as const) {
     const w = freshWorld(4711);
     const a = stage(w, -34, 34); // open ground, clear of the village
     if (mode === "broken leg") a.injuries.lleg.fracture = 0.9;
-    const input = act({ moveY: 1, sprint: mode === "sprint" });
-    run(w, 20, input);
+    const steady = act({ moveY: 1, sprint: mode === "sprint" });
+    // "transitions" is the one mode that never holds one input the whole
+    // time: sprint, ease off, stop, strafe, stop, walk backward, repeat --
+    // ordinary play, not a single held direction. The steady walk / sprint /
+    // broken-leg runs above hold input constant and never caught a real bug
+    // where a catch step's own timer ran out mid-recovery and immediately
+    // recommitted a brand new one, over and over, for as long as a change in
+    // direction kept the body from ever fully settling -- see
+    // CATCH_RECOMMIT_COOLDOWN in physique.ts. That thrash showed up only at
+    // a transition between two different movements, never mid-stride on a
+    // steady one.
+    const inputAt = (i: number): Actions => {
+      if (mode !== "transitions") return steady;
+      const phase = i % 300;
+      if (phase < 90) return act({ moveY: 1, sprint: true });
+      if (phase < 120) return act({ moveY: 1 });
+      if (phase < 150) return act({});
+      if (phase < 210) return act({ moveX: 1 });
+      if (phase < 240) return act({});
+      return act({ moveY: -1 });
+    };
+    run(w, 20, inputAt(0));
     const z0 = a.z;
     const x0 = a.x;
     let fell = 0;
     let supported = 0;
-    const TICKS = 300; // 5 s
+    const TICKS = mode === "transitions" ? 600 : 300; // 5 s, 10 s for transitions
     for (let i = 0; i < TICKS; i++) {
-      run(w, 1, input);
+      run(w, 1, inputAt(i));
       if (a.loco === "ragdoll" || a.loco === "down" || a.loco === "getup" || a.loco === "pin")
         fell++;
       if (w.bodies.supportCount[a.body]! > 0) supported++;
@@ -495,11 +515,12 @@ function checkLocomotion(): CheckResult {
     const dist = Math.hypot(a.x - x0, a.z - z0);
     const footFrac = supported / TICKS;
     // A limp is slower, but it is still locomotion.
-    const minDist = mode === "sprint" ? 18 : mode === "broken leg" ? 5 : 12;
+    const minDist =
+      mode === "sprint" ? 18 : mode === "broken leg" ? 5 : mode === "transitions" ? 5 : 12;
     const good = fell === 0 && dist >= minDist && footFrac > 0.6;
     if (!good) ok = false;
     runs.push(
-      `${mode}: ${dist.toFixed(1)} m in 5 s (need >= ${minDist}), ${fell} ticks down, feet on ground ${(footFrac * 100) | 0}%`,
+      `${mode}: ${dist.toFixed(1)} m in ${TICKS / 60} s (need >= ${minDist}), ${fell} ticks down, feet on ground ${(footFrac * 100) | 0}%`,
     );
   }
   return {

@@ -40,6 +40,7 @@ import {
   armMotor,
   checkTrips,
   collapse,
+  isControllable,
   legMotor,
   releaseGrab,
   stepBodies,
@@ -207,16 +208,9 @@ function stepClock(w: World, dt: number) {
 function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   const p = w.player();
   if (!p.alive) return;
-  p.crouch = input.crouch && p.loco !== "ragdoll" && p.loco !== "down";
+  p.crouch = input.crouch && isControllable(p);
   if (p.consciousness < 0.35) return;
-  if (
-    p.loco === "ragdoll" ||
-    p.loco === "down" ||
-    p.loco === "getup" ||
-    p.loco === "pin" ||
-    p.loco === "vault"
-  )
-    return;
+  if (!isControllable(p)) return;
 
   const f = CAM_FORWARD(cam.yaw);
   const r = rightOf(cam.yaw);
@@ -1194,8 +1188,8 @@ function breakFence(w: World, a: Actor) {
 
 function stepCombat(w: World, dt: number, input: Actions | null) {
   const p = w.player();
-  if (input && p.alive && p.consciousness > 0.4) {
-    if (input.attackPressed && p.strikeCd <= 0 && p.loco !== "ragdoll") {
+  if (input && p.consciousness > 0.4 && isControllable(p)) {
+    if (input.attackPressed && p.strikeCd <= 0) {
       p.strikeT = 0.3 / WEAPON_STATS[p.weapon].speed;
       p.strikeCd = 0.42 / WEAPON_STATS[p.weapon].speed;
       p.strikeHit = 0;
@@ -1439,8 +1433,8 @@ function hitActor(
 function stepGrab(w: World, dt: number, input: Actions | null) {
   const p = w.player();
   const B = w.bodies;
-  if (input && p.alive) {
-    if (input.grabPressed && !p.grabbedId && p.loco !== "ragdoll" && p.loco !== "down") {
+  if (input && isControllable(p)) {
+    if (input.grabPressed && !p.grabbedId) {
       const f = facing(p.yaw);
       const handY =
         p.body >= 0 ? B.py[B.base(p.body) + B.plan(p.body).grabHand]! : p.y + p.height * 0.55;

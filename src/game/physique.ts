@@ -94,6 +94,28 @@ const POSE_LOST = 0.34;
  */
 const CATCH_STRIDES = 2.2;
 /**
+ * Minimum time after a catch step's own timer runs out before another one may
+ * commit, s.
+ *
+ * A catch expiring is not evidence the body recovered -- only that the clock
+ * ran out -- and the SAME still-bad margin that justified the first catch was
+ * still there the instant it did, with nothing yet to distinguish "a fresh,
+ * escalating loss of balance" from "the last one never actually resolved".
+ * Recommitting on that reading relocated the foot to a BRAND NEW live capture
+ * point every ~0.36 s, sometimes a large distance from the last one, for as
+ * long as the underlying sway continued -- which, self-caused, could be
+ * seconds. Every relocation is a fresh, fast solver correction landing right
+ * as the foot makes contact, and enough of those chained end to end read as
+ * real impacts and cost real motor authority, which made the NEXT relocation
+ * likelier still. This is what actually kept a body stumbling through
+ * perfectly ordinary walking with nothing external ever touching it.
+ * The margin hard floor a few lines up still collapses a genuinely worsening
+ * fall immediately, cooldown or not -- this only withholds the DISCRETE
+ * re-plant, giving the continuous counterweight lean above a beat to work
+ * before the body is asked to relocate a foot again.
+ */
+const CATCH_RECOMMIT_COOLDOWN = 0.25;
+/**
  * Largest involuntary counterweight lean, local m-scale, matching the
  * existing voluntary `leanZ`/`leanX` neighbourhood (0.18-0.22) so the two
  * channels read as one body's worth of tilt once summed, not two competing
@@ -206,6 +228,32 @@ export function legMotor(a: Actor) {
 /** Mean motor over the two arms: what grab and strike strength depend on. */
 export function armMotor(a: Actor) {
   return (a.motor.larm + a.motor.rarm) * 0.5;
+}
+
+/**
+ * Whether this actor currently has any real say over its own body: alive,
+ * and not mid-ragdoll, down, getup, pinned or vaulting.
+ *
+ * This is the one truth every input gate (movement, crouch, attack, kick,
+ * shove, grab) needs to agree with the body substrate on, and until now each
+ * one carried its own hand-copied guess at it instead of reading this. They
+ * had drifted: movement's own copy matched this exactly, but attack excluded
+ * only "ragdoll", and kick and shove excluded nothing at all -- so mashing
+ * them while down or mid-getup fired a real strike (stamina spent, cooldown
+ * reset, sound emitted) or set a real kick/shove timer with no motor
+ * authority behind it, which then surfaced once authority came back as
+ * action state that looked like it had been queued up and was replaying
+ * itself with no input behind it.
+ */
+export function isControllable(a: Actor): boolean {
+  return (
+    a.alive &&
+    a.loco !== "ragdoll" &&
+    a.loco !== "down" &&
+    a.loco !== "getup" &&
+    a.loco !== "pin" &&
+    a.loco !== "vault"
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -967,13 +1015,7 @@ function consume(w: World, a: Actor, dt: number) {
   a.grounded = a.grounded || footContact;
 
   // --- fall, catch and get-up ----------------------------------------------
-  const controllable =
-    a.alive &&
-    a.loco !== "ragdoll" &&
-    a.loco !== "down" &&
-    a.loco !== "getup" &&
-    a.loco !== "pin" &&
-    a.loco !== "vault";
+  const controllable = isControllable(a);
 
   // --- counterweight: the smallest trouble, answered before a step --------
   //
@@ -1011,7 +1053,10 @@ function consume(w: World, a: Actor, dt: number) {
     a.recoverX -= a.recoverX * k;
   }
 
+  const catchWasActive = a.catchT > 0;
   if (a.catchT > 0) a.catchT = Math.max(0, a.catchT - dt);
+  if (catchWasActive && a.catchT <= 0) a.catchCooldown = CATCH_RECOMMIT_COOLDOWN;
+  if (a.catchCooldown > 0) a.catchCooldown = Math.max(0, a.catchCooldown - dt);
   if (a.tripT > 0) a.tripT = Math.max(0, a.tripT - dt);
   // Flight is not a balance failure, so the airborne sentinel must not feed the
   // off-balance timer: a running gait has both feet off the ground every stride.
@@ -1028,11 +1073,26 @@ function consume(w: World, a: Actor, dt: number) {
       // Shoves, blast impulses and falling timber all arrive here rather than
       // through a knockdown flag of their own.
       collapse(w, a, 0.3 + perr);
-    } else if (B.supportCount[slot]! === 0) {
+    } else if (B.supportCount[slot]! === 0 && a.catchT <= 0) {
       // Airborne is flight, not a balance failure. The landing decides: legs
       // that still have motor authority can absorb it, damaged ones cannot,
       // which is why a bad leg turns an ordinary drop into a fall.
-      a.catchT = 0;
+      //
+      // Gated to no catch already committed: the recovery lurch of an
+      // ACTIVE catch step can genuinely unweight both feet for an instant
+      // without being a jump or a fall, and cancelling the commitment on
+      // that transient reopened the decision the very next grounded tick --
+      // margin was still bad, so it immediately recommitted a BRAND NEW
+      // capture-point target, one tick after the last one. Repeated a few
+      // times a second, that is a real target hopping around under the
+      // solver every tick rather than holding still long enough to be
+      // reached, and the ever-growing gap between "where the target keeps
+      // jumping to" and "where the body actually is" is exactly what pose
+      // error measures -- so the thrash was walking itself into the very
+      // POSE_LOST collapse just above during perfectly ordinary walking,
+      // no shove or hit involved. An already-committed catch now rides out
+      // its own 0.36s hold through a momentary loss of support instead of
+      // being cancelled and immediately re-decided.
     } else if (peak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
       collapse(w, a, 0.35 + peak * 0.04);
     } else if (losing) {
@@ -1070,7 +1130,9 @@ function consume(w: World, a: Actor, dt: number) {
         collapse(w, a);
       } else if (a.catchT <= 0) {
         const lm = legMotor(a);
-        if (lm > 0.34 && a.stamina > 0.03 && a.tripT <= 0) {
+        if (lm <= 0.34 || a.stamina <= 0.03 || a.tripT > 0) {
+          collapse(w, a);
+        } else if (a.catchCooldown <= 0) {
           a.catchLeg = a.motor.lleg >= a.motor.rleg ? 0 : 1;
           a.catchT = 0.36;
           a.catchLanded = false;
@@ -1084,9 +1146,11 @@ function consume(w: World, a: Actor, dt: number) {
             a.loco = "stumble";
             a.locoT = 0.4;
           }
-        } else {
-          collapse(w, a);
         }
+        // else: cooling down from the last catch (CATCH_RECOMMIT_COOLDOWN) --
+        // legs and stamina are fine, so this is not a collapse, but nothing
+        // relocates a foot again either; the continuous counterweight lean
+        // above keeps answering it in the meantime.
       }
     }
     // Gait resumes from the foot that actually caught you. Without this the
