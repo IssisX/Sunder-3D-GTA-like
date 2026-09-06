@@ -26,13 +26,36 @@ No soak tests, confidence reruns, long-horizon proving, duplicate verification, 
 
 Substantive SUNDER repository changes are atomic Git transactions, not a sequence of convenience writes.
 
+### Tool-availability precheck
+
+Before the first repository mutation in a turn, load and confirm the exact Git-data mutation functions needed for the transaction. For normal `ChatGPT-version` development the required mutation set is exactly:
+
+- `GitHub.create_blob`
+- `GitHub.create_tree`
+- `GitHub.create_commit`
+- `GitHub.update_ref`
+
+Do not begin writing until all four are actually available in the current tool schema. Tool discovery is a pre-transaction activity only. Once the first blob is created, do not rediscover or broaden mutation tools mid-transaction.
+
+### Mutation-call firewall
+
+For normal development on `ChatGPT-version`, the only permitted GitHub mutation calls are the four exact functions above. Before every mutation call, compare the fully-qualified tool name against that whitelist. If it is not an exact match, do not call it.
+
+`GitHub.create_file`, `GitHub.update_file`, and `GitHub.delete_file` are prohibited on `ChatGPT-version` during normal development, including one-file changes. Do not use branch-creation, PR-mutation, issue-mutation, workflow-rerun, or other write actions as substitutes for Git-data promotion unless the user explicitly requested that separate operation.
+
+Never choose a write tool merely because it is currently visible while the intended Git-data primitive is not. If the intended primitive is unavailable, stop before mutation, load it explicitly by name, then continue.
+
+### Atomic promotion
+
 Before any write, read the exact canonical branch HEAD and its tree. Build every changed code/test/instruction/workflow file as an unattached Git blob first. Unattached blobs are scratch data only - they are not staged, delivered, or canonical.
 
-Immediately before promotion, re-read the canonical branch HEAD. If it changed, reconcile the complete change against that new state and rebuild the tree; never overwrite concurrent work. Then create exactly one tree from the current canonical base tree, exactly one commit whose parent is the current canonical HEAD, and move the branch ref exactly once with a normal fast-forward update.
+Immediately before promotion, re-read the canonical branch HEAD. If it changed, reconcile the complete change against that new state and rebuild the tree; never overwrite concurrent work. Then create exactly one tree from the current canonical base tree, exactly one commit whose parent is the current canonical HEAD, and move the branch ref exactly once with `GitHub.update_ref(force=false)`.
 
-For substantive code transactions, do not use contents-API `create_file`, `update_file`, or `delete_file` convenience writes, because each mutates the shared branch before the complete slice exists. Do not create temp/junk/placeholder files, placeholder commit messages, partial commits, or verification commits. Do not force-update a shared branch in normal development. A force update is permitted only for an explicit, verified recovery operation where no concurrent work can be lost.
+Do not create temp/junk/placeholder files, placeholder commit messages, partial commits, verification commits, or convenience commits. Do not force-update a shared branch in normal development. A force update is permitted only for an explicit, verified recovery operation where no concurrent work can be lost.
 
-Run the targeted check only against the final promoted commit. If a safe Git-data primitive is not currently loaded, discover/load it; do not substitute a lower-integrity shortcut merely because it is convenient.
+If a mutation call fails or an unintended mutation somehow occurs, do not improvise with another write API. Re-read the branch, preserve concurrent work, and repair through a fresh blob/tree/commit/fast-forward transaction using only the whitelist.
+
+Run the targeted check only against the final promoted commit. If a safe Git-data primitive is not currently loaded, discover/load it before mutation; never substitute a lower-integrity shortcut merely because it is convenient.
 
 ## SHORTCUT MINIMIZATION LAW
 
