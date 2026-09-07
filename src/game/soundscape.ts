@@ -15,11 +15,12 @@ export class GameAudio extends CoreAudio {
   private wind: GainNode | null = null;
   private fire: GainNode | null = null;
   private drone: GainNode | null = null;
-  private noise: AudioBuffer | null = null;
+  private richNoise: AudioBuffer | null = null;
   private readonly sources: AudioScheduledSourceNode[] = [];
   private randomState = 0x9e3779b9;
   private nextCrackle = 0;
   private lastVoice = -Infinity;
+  private readonly lastEvent = new Map<string, number>();
   private disposed = false;
 
   private random() {
@@ -48,7 +49,7 @@ export class GameAudio extends CoreAudio {
     const noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const data = noise.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = this.random() * 2 - 1;
-    this.noise = noise;
+    this.richNoise = noise;
     const bed = (kind: BiquadFilterType, frequency: number, q: number) => {
       const src = ctx.createBufferSource();
       src.buffer = noise; src.loop = true;
@@ -92,7 +93,7 @@ export class GameAudio extends CoreAudio {
 
   private transient(kind: string, mag: number, pan: number) {
     const ctx = this.ctx;
-    if (!ctx || !this.sfx || !this.noise || this.disposed) return;
+    if (!ctx || !this.sfx || !this.richNoise || this.disposed) return;
     const t = ctx.currentTime;
     const m = Math.max(0.01, Math.min(1.6, mag));
     const out = ctx.createGain();
@@ -105,7 +106,7 @@ export class GameAudio extends CoreAudio {
     out.connect(stereo).connect(this.sfx);
     const burst = (duration: number, gain: number, hp: number, lp: number, rate = 1) => {
       pending++;
-      const src = ctx.createBufferSource(); src.buffer = this.noise;
+      const src = ctx.createBufferSource(); src.buffer = this.richNoise;
       src.playbackRate.value = rate * (0.88 + this.random() * 0.24);
       const high = ctx.createBiquadFilter(); high.type = "highpass"; high.frequency.value = hp;
       const low = ctx.createBiquadFilter(); low.type = "lowpass"; low.frequency.value = lp;
@@ -118,7 +119,6 @@ export class GameAudio extends CoreAudio {
       src.onended = () => { src.disconnect(); high.disconnect(); low.disconnect(); env.disconnect(); done(); };
     };
     const tone = (freq: number, end: number, duration: number, gain: number, type: OscillatorType = "sine") => {
-      pending++;
       const osc = ctx.createOscillator(); osc.type = type;
       osc.frequency.setValueAtTime(freq, t);
       osc.frequency.exponentialRampToValueAtTime(Math.max(20, end), t + duration);
@@ -160,6 +160,9 @@ export class GameAudio extends CoreAudio {
     }
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
+    const last = this.lastEvent.get(kind) ?? -Infinity;
+    if (t - last < 0.035) return;
+    this.lastEvent.set(kind, t);
     if ((kind === "shout" || kind === "scream") && t - this.lastVoice < 0.16) return;
     if (kind === "shout" || kind === "scream") this.lastVoice = t;
     this.transient(kind, mag, pan);
@@ -170,6 +173,8 @@ export class GameAudio extends CoreAudio {
     this.disposed = true;
     for (const src of this.sources) { try { src.stop(); } catch { /* already stopped */ } src.disconnect(); }
     this.sources.length = 0;
+    this.lastEvent.clear();
+    this.richNoise = null;
     this.ambient?.disconnect(); this.drone?.disconnect();
     this.ambient = this.rain = this.wind = this.fire = this.drone = null;
     if (this.ctx && this.ctx.state !== "closed") void this.ctx.close();

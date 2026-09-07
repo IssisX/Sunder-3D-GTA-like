@@ -2,17 +2,8 @@ import * as THREE from "three";
 import type { Actor, WeaponKind } from "./types";
 import { BODY, type BodyRig, type PhysicalBodies } from "./body";
 import type { View } from "./render";
-import { BodyView as CoreBodyView } from "./body-render-core";
+import { BodyView as CoreBodyView, type HumanVisual } from "./body-render-core";
 
-/** Presentation-only compatibility with the inspected original renderer. */
-interface HumanVisual {
-  group: THREE.Group;
-  head: THREE.Mesh; torso: THREE.Mesh; chest: THREE.Mesh; pelvis: THREE.Mesh;
-  neck: THREE.Mesh; lArm: THREE.Mesh; rArm: THREE.Mesh;
-  lLeg: THREE.Mesh; rLeg: THREE.Mesh; lHand: THREE.Mesh; rHand: THREE.Mesh;
-  lFoot: THREE.Mesh; rFoot: THREE.Mesh; weapon: THREE.Mesh;
-  mats: Record<string, THREE.MeshStandardMaterial>;
-}
 interface Appearance {
   visual: HumanVisual;
   weapon: THREE.Group;
@@ -49,16 +40,23 @@ function mesh(g: THREE.BufferGeometry, m: THREE.Material, parent: THREE.Object3D
  * body. The original curved limbs, task solver, contacts, and damage remain
  * untouched. Every orientation is derived from solved points, not an animation.
  */
+const VISUAL_WEAPON_RANGES: Record<WeaponKind, readonly [number, number]> = {
+  fist: [-0.5, 0.5], club: [-0.49, 0.53], board: [-0.5, 0.5],
+  spear: [-0.5, 0.55], pitchfork: [-0.5, 0.635],
+  knife: [-0.5, 0.52], torch: [-0.47, 0.71],
+};
+
 export class BodyView extends CoreBodyView {
   private readonly appearances = new Map<number, Appearance>();
   private readonly right = new THREE.Vector3();
-  private readonly up = new THREE.Vector3();
+  private readonly appearanceUp = new THREE.Vector3();
   private readonly back = new THREE.Vector3();
   private readonly tmp = new THREE.Vector3();
   private readonly basis = new THREE.Matrix4();
   private readonly orientation = new THREE.Quaternion();
   private readonly forward = new THREE.Vector3();
   private readonly worldUp = new THREE.Vector3(0, 1, 0);
+  private readonly weaponOffset = new THREE.Vector3();
 
   constructor(private readonly sceneView: View, private readonly bodySource: PhysicalBodies) {
     super(sceneView, bodySource);
@@ -67,7 +65,7 @@ export class BodyView extends CoreBodyView {
   // The original renderer exposes only its presentation record. The physical
   // rig remains read-only and the original curved limb meshes stay authoritative.
   private coreVisual(id: number): HumanVisual | undefined {
-    return (this as unknown as { visuals: Map<number, HumanVisual> }).visuals.get(id);
+    return this.getVisual(id);
   }
 
   override bootstrap(actors: Actor[]) {
@@ -87,21 +85,19 @@ export class BodyView extends CoreBodyView {
   }
 
   override forget() {
-    const geometries = new Set<THREE.BufferGeometry>();
-    const materials = new Set<THREE.Material>();
+    // Shared geometry survives a restart; only actor-owned resources are released.
     for (const app of this.appearances.values()) {
-      app.visual.group.traverse((o) => {
-        if (!(o instanceof THREE.Mesh)) return;
-        geometries.add(o.geometry);
-        const m = o.material;
-        if (Array.isArray(m)) for (const item of m) materials.add(item);
-        else materials.add(m);
-      });
-      this.sceneView.scene.remove(app.visual.group);
-      for (const m of app.materials) materials.add(m);
+      const v = app.visual;
+      this.sceneView.scene.remove(v.group);
+      for (const limb of [v.lArm, v.rArm, v.lLeg, v.rLeg]) limb.geometry.dispose();
+      for (const m of Object.values(v.mats)) m.dispose();
+      const helmet = v.group.getObjectByName("helmet");
+      if (helmet instanceof THREE.Mesh) {
+        if (Array.isArray(helmet.material)) helmet.material.forEach(m => m.dispose());
+        else helmet.material.dispose();
+      }
+      for (const m of app.materials) m.dispose();
     }
-    for (const g of geometries) g.dispose();
-    for (const m of materials) m.dispose();
     this.appearances.clear();
     super.forget();
   }
@@ -183,20 +179,20 @@ export class BodyView extends CoreBodyView {
   private syncAppearance(a: Actor, rig: BodyRig, app: Appearance, alpha: number) {
     const v = app.visual;
     const scale = a.height / 1.72;
-    this.read(rig, BODY.chest, alpha, this.up);
+    this.read(rig, BODY.chest, alpha, this.appearanceUp);
     this.read(rig, BODY.head, alpha, this.tmp);
-    this.up.subVectors(this.tmp, this.up);
-    if (this.up.lengthSq() < 1e-7) this.up.set(0, 1, 0);
-    this.up.normalize();
+    this.appearanceUp.subVectors(this.tmp, this.appearanceUp);
+    if (this.appearanceUp.lengthSq() < 1e-7) this.appearanceUp.set(0, 1, 0);
+    this.appearanceUp.normalize();
     this.read(rig, BODY.lShoulder, alpha, this.right);
     this.read(rig, BODY.rShoulder, alpha, this.tmp);
     this.right.subVectors(this.tmp, this.right);
-    this.right.addScaledVector(this.up, -this.right.dot(this.up));
+    this.right.addScaledVector(this.appearanceUp, -this.right.dot(this.appearanceUp));
     if (this.right.lengthSq() < 1e-7) this.right.set(Math.cos(a.yaw), 0, -Math.sin(a.yaw));
     this.right.normalize();
-    this.back.crossVectors(this.right, this.up).normalize();
-    this.right.crossVectors(this.up, this.back).normalize();
-    this.basis.makeBasis(this.right, this.up, this.back);
+    this.back.crossVectors(this.right, this.appearanceUp).normalize();
+    this.right.crossVectors(this.appearanceUp, this.back).normalize();
+    this.basis.makeBasis(this.right, this.appearanceUp, this.back);
     this.orientation.setFromRotationMatrix(this.basis);
     v.head.quaternion.copy(this.orientation);
     v.chest.quaternion.copy(this.orientation);
@@ -241,7 +237,15 @@ export class BodyView extends CoreBodyView {
     }
     app.weapon.position.copy(v.weapon.position);
     app.weapon.quaternion.copy(v.weapon.quaternion);
-    app.weapon.scale.set(scale, v.weapon.scale.y, scale);
+    // Match the actual carrier length and center. The decorative mesh cannot
+    // silently extend the physical weapon reach.
+    const range = VISUAL_WEAPON_RANGES[a.weapon];
+    const span = range[1] - range[0];
+    const sy = v.weapon.scale.y / span;
+    app.weapon.scale.set(scale, sy, scale);
+    this.weaponOffset.set(0, (range[0] + range[1]) * -0.5 * sy, 0);
+    this.weaponOffset.applyQuaternion(v.weapon.quaternion);
+    app.weapon.position.add(this.weaponOffset);
     if (app.flame) app.flame.visible = a.torchLit;
     if (app.light) app.light.intensity = a.torchLit ? 1.15 : 0;
   }

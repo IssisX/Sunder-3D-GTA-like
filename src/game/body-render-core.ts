@@ -4,7 +4,7 @@ import { injurySum } from "./world";
 import { BODY, type BodyRig, PhysicalBodies } from "./body";
 import type { View } from "./render";
 
-interface HumanVisual {
+export interface HumanVisual {
   group: THREE.Group;
   head: THREE.Mesh;
   torso: THREE.Mesh;
@@ -77,6 +77,10 @@ function makeLimbGeometry() {
 
 export class BodyView {
   private visuals = new Map<number, HumanVisual>();
+
+  protected getVisual(id: number): HumanVisual | undefined {
+    return this.visuals.get(id);
+  }
   private sphere = new THREE.SphereGeometry(0.5, 18, 14);
   private handGeo = new THREE.SphereGeometry(0.5, 12, 9);
   private footGeo = new THREE.SphereGeometry(0.5, 12, 8);
