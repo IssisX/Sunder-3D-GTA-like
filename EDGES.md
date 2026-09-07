@@ -94,32 +94,3 @@ ground height instead of classifying the kick landing as a ragdoll event.
 The next capabilities made cheaper are touch-intent combat buffering over the
 same mechanical action tasks, and support-aware action continuation that carries
 locomotion/stance through attack and recovery instead of cancelling movement.
-
-## 2026-09-06 branch reconciliation and boxing
-
-Source histories: `ChatGPT-B` at `a9fa5690` and `ChatGPT-version` at
-`aed29bbe`. The newer body-control branch supplies kinetic fight flow,
-reactive balance, committed catch steps, and local social incidents. The B
-branch supplies its independently developed encounter authority, action/strike
-repair, and regression probes. The 15-node anatomical rig and smooth physical
-surface renderer remain authoritative; the older 11-node alternative rigs were
-not substituted. Actual visual superiority has not been established by a
-side-by-side rendered inspection.
-
-| Causal edge | Owner and consequence | Falsifier |
-| --- | --- | --- |
-| Input taps → bounded queued actions → continuous combination | `boxing-combinations.ts` owns four FIFO entries with individual deadlines, six punch families, and continuation from the preceding completed action. Melee owns the only player attack buffer. | `boxing-combinations-probe.ts`: a rapid three-tap burst must produce jab/cross/lead uppercut; all six families reachable; stale taps expire. |
-| Current stance/range → selected hand and strike family | Existing solved foot positions determine lead side; target distance selects appropriate straight/hook substitutions. No authored combat stance replaces a planted foot. | Same probe: short range selects a hook, long range substitutes a straight, mirrored stance mirrors the hand. Cut `contextualPunchPath` to remove contextual substitutions. |
-| Achieved fist velocity → next path → bounded motor → solved carrier | The next attack begins at the actual fist position and inherits its velocity. Cubic paths are motor goals, not animation transforms or damage. | `boxing-integration-probe.ts`: actual controller must produce three consecutive attacks and measurable solved fist travel. |
-| Support/traction/COM momentum → core drive → contact and balance | `sampleMechanicalState` supplies real support, wet/oil grip, angular momentum, velocity, injury and consciousness. Boxing changes the existing locomotion targets; KineticFightFlow, SupportWrench, ReactiveBalance and ActionContinuity consume the resulting geometry. | Cut `supportCoupledDrive`: the pure pose torque and integrated solved-body trace must change. |
-| Solved fist and target motion → relative sweep → impact mediation | Existing melee contact owns injury, recoil, regional force, sounds, social evidence and prop effects. No timed damage is added. | The existing spatial-carrier/damage probes and the integrated action probe must remain green. |
-| Local aggression evidence → guard authorization → incident roles | `social-incident.ts` no longer turns uninvolved guards into fighters or forces them to flee. Existing warning/investigation authority remains responsible for escalation. Direct harm or independently established combat evidence can authorize a local joiner. | `social-incident-probe.ts`: uninvolved guards remain role NONE; direct victims may join; cutting `guardEvidence` restores the old automatic enlistment. |
-
-The older one-entry ActionContinuity input buffer remains available for its
-standalone compatibility probe but is disabled in the production orchestrator;
-Melee now owns all queued attack and kick inputs. ActionContinuity continues to
-own momentum and terminal-pose recovery. Weapon and kick task generators retain
-their prior paths and timing. The current implementation is still bounded active
-ragdoll control, not an exact anatomical inverse-dynamics solver. Full-world
-replay, hardware performance, and close-up visual quality must be reported from
-actual measurements rather than inferred from this integration.

@@ -7,19 +7,15 @@ import { hintFor, stepWorld, type Cam } from "./sim";
 import { View } from "./render";
 import { ProceduralAnimationController } from "./ProceduralAnimationController";
 import { BodyView } from "./body-render";
-import { FightBubbleView } from "./fight-bubbles";
-import { FightChantVoice } from "./fight-chant-voice";
 import { clearSave, loadSave, writeSave } from "./save";
 
 export class Game {
   world = new World();
   input: Input;
   audio = new GameAudio();
-  chantVoice = new FightChantVoice();
   view: View;
   bodies = new ProceduralAnimationController();
   bodyView: BodyView;
-  fightBubbles: FightBubbleView;
   cam: Cam = { yaw: 0, pitch: 0.18 };
   hud: HudState = defaultHud();
   onHud: (h: HudState) => void;
@@ -42,7 +38,6 @@ export class Game {
     this.bodies.bootstrap(this.world);
     this.bodyView = new BodyView(this.view, this.bodies);
     this.bodyView.bootstrap(this.world.actors);
-    this.fightBubbles = new FightBubbleView(this.view.scene, this.bodies);
     this.cam.yaw = this.world.player().yaw;
     this.resize();
     this.canvas.addEventListener("click", this.onCanvasClick);
@@ -78,8 +73,6 @@ export class Game {
     this.stop();
     this.flushSave();
     this.input.dispose();
-    this.fightBubbles.dispose();
-    this.chantVoice.dispose();
     this.view.dispose();
     this.bodyView.forget();
     this.bodies.clear();
@@ -137,7 +130,6 @@ export class Game {
     const resumeLoop = this.running;
     this.view.renderer.setAnimationLoop(null);
 
-    this.fightBubbles.dispose();
     this.view.dispose();
     this.bodyView.forget();
     this.bodies.clear();
@@ -152,7 +144,6 @@ export class Game {
     this.bodies.bootstrap(this.world);
     this.bodyView = new BodyView(this.view, this.bodies);
     this.bodyView.bootstrap(this.world.actors);
-    this.fightBubbles = new FightBubbleView(this.view.scene, this.bodies);
 
     this.cam = { yaw: this.world.player().yaw, pitch: 0.18 };
     this.hud = defaultHud();
@@ -220,7 +211,6 @@ export class Game {
       this.world.hitstop -= raw;
       this.view.sync(this.world, this.cam, 1, raw, this.world.phase === "title");
       this.bodyView.sync(this.world.actors, 1);
-      this.fightBubbles.sync(this.world);
       this.view.render();
       return;
     }
@@ -237,7 +227,6 @@ export class Game {
     const alpha = playing ? this.acc / STEP : 1;
     this.view.sync(this.world, this.cam, alpha, raw, this.world.phase === "title");
     this.bodyView.sync(this.world.actors, alpha);
-    this.fightBubbles.sync(this.world);
     this.view.render();
     this.saveT += raw;
     if (this.saveT > 4) {
@@ -267,16 +256,12 @@ export class Game {
   private drainAudio() {
     const p = this.world.player();
     for (const e of this.world.events) {
+      if (!e.kind.startsWith("snd:")) continue;
+      const kind = e.kind.slice(4);
       const dx = e.x - p.x;
       const dz = e.z - p.z;
       const d = Math.hypot(dx, dz);
       const mag = e.mag * (1 / (1 + d * 0.12));
-      if (e.kind === "social:chant") {
-        this.chantVoice.speak(e.a, mag);
-        continue;
-      }
-      if (!e.kind.startsWith("snd:")) continue;
-      const kind = e.kind.slice(4);
       const pan = Math.max(-0.8, Math.min(0.8, dx / 18));
       this.audio.play(kind, mag, pan);
     }
@@ -388,7 +373,6 @@ export class Game {
           self.fixedStep(input, true);
           self.view.sync(self.world, self.cam, 1, STEP, false);
           self.bodyView.sync(self.world.actors, 1);
-          self.fightBubbles.sync(self.world);
         }
         self.view.render();
         self.pushHud();

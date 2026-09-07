@@ -1,51 +1,79 @@
 # SUNDER - Project Instructions
 
-These instructions supplement `AGENTS.md` and the user's global control plane. The current canonical branch is established from Git evidence, never a hard-coded name. Conflicts are resolved by the governing objective.
+These instructions govern work on this repository in addition to `AGENTS.md`.
 
-## ADVANCED GAME MATH / COMPOUND INTEGRATION
+## ADVANCED GAME MATH FIRST LAW
 
-For substantive mechanics work, load the canonical advanced-game-math skill and classify the user's objective before choosing a mechanism. A goal spanning three or more interacting simulation/gameplay roles remains compound even when one authoritative quantity can serve them all. `debug-causal` owns defect diagnosis.
+For every substantive SUNDER development response, begin the technical reasoning from the canonical advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
 
-Depth is causal, not numeric. Require a state-changing A -> B -> C path or justified feedback loop. One event feeding camera, audio, particles, or other passive readers is reuse, not compound integration. Prefer the shared physical truth that changes support, balance, motor authority, motion, contact, injury, capability, and decisions over parallel features. Do not impose an artificial reader quota on focused work.
+Classify from the user's actual objective breadth before mechanism availability. If success materially spans three or more interacting gameplay/simulation capabilities or systems, treat the work as broad compound integration even when one deep mechanism can provide their shared authoritative truth. Do not narrow an inherently multi-system objective merely because one useful local mechanism appears first.
 
-For fighting and locomotion, support geometry, foot placement, load transfer, COM, momentum, inertia, traction, catch steps, and action-to-footwork continuity outrank cosmetic upper-body polish. Preserve the body's actual achieved motion. Never substitute a scripted pose or an effect for a missing mechanical consequence. Stop expanding when the next dependency no longer changes what the player can cause, feel, control, or observe.
+Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
 
-## GITHUB MUTATION TRANSACTION
+## COMPOUND INTEGRATION LAW
 
-For normal repository development, use only `GitHub.create_blob`, `GitHub.create_tree`, `GitHub.create_commit`, and `GitHub.update_ref` for mutations. Load their schemas before the first write. Do not substitute file-by-file writes, force pushes, PR mutations, or workflow reruns for a normal source transaction.
+For broad compound work, depth is causal, not numeric. Require at least three consequential system roles on one authoritative causal graph with a state-changing `A -> B -> C` path or justified feedback loop. One scalar or event fanning out to several passive readers, effects, presentation channels, or independent reactions is reuse/expression, not proof of compound integration.
 
-Read the canonical HEAD and tree. Create all changed files as unattached blobs. Re-read HEAD before promotion; reconcile any concurrent change. Create one tree from the current canonical base, one commit with the correct parent(s), and one non-forced ref update. A deliberate branch-reconciliation commit may have both source histories as parents. Never overwrite concurrent work, create placeholder commits, or claim unattached objects are delivered. If a write fails, re-read state and repair through the same Git-data primitives.
+Prefer one deeper mechanical truth that naturally couples several roles over several parallel mechanisms when it preserves the user's objective. A new physical quantity does not need an artificial reader quota in legitimate focused/leaf work. In compound work, it earns its place by participating in state-changing causal propagation across the connected mechanism.
+
+Examples:
+- reuse only: `impact -> camera`, `impact -> audio`, `impact -> particles`;
+- compound coupling: `contact/load -> support/balance -> motor authority -> pose/locomotion`, with the same physical evidence also able to alter `injury/capability -> AI response`.
+
+Consequence count alone does not establish depth. Three passive readouts are still one feature. Mechanic/substrate value comes from authoritative state transfer, feedback, unplanned consequence, and player-visible control or failure.
 
 ## ONE-BINARY-CHECK LAW
 
-Implement once, run one targeted binary check, report pass/fail, and stop. If it fails, repair once and rerun the same check once. No confidence reruns, unrelated batteries, or research theater. The check must be able to falsify the changed causal edge. Run broader tests or a playable build when the task explicitly requires them. Report only commands actually run and their observed results.
+For each substantive change: implement once, run one targeted binary check, report pass/fail, stop. If that check fails, fix once, re-run that same check once, then stop.
 
-## DAMAGE MEDIATION
+No soak tests, confidence reruns, long-horizon proving, duplicate verification, or unrelated test batteries. The check must target the changed causal edge. Full-suite tests and playable builds run only when explicitly required by the task, not automatically for confidence.
 
-Contact is not damage. Contact resolution records geometry, relative velocity, impulse, effective mass, or kinetic-energy evidence. Damage is downstream of a calibrated physical threshold. Gentle touch, resting contact, overlap correction, and low-energy bumps are inert. Do not derive injury from solver projection velocity or an invented effect magnitude.
+## DAMAGE MEDIATION LAW
 
-## AGENT INDEPENDENCE
+Contact is not damage. Collision/contact resolution may produce geometry, relative velocity, impulse, effective mass, or kinetic-energy evidence, but it must not directly write hurt, blood, HP loss, or injury merely because overlap/contact occurred.
 
-Each independent actor owns decision state and deterministic entropy: unique stream identity, phase/time offset, speed variance, and decisions. Shared rules must not produce synchronized scripts. Three independent agents moving in lockstep is a defect. Replaying the same captured seed, state, and input order must reproduce the same result.
+Damage is a downstream consequence of a calibrated impact threshold. Gentle touch, resting/standing contact, overlap correction, and low-energy bumps are inert. Only contact impulses / kinetic energy above the calibrated threshold may produce damage consequences.
 
-## SPATIAL CARRIER
+## AGENT INDEPENDENCE LAW
 
-No action-at-a-distance or magic hits. Intent, time, and reach authorize motion but never directly apply an effect. Melee requires an actual swept limb/weapon volume occupying the target volume. Ranged/fire effects require a projectile or propagating physical carrier with travel time and geometry. No occupancy means no contact effect.
+Every NPC, animal, and independently simulated entity owns its own decision state and deterministic entropy stream: unique seed/stream identity, phase/time offset, speed variance, and decision state. Shared movement logic may define rules but must not collapse entities onto one synchronized script or phase.
 
-## MEDIATION-FIRST WORK
+Visible lockstep among three or more independent agents is a defect. Ordinary repeated play should diverge because independently seeded agent streams and decisions diverge; explicit deterministic replay remains reproducible when the captured session seed/state/order are replayed.
 
-Repair the authoritative mechanism rather than hiding defects with FX, special-case scripts, or extra verification. Reuse the existing node store, solver, fields, and downstream readers. A new representation is justified when the old one cannot express an obvious player attempt, duplicates truth, or repeatedly needs exceptions. Preserve working interfaces and calibration when possible.
+## SPATIAL CARRIER LAW
 
-## PLAYER-ACTION RESPONSE
+No action-at-a-distance and no magic hits. Intent, timer expiry, or range checks may authorize motion but never apply the effect by themselves.
 
-Player-owned actions begin responding on the input edge. Do not add an involuntary anticipation pause. Wind-up, travel, leverage, charge, and recovery may take time when that time arises from physical action. Intent never writes achieved position. Solved body state owns visible motion and contact consequences.
+Melee resolves only from a real swept limb/weapon volume occupying the target volume during the fixed-step strike path. Ranged/fire effects require a projectile, propagating field, or expanding physical volume with travel time, geometry, and physics steps. If the carrier never occupied the target volume, nothing happens.
 
-## COMPLETE MODULAR DELIVERY
+## MEDIATION-FIRST WORK LAW
 
-Modularity is organization, not permission to defer. Deliver every feasible required module, file, component, and subsystem in the same response, complete and coherently connected. Do not supply a tree without requested implementation, leave unresolved imports, or split a completable task across future turns. If output limits require packaging, prioritize executable source and deterministic generation of repetitive artifacts.
+Fix the authoritative mediation layer - impulse/energy, per-agent state, swept/projectile carriers, support/contact constraints - rather than masking defects with FX, extra scripts, or extra verification.
 
-## PREVIEW FIDELITY / HANDOFF
+## HANDOFF EXPOSURE LAW
 
-Prefer a reproducible build from the current canonical source and world over bespoke demo shells. A wrapper may differ, but the game, assets, controls, simulation, and evaluated changes must remain canonical. Label any fallback, stripped, reconstructed, synthetic, or reduced artifact before the user evaluates it. Never silently promote a fallback to the new baseline.
+Never hide, blur, or euphemize the actual state of delivered work.
 
-For artifact-changing work, report the exact branch/commit, changed files, actual playable artifact, intentional omissions or shortcuts, checks actually performed, unresolved defects, and highest-value next dependency. Do not describe unbuilt, untested, or uncommitted work as complete or verified.
+For every artifact-changing turn, end with a compact reality report that surfaces:
+- the exact canonical branch/state changed;
+- what the delivered playable artifact actually is;
+- any shortcut, fallback, surrogate, reconstruction, stripped shell, mock, approximation, or intentionally omitted subsystem used during the turn;
+- verification actually performed versus verification not performed;
+- confirmed regressions, unresolved defects, and material unknowns still present;
+- the highest-value next target(s) exposed by the completed work.
+
+A fallback or reduced artifact must be identified **before** the user opens or evaluates it. Never call a reduced, synthetic, reconstructed, debug, benchmark, or stripped artifact simply a "preview" when that wording could imply the canonical game.
+
+Reserve **real preview / real build / playable current version** for an artifact produced from the current canonical branch's product code and current world/content. A hosting/build wrapper may differ, but the game, world, assets, controls, simulation, and current modifications being evaluated must be the canonical ones. If that artifact cannot be produced, say so plainly rather than substituting a surrogate without disclosure.
+
+Never let a fallback artifact silently become a new baseline. Never use omitted/degraded systems in a fallback as evidence that the canonical game regressed. Never conceal failed work, partial work, unverified behavior, or a quality compromise merely to make a handoff appear complete.
+
+## PLAYER-ACTION RESPONSE LAW
+
+Player-owned actions begin responding on the input edge. Do not insert an involuntary anticipation delay before the visible/mechanical response.
+
+If an action needs travel time, wind-up, charge, leverage, or preparation for physical reasons, motion begins immediately and the timing must arise from the player's continuing input or from the actual physical mechanism - not from a hidden pre-action pause. Animation, contact, and gameplay consequence should converge on the same authoritative physical event whenever the substrate supports it.
+
+## PREVIEW FIDELITY CONTRACT
+
+After substantive gameplay changes, prefer a reproducible playable build from the canonical branch over bespoke demo shells. Preview infrastructure must import/use canonical game modules rather than copying, simplifying, or reimplementing the game. Any intentional wrapper difference must be surfaced in the handoff reality report.

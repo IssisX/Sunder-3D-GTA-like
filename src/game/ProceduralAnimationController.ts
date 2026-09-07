@@ -16,9 +16,6 @@ import { bodyTaskTargets } from "./body-task-targets";
 import { HumanRootAuthority } from "./human-root-authority";
 import { CentroidalLocomotion } from "./centroidal-locomotion";
 import { ActionContinuity } from "./action-continuity";
-import { ReactiveBalance } from "./reactive-balance";
-import { CommittedCatchStep } from "./committed-catch-step";
-import { KineticFightFlow } from "./kinetic-fight-flow";
 
 /**
  * Canonical runtime body/action orchestrator.
@@ -27,11 +24,9 @@ import { KineticFightFlow } from "./kinetic-fight-flow";
  *   pre-world: snapshot solved humanoid root + input/action/AI intent shaping
  *   world sim: compatibility prediction for legacy game systems
  *   root firewall: discard temporary capsule translation for body-owned humans
- *   post-world/pre-body: locomotion + capture-step commitment + melee task generation
- *   whole-body coupling: support / COM / stance tasks derived from actions
- *   kinetic fight flow: support-relative action arc from real carrier/support/momentum
+ *   post-world/pre-body: locomotion + melee end-effector task generation
  *   action continuity: preserve incoming step/momentum through action + recovery
- *   reactive balance: measured COM/momentum/support bend free whole-body tasks
+ *   whole-body coupling: support / COM / stance tasks derived from actions
  *   centroidal coupling: acceleration/braking/turning posture from real COM state
  *   task finalization: position + target-velocity field
  *   pre-integration: bounded joint actuation + support translation/yaw wrench
@@ -46,9 +41,6 @@ export class ProceduralAnimationController extends AnimationController {
   private readonly continuity = new ActionContinuity(this);
   private readonly rootAuthority = new HumanRootAuthority();
   private readonly centroidal = new CentroidalLocomotion(this);
-  private readonly balance = new ReactiveBalance(this);
-  private readonly catchStep = new CommittedCatchStep(this);
-  private readonly fightFlow = new KineticFightFlow(this);
   private playerJumpRequested = false;
 
   override bootstrap(w: World) {
@@ -60,9 +52,6 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.bootstrap(w);
     this.coupling.bootstrap(w);
     this.continuity.bootstrap(w);
-    this.catchStep.bootstrap(w);
-    this.fightFlow.bootstrap(w);
-    this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -75,9 +64,6 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.clear();
     this.coupling.clear();
     this.continuity.clear();
-    this.catchStep.clear();
-    this.fightFlow.clear();
-    this.balance.clear();
     this.rootAuthority.clear();
     this.social.reset();
     this.playerJumpRequested = false;
@@ -90,9 +76,6 @@ export class ProceduralAnimationController extends AnimationController {
     this.melee.reset(a);
     this.coupling.reset(a);
     this.continuity.reset(a);
-    this.catchStep.reset(a);
-    this.fightFlow.reset(a);
-    this.balance.reset(a);
     this.rootAuthority.reset(a);
     if (a.kind === "player") this.playerJumpRequested = false;
   }
@@ -105,10 +88,12 @@ export class ProceduralAnimationController extends AnimationController {
 
   override prepareInput(w: World, input: Actions, dt: number) {
     this.playerJumpRequested = Boolean(input.jumpPressed);
-    // Melee owns the entire attack/kick queue. Continuity still owns
-    // terminal geometry, but its legacy one-entry input buffer is disabled
-    // here to prevent a second, unrequested strike after a queued combo.
-    this.continuity.prepareBufferedInput(input, false, dt);
+    const replayBuffered = this.continuity.prepareBufferedInput(
+      input,
+      this.melee.isActive(w.playerId),
+      dt,
+    );
+    if (replayBuffered) this.melee.captureInput(input);
     super.prepareInput(w, input, dt);
     this.melee.prepareInput(w, input);
   }
@@ -122,15 +107,16 @@ export class ProceduralAnimationController extends AnimationController {
   override step(w: World, dt: number) {
     this.social.endStep(w);
     this.rootAuthority.restoreBodyOwnedRoots(w);
+
     super.prepareBodyStep(w, dt);
-    this.catchStep.prepare(w, dt);
+    // Capture the gait-selected footwork before the specialist action wins the
+    // task priorities. This lets the strike inherit the step rather than reset it.
     this.continuity.captureLocomotion(w);
     this.melee.prepareStep(w, dt);
     this.coupling.prepare(w);
     this.melee.finishCoupledTasks(w);
-    this.fightFlow.prepare(w, dt);
     this.continuity.couple(w, dt);
-    this.balance.prepare(w, dt);
+
     this.centroidal.prepare(w, dt);
     bodyTaskTargets.finalizeStep(dt);
 
@@ -142,7 +128,11 @@ export class ProceduralAnimationController extends AnimationController {
       const mode = bodyMode(a);
       activeBodyControl.driveTasksPreIntegration(w, a, rig, dt, mode);
       supportMotion.drive(
-        w, a, rig, dt, mode,
+        w,
+        a,
+        rig,
+        dt,
+        mode,
         a.kind === "player" && this.playerJumpRequested,
       );
       supportWrench.drive(w, a, rig, dt, mode);

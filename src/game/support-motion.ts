@@ -19,10 +19,6 @@ import { bodyTaskTargets, TASK_PRIORITY } from "./body-task-targets";
 const MIN_DT = 1 / 240;
 const MAX_DT = 1 / 30;
 
-export const EDGES = {
-  adaptiveRecovery: true,
-};
-
 const DRIVE_WEIGHT = new Float32Array([
   1.14,
   1.08,
@@ -126,23 +122,9 @@ export class SupportMotionController {
       targetVz += fz * recruitment * 0.78 * scale;
     }
 
-    // When the body is already losing support, good footing should help it
-    // correct quickly instead of making "stumble" synonymous with weak control.
-    // Poor grip still caps the reaction below, so oil/wetness remain physically
-    // meaningful rather than being bypassed by a stronger recovery servo.
-    const marginDebt = clamp01(
-      Math.max(0, -this.state.supportMargin) / (0.2 * scale),
-    );
-    const recoveryDemand = clamp01(
-      this.state.disturbance * 0.72 +
-      marginDebt * 0.82 +
-      (1 - this.state.upright) * 0.18,
-    );
     const response =
       mode === "stumble"
-        ? EDGES.adaptiveRecovery
-          ? 0.15 - recoveryDemand * 0.065
-          : 0.16
+        ? 0.16
         : mode === "recover"
           ? 0.13
           : a.kind === "player"
@@ -154,14 +136,6 @@ export class SupportMotionController {
     const supportFactor = supportCount >= 2 ? 1 : 0.78;
     const fatigue = 1 - clamp01(a.fatigue) * 0.34;
     const control = 0.5 + this.state.consciousness * 0.5;
-    const stumbleAuthority =
-      mode === "stumble"
-        ? EDGES.adaptiveRecovery
-          ? 0.56 + this.state.grip * 0.22
-          : 0.58
-        : mode === "recover"
-          ? 0.78
-          : 1;
     const traction =
       GRAVITY *
       (0.62 + this.state.grip * 1.48) *
@@ -169,7 +143,7 @@ export class SupportMotionController {
       this.state.legIntegrity *
       fatigue *
       control *
-      stumbleAuthority;
+      (mode === "stumble" ? 0.58 : mode === "recover" ? 0.78 : 1);
 
     const amag = Math.hypot(ax, az);
     if (amag > traction && amag > 1e-6) {
