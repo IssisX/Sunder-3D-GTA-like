@@ -51,6 +51,7 @@ function offer(
 function commitmentSample(enabled: boolean) {
   const { w, p, rig, catchStep } = isolated();
   p.intendSpeed = 2.8;
+  p.loco = 'stumble';
   const lStartX = rig.x[BODY.lFoot]!;
   const lStartY = rig.y[BODY.lFoot]!;
   const lStartZ = rig.z[BODY.lFoot]!;
@@ -112,6 +113,7 @@ function commitmentSample(enabled: boolean) {
       bodyTaskTargets.beginStep();
       offer(p, BODY.lFoot, lLandingX, lStartY, lLandingZ, TASK_PRIORITY.LOCOMOTION);
       offer(p, BODY.rFoot, rStartX + 0.26, rStartY, rStartZ, TASK_PRIORITY.LOCOMOTION);
+      p.loco = 'run';
       catchStep.prepare(w, STEP);
       handoffReleased =
         bodyTaskTargets.priorityFor(p, BODY.lFoot) === TASK_PRIORITY.LOCOMOTION &&
@@ -212,6 +214,21 @@ function measure(enabled: boolean) {
     CATCH_EDGES.committedCatchStep = old;
   }
 }
+
+function ordinaryGaitSample() {
+  const { w, p, rig, catchStep } = isolated();
+  p.intendSpeed = 4.6;
+  p.loco = 'run';
+  const node = BODY.lFoot;
+  bodyTaskTargets.beginStep();
+  offer(p, node, rig.x[node]! + 0.42, rig.y[node]!, rig.z[node]!, TASK_PRIORITY.CORRECTIVE_STEP);
+  catchStep.prepare(w, STEP);
+  return bodyTaskTargets.priorityFor(p, node);
+}
+
+const ordinaryPriority = ordinaryGaitSample();
+assert.equal(ordinaryPriority, TASK_PRIORITY.CORRECTIVE_STEP,
+  'ordinary gait correction was stolen by recovery commitment');
 
 const canonical = commitmentSample(true);
 const severed = commitmentSample(false);

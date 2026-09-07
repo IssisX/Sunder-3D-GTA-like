@@ -44,11 +44,10 @@ function lerp(a: number, b: number, t: number) {
 /**
  * Adds physical commitment to the existing capture-step planner.
  *
- * Normal locomotion remains the source of capture-step candidates while the
- * body is still in follow mode. Once the solved body has already crossed into
- * stumble, this same authority can derive the missing recovery candidate from
- * real COM, support and residual momentum instead of letting recovery disappear
- * simply because ordinary gait generation is suspended.
+ * Ordinary gait keeps ownership of ordinary foot placement and corrections.
+ * Once the solved body crosses into stumble, this authority can commit a
+ * recovery candidate from real COM, support and residual momentum instead of
+ * letting recovery disappear when ordinary gait generation is suspended.
  *
  * The chosen foot cannot flip or teleport its landing after commitment. Actual
  * solved support confirms landing, the new support accepts load, and ordinary
@@ -127,6 +126,14 @@ export class CommittedCatchStep {
 
       sampleMechanicalState(w, a, rig, h, this.state);
       const scale = bodyScale(a);
+
+      // The ordinary gait planner owns ordinary steps. The recovery-specific
+      // commitment must not turn every locomotion correction into a locked
+      // recovery flight or retain a stale landing after recovery ends.
+      if (a.loco !== "stumble" && rig.mode !== "stumble") {
+        this.reset(a);
+        continue;
+      }
 
       if (this.landingFoot[slot]!) {
         this.holdLanding(a, rig, slot, h, scale);

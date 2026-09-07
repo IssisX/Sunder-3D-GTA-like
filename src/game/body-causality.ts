@@ -86,8 +86,14 @@ export class BodyCausality {
         (stability < -0.3 ||
           this.state.supportCount === 0 ||
           this.state.consciousness < 0.22);
+      // A normal gait cycle may briefly have no measured support and carry
+      // angular momentum. Neither is evidence of an impact or a fall by
+      // itself. The ordinary gait/capture controller must retain authority
+      // until an actual disturbance or a materially fallen posture requires
+      // recovery. Otherwise the stumble label suspends gait, creating the
+      // collapse it was intended to detect.
       const unstable =
-        (this.state.disturbance > 0.16 || angularDemand > 0.16) &&
+        (this.state.disturbance > 0.16 || this.state.upright < 0.45) &&
         (stability < 0.27 ||
           this.state.supportScore < 0.2 ||
           a.balance < 0.2);
