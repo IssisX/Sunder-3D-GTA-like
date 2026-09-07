@@ -1,0 +1,20 @@
+name: Integration source snapshot
+on:
+  push:
+    branches:
+      - ChatGPT-B-integration
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive exact source revision
+        run: git archive --format=tar.gz --output=SUNDER-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SUNDER-source-${{ github.sha }}
+          path: SUNDER-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
