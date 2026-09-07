@@ -5,7 +5,7 @@ import { World, facing } from "./world";
 import type { Cam } from "./sim";
 
 /**
- * A rendered bone: a box spanning two body nodes.
+ * A rendered bone: a rounded capsule spanning two body nodes.
  *
  * The renderer reads node positions and never writes them. Every pose the
  * player sees -- gait, stumble, ragdoll, drape, get-up -- is solved state, not
@@ -22,15 +22,31 @@ interface LimbSpec {
   /** Pushes the near end sideways so shoulders and hips read as joints. */
   offX?: number;
   offY?: number;
+  /**
+   * How round the end caps are, as a fraction of the cross-section, default 1.
+   *
+   * A limb wants hemispherical ends -- that is what makes an elbow an elbow.
+   * A trunk does not: a torso is as wide as the shoulders but must not bulge
+   * that far above them or below the hips, or the chest swallows the neck and
+   * the belly hangs past the thighs. Flattening the caps costs nothing and is
+   * the difference between a body and a bean.
+   */
+  cap?: number;
 }
 
 interface Limb extends LimbSpec {
   mesh: THREE.Mesh;
+  /**
+   * Length of the capsule's straight middle section, in units of its own
+   * diameter. Fixed at rig time from the bone's rest length so that at rest
+   * `scale.y` equals `scale.x` and the end caps come out round; see `limbGeo`.
+   */
+  lc: number;
 }
 
 const HUMAN_LIMBS: LimbSpec[] = [
-  { a: 1, b: 2, w: 0.42, d: 0.25, region: "torso" },
-  { a: 0, b: 1, w: 0.2, d: 0.19, region: "torso" },
+  { a: 1, b: 2, w: 0.42, d: 0.25, region: "torso", cap: 0.45 },
+  { a: 0, b: 1, w: 0.2, d: 0.19, region: "torso", cap: 0.7 },
   { a: 1, b: 3, w: 0.14, d: 0.14, region: "larm", offX: -0.16, offY: 0.12 },
   { a: 3, b: 4, w: 0.11, d: 0.11, region: "larm" },
   { a: 1, b: 5, w: 0.14, d: 0.14, region: "rarm", offX: 0.16, offY: 0.12 },
@@ -42,8 +58,8 @@ const HUMAN_LIMBS: LimbSpec[] = [
 ];
 
 const BEAST_LIMBS: LimbSpec[] = [
-  { a: 1, b: 2, w: 0.62, d: 0.62, region: "torso" },
-  { a: 0, b: 1, w: 0.3, d: 0.3, region: "head" },
+  { a: 1, b: 2, w: 0.62, d: 0.62, region: "torso", cap: 0.5 },
+  { a: 0, b: 1, w: 0.3, d: 0.3, region: "head", cap: 0.8 },
   { a: 2, b: 7, w: 0.2, d: 0.2, region: "torso" },
   { a: 1, b: 3, w: 0.16, d: 0.16, region: "larm" },
   { a: 1, b: 4, w: 0.16, d: 0.16, region: "rarm" },
@@ -55,11 +71,40 @@ const UP = new THREE.Vector3(0, 1, 0);
 
 const GEO = {
   box: new THREE.BoxGeometry(1, 1, 1),
-  sphere: new THREE.SphereGeometry(0.5, 10, 8),
+  sphere: new THREE.SphereGeometry(0.5, 14, 10),
   cyl: new THREE.CylinderGeometry(0.5, 0.5, 1, 8),
   cone: new THREE.ConeGeometry(0.5, 1, 8),
   plane: new THREE.PlaneGeometry(1, 1),
 };
+
+/**
+ * Shared capsule geometry for a bone whose middle section is `lc` diameters
+ * long. Keyed by that ratio, so the whole village shares about a dozen of them.
+ *
+ * Bones were drawn as boxes: hard rectangular limbs that met at flat ends, so
+ * every elbow, knee and shoulder was a visible notch and a body read as a
+ * stack of blocks. A capsule is the same primitive the physics already uses --
+ * a segment with a radius -- so rounding the drawing does not invent a shape,
+ * it draws the one that was there. The caps of two bones that share a node sit
+ * on top of one another and blend into a ball joint for free, which is why
+ * this costs no extra meshes at all.
+ *
+ * Why a ratio rather than a length: the mesh is stretched to the LIVE bone
+ * length every frame, and a uniform y-scale would squash the caps into
+ * lozenges. Sizing the middle section in diameters makes `scale.y` equal
+ * `scale.x` at rest, so the caps stay hemispherical; a bone under load
+ * deviates from rest by well under a percent, being hard-constrained.
+ */
+const CAPS = new Map<number, THREE.CapsuleGeometry>();
+function limbGeo(lc: number) {
+  const key = Math.round(lc * 100) / 100;
+  let g = CAPS.get(key);
+  if (!g) {
+    g = new THREE.CapsuleGeometry(0.5, key, 3, 10);
+    CAPS.set(key, g);
+  }
+  return g;
+}
 
 function mat(
   color: number,
@@ -274,7 +319,7 @@ export class View {
     this.paintGround(w);
     this.buildTrees(w);
     for (const p of w.props) this.ensureProp(p);
-    for (const a of w.actors) this.ensureActor(a);
+    for (const a of w.actors) this.ensureActor(w, a);
     for (let i = 0; i < 18; i++) {
       const f = new THREE.Mesh(GEO.cone, this.fireMat);
       f.visible = false;
@@ -397,18 +442,21 @@ export class View {
     this.propMap.set(p.id, g);
   }
 
-  private ensureActor(a: Actor) {
+  private ensureActor(w: World, a: Actor) {
     if (this.actorMap.has(a.id)) return;
-    const g = this.makeRig(a, a.species === "human" ? HUMAN_LIMBS : BEAST_LIMBS);
+    const g = this.makeRig(w, a, a.species === "human" ? HUMAN_LIMBS : BEAST_LIMBS);
     this.scene.add(g);
     this.actorMap.set(a.id, g);
   }
 
-  /** Builds one box per bone. Nothing here is posed; `poseFromBody` does that. */
-  private makeRig(a: Actor, specs: LimbSpec[]) {
+  /** Builds one capsule per bone. Nothing here is posed; `poseFromBody` does that. */
+  private makeRig(w: World, a: Actor, specs: LimbSpec[]) {
     const g = new THREE.Group();
     const limbs: Limb[] = [];
     const skinRegions: Record<string, boolean> = { head: true, larm: true, rarm: true };
+    // Rest lengths come from the body plan, so the drawing cannot drift out of
+    // agreement with the skeleton it is drawing.
+    const plan = a.body >= 0 ? w.bodies.plan(a.body) : null;
     for (const sp of specs) {
       const base =
         a.species === "human"
@@ -418,13 +466,24 @@ export class View {
           : sp.region === "head"
             ? a.skin
             : a.cloth;
-      const m = new THREE.Mesh(GEO.box, mat(base));
+      let lc = 1;
+      if (plan) {
+        const na = plan.nodes[sp.a]!;
+        const nb = plan.nodes[sp.b]!;
+        // The near end is drawn from the offset point, so that is the length
+        // the capsule has to be built for.
+        const dx = nb.x - (na.x + (sp.offX ?? 0));
+        const dy = nb.y - (na.y + (sp.offY ?? 0));
+        const dz = nb.z - na.z;
+        lc = Math.max(0.05, Math.sqrt(dx * dx + dy * dy + dz * dz) / (sp.w * (sp.cap ?? 1)));
+      }
+      const m = new THREE.Mesh(limbGeo(lc), mat(base));
       m.castShadow = true;
       m.receiveShadow = true;
       g.add(m);
-      limbs.push({ ...sp, mesh: m });
+      limbs.push({ ...sp, mesh: m, lc: Math.round(lc * 100) / 100 });
     }
-    const head = new THREE.Mesh(GEO.box, mat(a.skin));
+    const head = new THREE.Mesh(GEO.sphere, mat(a.skin));
     head.name = "head";
     head.castShadow = true;
     g.add(head);
@@ -435,7 +494,7 @@ export class View {
     }
     if (a.species === "deer") {
       for (const sx of [-1, 1]) {
-        const h = new THREE.Mesh(GEO.box, mat(0x5a4a38));
+        const h = new THREE.Mesh(GEO.cone, mat(0x5a4a38));
         h.name = "antler" + sx;
         g.add(h);
       }
@@ -487,7 +546,9 @@ export class View {
         this.dir.set(dx / len, dy / len, dz / len);
         L.mesh.quaternion.setFromUnitVectors(UP, this.dir);
       }
-      L.mesh.scale.set(L.w * scale, Math.max(0.02, len), L.d * scale);
+      // The middle section spans the bone; the caps stay round because `lc`
+      // was sized so that this y-scale lands on `L.w * scale` at rest.
+      L.mesh.scale.set(L.w * scale, Math.max(0.02, len / L.lc), L.d * scale);
       // Damage tints the limb that took it, so the injury model is legible
       // on the body itself rather than only on the HUD silhouette.
       const hurt = injurySum(a.injuries[L.region]);
@@ -507,7 +568,7 @@ export class View {
     const hr = B.rad[kh]! * 2;
     if (head) {
       head.position.set(hx, hy, hz);
-      head.scale.set(hr * 0.92, hr, hr * 0.88);
+      head.scale.set(hr * 0.96, hr * 1.08, hr * 0.94);
       head.quaternion.copy((limbs[1] ?? limbs[0])!.mesh.quaternion);
       head.material = tintInjury(base.skin, Math.min(1.4, injurySum(a.injuries.head)));
     }
@@ -589,7 +650,7 @@ export class View {
       }
     }
     for (const a of w.actors) {
-      this.ensureActor(a);
+      this.ensureActor(w, a);
       const g = this.actorMap.get(a.id)!;
       // Node positions are world-space, so the group carries no transform of
       // its own. There is deliberately no `rotation.x = 1.25` fallback here: a
