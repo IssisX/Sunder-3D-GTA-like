@@ -22,6 +22,7 @@ import { EDGES, SUBSTEPS } from "./body";
 import { makeFrame } from "./frames";
 import { buildLevel } from "./level";
 import { stepWorld, type Cam } from "./sim";
+import { isControllable } from "./physique";
 import { REGIONS, STEP, injurySum, type Actor } from "./types";
 import { World } from "./world";
 
@@ -1193,6 +1194,81 @@ function checkFallingTimber(): CheckResult {
   };
 }
 
+/**
+ * The village, left alone, must stay on its feet -- and the check that says so
+ * has to measure the mechanism, not just the symptom.
+ *
+ * Everything else in this suite runs one or two actors through a scripted
+ * event in an otherwise empty world, and all of them passed green while the
+ * populated level was putting a body on the ground about five times a second
+ * on flat terrain with nothing happening. That is the case a falsifier suite
+ * exists to prevent: the checks could not fail on the thing that was wrong, so
+ * they had to be fixed before the code could be.
+ *
+ * Two numbers, because the outcome alone would not have found the cause:
+ *
+ *   `down`  how many actors are on the ground, and for how long. The outcome.
+ *   `vMax`  the fastest any node of any body is travelling, m/s. The cause.
+ *
+ * Node speed is the hinge. A pose target is a place a body is trying to put a
+ * limb; a target that moves faster than a limb can move is a teleport, the
+ * muscle chases it there, and the body genuinely arrives at the ground at that
+ * speed -- at which point the landing test does the right thing with a 20 m/s
+ * landing and the village falls over. Facing assigned by a fixed lerp
+ * coefficient, and a gait clock snapped to a half-cycle at the end of a catch
+ * step, were each moving targets at 30-80 m/s. Both are rate-bounded now, by
+ * what legs can actually do, and this is what proves it stayed that way: an
+ * ambling villager's limbs must not move like a thrown weapon.
+ */
+function checkVillageQuiet(): CheckResult {
+  const w = freshWorld(4242);
+  const B = w.bodies;
+  let worstDown = 0;
+  let downTicks = 0;
+  let vMax = 0;
+  let fast = 0;
+  let samples = 0;
+  const TICKS = 1200;
+  for (let i = 0; i < TICKS; i++) {
+    run(w, 1);
+    let down = 0;
+    for (const a of w.actors) {
+      if (a.loco === "ragdoll" || a.loco === "down") down++;
+      // Only bodies driving themselves. A ragdoll thrown by a blow is supposed
+      // to move fast; the claim here is about what a body does to itself.
+      if (a.body < 0 || !isControllable(a)) continue;
+      const b = B.base(a.body);
+      for (let j = 0; j < B.count[a.body]!; j++) {
+        const k = b + j;
+        const s = Math.hypot(B.vnx[k]!, B.vny[k]!, B.vnz[k]!);
+        if (s > vMax) vMax = s;
+        if (s > 8) fast++;
+        samples++;
+      }
+    }
+    if (down > worstDown) worstDown = down;
+    downTicks += down;
+  }
+  const perActor = downTicks / (TICKS * Math.max(1, w.actors.length));
+  const busy = fast / Math.max(1, samples);
+  // A limb tip in an all-out strike runs at about 15 m/s and the body carries
+  // it, so 22 is the honest ceiling for anything on a body; sustained traffic
+  // above 8 m/s in a village of people walking is not. Measured before the
+  // fix: 33 m/s peak and 4% of every node-tick over 8, on both hands and both
+  // feet, while their owners ambled at half a metre per second.
+  const pass = worstDown <= 5 && perActor < 0.03 && vMax < 22 && busy < 0.01;
+  return {
+    name: "village-quiet",
+    pass,
+    detail:
+      `${TICKS} ticks of the populated level, no input: worst ${worstDown} of ` +
+      `${w.actors.length} actors down at once (need <= 5), ` +
+      `${(perActor * 100).toFixed(2)}% of actor-ticks down (need < 3%), ` +
+      `fastest self-driven node ${vMax.toFixed(1)} m/s (need < 22), ` +
+      `${(busy * 100).toFixed(2)}% of node-ticks over 8 m/s (need < 1%)`,
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * Suite
  * ------------------------------------------------------------------ */
@@ -1201,6 +1277,7 @@ export function runFalsifiers(): CheckResult[] {
   return [
     checkReplay(),
     checkRest(),
+    checkVillageQuiet(),
     checkLoopGain(),
     checkImpactLocality(),
     checkBudget(),
@@ -1236,6 +1313,11 @@ export interface BodyProbe {
   support: () => number;
   /** Mass resting on the player, kg. */
   pile: () => number;
+  /**
+   * How much of the level is on the ground right now. The number `village-quiet`
+   * asserts, available live: a healthy village reads 0-2 of 34.
+   */
+  down: () => { down: number; actors: number };
   /** Node count and body-pair count actually being solved. */
   cost: () => { nodes: number; substeps: number };
   /** Knocks the player down through the real impulse path. */
@@ -1249,6 +1331,10 @@ export function makeBodyProbe(w: World, enable: () => void): BodyProbe {
     motor: () => ({ ...w.player().motor }),
     support: () => w.player().support,
     pile: () => w.player().pileLoad,
+    down: () => ({
+      down: w.actors.filter((a) => a.loco === "ragdoll" || a.loco === "down").length,
+      actors: w.actors.length,
+    }),
     cost: () => {
       let nodes = 0;
       for (const a of w.actors) if (a.body >= 0) nodes += w.bodies.count[a.body]!;

@@ -281,6 +281,8 @@ export class World {
       catchT: 0,
       catchLeg: 0,
       catchStrideM: 0,
+      catchFX: 0,
+      catchFZ: 0,
       catchLanded: false,
       catchCooldown: 0,
       recoverX: 0,

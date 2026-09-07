@@ -318,6 +318,21 @@ export interface Actor {
    * catch legitimately still costs you.
    */
   catchStrideM: number;
+  /**
+   * World-space foothold this catch step is committed to, m. Frozen at the
+   * moment of commitment, not recomputed.
+   *
+   * The capture point -- COM plus velocity times the pendulum time constant --
+   * decides WHERE to step at the instant the body decides TO step. After that
+   * it is a place on the ground. Reading it live instead made the foot chase a
+   * point that jumped 30 cm whenever the COM velocity twitched, which is a
+   * target moving at 15 m/s, which is a foot arriving at the floor like a
+   * dropped anvil. A body that has thrown a foot out to catch itself has
+   * committed; if the commitment turns out to be wrong, that is a new
+   * decision, and `catchT` running out is where it gets made.
+   */
+  catchFX: number;
+  catchFZ: number;
   /** Has the caught foot's real touchdown already resynced gait phase this catch. */
   catchLanded: boolean;
   /**

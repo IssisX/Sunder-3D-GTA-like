@@ -21,7 +21,6 @@ import {
   dist2,
   facing,
   injurySum,
-  lerpAng,
   locoSpeed,
   rightOf,
 } from "./world";
@@ -46,6 +45,7 @@ import {
   stanceLoad,
   stepBodies,
   updateMotor,
+  steerYaw,
 } from "./physique";
 import {
   avoidBodies,
@@ -232,12 +232,11 @@ function applyPlayer(w: World, dt: number, input: Actions, cam: Cam) {
   if (p.balance < 0.4) max *= 0.4 + p.balance;
   p.intendSpeed = wishMag * max;
 
-  if (wishMag > 0.08) {
-    const ty = Math.atan2(-p.intendX, -p.intendZ);
-    p.yaw = lerpAng(p.yaw, ty, 1 - Math.exp(-dt * 8));
-  } else {
-    p.yaw = lerpAng(p.yaw, cam.yaw, 1 - Math.exp(-dt * 4));
-  }
+  // Facing goes through `steerYaw` -- the legs decide how fast the body comes
+  // round, not the input. This is what stops the camera from spinning the pose
+  // faster than a body can pivot, and it is why turning under sprint is wide.
+  if (wishMag > 0.08) steerYaw(p, Math.atan2(-p.intendX, -p.intendZ), dt);
+  else steerYaw(p, cam.yaw, dt, 0.55);
 
   if (input.sprint && wishMag > 0.2 && !p.crouch) {
     p.stamina = Math.max(0, p.stamina - dt * 0.18);
@@ -578,6 +577,16 @@ function stepAI(w: World, dt: number) {
     const limit =
       want > prevSpeed ? GROUND_ACCEL * (0.3 + 0.7 * legMotor(a)) * dt : GROUND_BRAKE * dt;
     a.intendSpeed = clamp(want, prevSpeed - limit, prevSpeed + limit);
+    // The same law for the other half of intent. Facing used to be assigned
+    // outright -- `yaw = lerpAng(yaw, want, 0.25)` inside `seek` -- so an
+    // avoidance flip put 30 degrees of rotation into a single tick. Every pose
+    // target hangs off `a.yaw`, so that rotation teleported the whole pose:
+    // targets moved at tens of m/s, the muscle chased them there, and the
+    // bodies arrived at the ground fast enough for the landing test to put
+    // them down. Turning is now something the legs do, at `turnRate`.
+    if (a.intendX !== 0 || a.intendZ !== 0) {
+      steerYaw(a, Math.atan2(-a.intendX, -a.intendZ), dt);
+    }
   }
 }
 
@@ -643,7 +652,6 @@ function seek(w: World, a: Actor, x: number, z: number, speed: number, towardId 
   // becomes individual per actor, in both real travel speed and -- because
   // the gait clock integrates off the resulting a.vx/a.vz -- gait rate too.
   a.intendSpeed = speed * a.moveScale;
-  a.yaw = lerpAng(a.yaw, Math.atan2(-a.intendX, -a.intendZ), 0.25);
   return m;
 }
 
@@ -764,7 +772,14 @@ function humanAI(w: World, a: Actor, dt: number, fire: { x: number; z: number; d
           );
         } else {
           a.intendSpeed = 0;
-          a.yaw = lerpAng(a.yaw, Math.atan2(-(player.x - a.x), -(player.z - a.z)), 0.3);
+          // Facing is intent like any other, and the bound above applies to it:
+          // a grappler turns onto its target as fast as its legs allow, no
+          // faster, and a wounded one is visibly slow to come round.
+          const fdx = player.x - a.x;
+          const fdz = player.z - a.z;
+          const fm = Math.hypot(fdx, fdz) || 1;
+          a.intendX = fdx / fm;
+          a.intendZ = fdz / fm;
           takeHold(w, a, player);
         }
         return;

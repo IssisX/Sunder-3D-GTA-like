@@ -460,6 +460,20 @@ export class Bodies {
   vnx = new Float32Array(this.nCap);
   vny = new Float32Array(this.nCap);
   vnz = new Float32Array(this.nCap);
+  /**
+   * Velocity of the node's POSE TARGET, m/s: the motion the muscle is asking
+   * for, as opposed to the motion the node has. Written once per tick where the
+   * target is written, and read by the pose damper in `solvePose`.
+   *
+   * A muscle resists a limb moving away from where it is being put, not a limb
+   * moving at all -- a sprinter's foot is travelling at 8 m/s and is perfectly
+   * under control. Damping against the target's own motion is what separates
+   * those two, and it is why locomotion survives a damper stiff enough to stop
+   * the body ringing.
+   */
+  tvx = new Float32Array(this.nCap);
+  tvy = new Float32Array(this.nCap);
+  tvz = new Float32Array(this.nCap);
   /** Submerged fraction of the node this tick, dimensionless [0,1]. */
   wet = new Float32Array(this.nCap);
 
@@ -589,6 +603,9 @@ export class Bodies {
       this.vnx[k] = 0;
       this.vny[k] = 0;
       this.vnz[k] = 0;
+      this.tvx[k] = 0;
+      this.tvy[k] = 0;
+      this.tvz[k] = 0;
       this.jhard[k] = 0;
       this.wet[k] = 0;
     }
@@ -654,6 +671,9 @@ export class Bodies {
       this.vnx[k] = 0;
       this.vny[k] = 0;
       this.vnz[k] = 0;
+      this.tvx[k] = 0;
+      this.tvy[k] = 0;
+      this.tvz[k] = 0;
     }
     this.hitNode[slot] = -1;
     this.hitImp[slot] = 0;
@@ -1347,6 +1367,52 @@ export function solvePose(
     if (g <= 0) continue;
     // A target below the floor turns the pose constraint into a jack: it drives
     // the node down, the contact refuses, and the reaction lifts the body.
+    // --- the damping half of the muscle ---------------------------------
+    // The attractor above is a spring with no damper, and an undamped spring
+    // rings. It had been ringing: measured across a populated level, every
+    // node of every villager was oscillating, hands and feet peaking at 25-33
+    // m/s while their owners ambled at 0.5 m/s, and the landing test honestly
+    // reported those as impacts -- so the whole village fell over on flat
+    // ground, and any pose change large enough (a punch) knocked its own
+    // thrower down without touching anything.
+    //
+    // The rate is `g` itself, not a new constant: a first-order position
+    // filter of rate w is critically matched by a velocity damper of the same
+    // rate, so the muscle damps exactly as hard as it pulls -- and since `g`
+    // is `poseGain(motor)`, a damaged limb loses its damping precisely as it
+    // loses its drive, and a limp body is floppy without a second law.
+    //
+    // What it damps is velocity RELATIVE TO THE TARGET's own motion, which is
+    // what keeps a sprint a sprint: the targets travel with the body, so bulk
+    // locomotion has no relative velocity to lose.
+    const rvx = B.px[k]! - B.ox[k]! - B.tvx[k]! * h;
+    const rvy = B.py[k]! - B.oy[k]! - B.tvy[k]! * h;
+    const rvz = B.pz[k]! - B.oz[k]! - B.tvz[k]! * h;
+    let cx = rvx * g;
+    let cy = rvy * g;
+    let cz = rvz * g;
+    // Passivity. A damper may only take kinetic energy out of a node, never
+    // put it in, whatever the target claims to be doing -- and a target CAN
+    // claim anything for one tick (a teleport, stance authority collapsing,
+    // a limb entering a new pose). |v - c| <= |v| is exactly c.c <= 2 c.v, so
+    // scale the correction down to that bound and drop it outright when it
+    // points the wrong way. This is what makes the pose loop provably
+    // non-amplifying on the damping half rather than merely tuned.
+    const vx = B.px[k]! - B.ox[k]!;
+    const vy = B.py[k]! - B.oy[k]!;
+    const vz = B.pz[k]! - B.oz[k]!;
+    const cv = cx * vx + cy * vy + cz * vz;
+    const cc = cx * cx + cy * cy + cz * cz;
+    if (cc > 2 * cv) {
+      const s = cv > 0 ? (2 * cv) / cc : 0;
+      cx *= s;
+      cy *= s;
+      cz *= s;
+    }
+    B.ox[k] = B.ox[k]! + cx;
+    B.oy[k] = B.oy[k]! + cy;
+    B.oz[k] = B.oz[k]! + cz;
+
     const ty = Math.max(B.ty[k]!, groundY + B.rad[k]!);
     let dx = (B.tx[k]! - B.px[k]!) * g;
     let dy = (ty - B.py[k]!) * g;
@@ -1755,19 +1821,30 @@ function contact(
   // appeared around it. Push it out, but do not bill it for an impact it never
   // had: the alternative is that anything placed badly is instantly maimed.
   const artefact = pen > B.rad[k]!;
-  // signed normal displacement over the substep: v_n * h
+  // Signed normal displacement over the substep: what the SOLVER still has to
+  // take out. It is not a velocity readout -- see below.
   const on = (B.px[k]! - B.ox[k]!) * nx + (B.py[k]! - B.oy[k]!) * ny + (B.pz[k]! - B.oz[k]!) * nz;
   if (on < 0) {
-    const closing = -on / h; // m/s
-    if (!artefact) {
-      B.jimp[k] = B.jimp[k]! + B.mass[k]! * closing; // N*s, summed: this is force
-      if (closing > B.vmax[k]!) B.vmax[k] = closing; // m/s, peak: this is damage
-      if (hard > B.jhard[k]!) B.jhard[k] = hard;
-    }
     // remove the closing normal velocity (perfectly inelastic)
     B.ox[k] = B.ox[k]! + nx * on;
     B.oy[k] = B.oy[k]! + ny * on;
     B.oz[k] = B.oz[k]! + nz * on;
+  }
+  // The impact is the speed the node ARRIVED with, read from `vnx` -- never
+  // from (p - o) this substep, exactly as `solvePair` already does. By the time
+  // world contact runs, `solvePose` and `solveLimits` have both written `px`
+  // without moving `ox`, so (p - o)/h bills every muscle correction and every
+  // joint-limit projection as a collision. At h = 1/240 a one-centimetre pose
+  // correction reads as 2.4 m/s of impact, and a limit projection reads as
+  // tens: standing still in a crowd measured 27 m/s of landing, so the whole
+  // village fell over on flat ground and a punch -- the largest pose change a
+  // body makes -- knocked its own thrower down without touching anything.
+  const vn = B.vnx[k]! * nx + B.vny[k]! * ny + B.vnz[k]! * nz;
+  if (vn < 0 && !artefact) {
+    const closing = -vn; // m/s
+    B.jimp[k] = B.jimp[k]! + B.mass[k]! * closing; // N*s, summed: this is force
+    if (closing > B.vmax[k]!) B.vmax[k] = closing; // m/s, peak: this is damage
+    if (hard > B.jhard[k]!) B.jhard[k] = hard;
   }
   // depenetrate p and o together so no velocity is created by the correction,
   // and unwind an embedded overlap at a bounded rate for the same reason a
@@ -1797,7 +1874,14 @@ function contact(
   B.py[k] = B.py[k]! - ty * s;
   B.pz[k] = B.pz[k]! - tz * s;
   if (artefact) return;
-  const slide = (tm * s) / h; // m/s of sliding actually arrested
+  // Same rule tangentially: the abrasion is the speed the node was travelling
+  // along the surface when it got here, times the fraction friction actually
+  // arrests. `s` is a fraction, so it is free of the phantom; `tm` is not.
+  const vtx = B.vnx[k]! - nx * vn;
+  const vty = B.vny[k]! - ny * vn;
+  const vtz = B.vnz[k]! - nz * vn;
+  const slide = Math.sqrt(vtx * vtx + vty * vty + vtz * vtz) * s; // m/s arrested
+  if (slide <= 0) return;
   B.jtan[k] = B.jtan[k]! + B.mass[k]! * slide;
   if (slide > B.vtan[k]!) B.vtan[k] = slide;
 }

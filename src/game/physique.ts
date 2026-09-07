@@ -51,7 +51,9 @@ import {
   REGIONS,
   injurySum,
 } from "./types";
-import { World, clamp, facing } from "./world";
+import { World, clamp, facing,
+  angDiff,
+} from "./world";
 import {
   beginFrames,
   endFrames,
@@ -308,6 +310,64 @@ export function isControllable(a: Actor): boolean {
     a.loco !== "pin" &&
     a.loco !== "vault"
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * Facing is something the legs do
+ * ------------------------------------------------------------------ */
+
+/**
+ * Fastest a body can pivot in place, rad/s, at full leg authority.
+ *
+ * About 400 deg/s: a sharp combat pivot, and roughly the ceiling for a human
+ * turning on both feet without stepping round.
+ */
+const PIVOT_RATE = 7;
+/**
+ * Lateral ground acceleration a body can hold through a turn, m/s^2.
+ *
+ * Slightly under 1 g, which is what a foot on soil will actually take before
+ * it slides. This -- not a tuning number -- is what makes a sprint turn wide
+ * and a walk turn tight: at speed v the tightest sustainable turn is
+ * `LAT_ACCEL / v`, so 6.6 m/s comes out at 1.4 rad/s, a 4.9 m radius.
+ */
+const LAT_ACCEL = 9;
+
+/**
+ * The fastest this body can currently change its facing, rad/s.
+ *
+ * Facing had been assigned rather than achieved: `yaw = lerpAng(yaw, want, 0.25)`
+ * at every AI steer, which is both a fixed per-frame coefficient and, more
+ * seriously, unbounded in rate -- an avoidance flip put 30 deg of rotation into
+ * a single tick. Every pose target is built from `a.yaw`, so that rotation
+ * teleported the whole pose: measured across the populated level, pose targets
+ * were moving at 20-50 m/s, the muscle faithfully chased them there, and the
+ * bodies genuinely arrived at the ground at 15-30 m/s. The landing test then
+ * did exactly what it should with a 20 m/s landing. That is why the village
+ * fell over on flat ground.
+ *
+ * Reading the bound off the legs is what makes it one truth rather than a
+ * clamp: a damaged leg turns slowly through the same `legMotor` that already
+ * sets gait speed and catch reach, a body with no stance barely turns at all,
+ * and a body at speed is limited by what its feet can hold sideways rather
+ * than by anything authored.
+ */
+export function turnRate(a: Actor) {
+  const spd = Math.sqrt(a.vx * a.vx + a.vz * a.vz);
+  const grip = spd > LAT_ACCEL / PIVOT_RATE ? LAT_ACCEL / spd : PIVOT_RATE;
+  return grip * (0.25 + 0.75 * legMotor(a)) * clamp(a.stanceAuth, 0, 1);
+}
+
+/**
+ * Steers `a.yaw` toward `want` at no more than the body can actually pivot.
+ *
+ * The single writer for facing. `urgency` in [0,1] is how hard the body is
+ * trying, not a way past the bound.
+ */
+export function steerYaw(a: Actor, want: number, dt: number, urgency = 1) {
+  const d = angDiff(a.yaw, want);
+  const lim = turnRate(a) * clamp(urgency, 0, 1) * dt;
+  a.yaw += clamp(d, -lim, lim);
 }
 
 /* ------------------------------------------------------------------ *
@@ -621,17 +681,10 @@ function writePose(w: World, a: Actor, dt: number) {
     // ground contact.
     if (a.catchT > 0) {
       const foot = a.catchLeg === 0 ? 8 : 10;
-      const hCom = Math.max(0.2, B.comY[slot]! - a.y);
-      const tau = Math.sqrt(hCom / GRAVITY);
-      const cx = B.comX[slot]! + B.comVX[slot]! * tau;
-      const cz = B.comZ[slot]! + B.comVZ[slot]! * tau;
-      const dx = cx - B.comX[slot]!;
-      const dz = cz - B.comZ[slot]!;
-      const dm = Math.sqrt(dx * dx + dz * dz);
-      const ox = dm > 1e-4 ? (dx / dm) * 0.1 : 0;
-      const oz = dm > 1e-4 ? (dz / dm) * 0.1 : 0;
-      const tX = cx + ox - a.x;
-      const tZ = cz + oz - a.z;
+      // The foothold committed to at the start of the step, in world space.
+      // The body moves; the ground does not.
+      const tX = a.catchFX - a.x;
+      const tZ = a.catchFZ - a.z;
       // World displacement from the body origin, rotated into the same
       // body-local frame the rest of the pose -- and twoLink below -- reads.
       const footY = 0.1 * s;
@@ -679,14 +732,25 @@ function writePose(w: World, a: Actor, dt: number) {
   // returns during a get-up, the target walks from prone to standing instead of
   // teleporting there and launching the body off the ground.
   const reach = clamp(a.stanceAuth, 0, 1);
+  const invDt = dt > 0 ? 1 / dt : 0;
   for (let i = 0; i < n; i++) {
     const k = b + i;
     const wx = a.x + lx[i]! * c + lz[i]! * sn;
     const wy = a.y + ly[i]!;
     const wz = a.z - lx[i]! * sn + lz[i]! * c;
-    B.tx[k] = B.px[k]! + (wx - B.px[k]!) * reach;
-    B.ty[k] = B.py[k]! + (wy - B.py[k]!) * reach;
-    B.tz[k] = B.pz[k]! + (wz - B.pz[k]!) * reach;
+    const ntx = B.px[k]! + (wx - B.px[k]!) * reach;
+    const nty = B.py[k]! + (wy - B.py[k]!) * reach;
+    const ntz = B.pz[k]! + (wz - B.pz[k]!) * reach;
+    // How fast the muscle is asking this node to travel. The pose damper needs
+    // it to tell a swinging limb from a limb being knocked about; nothing else
+    // reads it, and a teleport is already compensated because `translate`
+    // carries the targets with the body before this runs again.
+    B.tvx[k] = (ntx - B.tx[k]!) * invDt;
+    B.tvy[k] = (nty - B.ty[k]!) * invDt;
+    B.tvz[k] = (ntz - B.tz[k]!) * invDt;
+    B.tx[k] = ntx;
+    B.ty[k] = nty;
+    B.tz[k] = ntz;
   }
 
   // Publish the foothold this stride is committed to: one half-stride ahead of
@@ -1060,6 +1124,16 @@ function consume(w: World, a: Actor, dt: number) {
   // get-up; a hand pressing on the floor to push yourself up does not, and
   // using every node's contact makes a rising body knock itself back down.
   let trunkPeak = 0;
+  /**
+   * Peak closing speed on the LEGS only: what the landing test is actually
+   * about. Taking the max over every node meant a hand brushing a wall, an
+   * elbow catching a doorframe or a shoulder taking a shove was measured
+   * against the legs' capacity to absorb a landing -- so any contact anywhere
+   * on the body could drop you, which is not what losing your footing is. A
+   * blow that lands elsewhere still reaches balance, through pose error and
+   * through the support polygon; it just does not pretend to be a landing.
+   */
+  let legPeak = 0;
   const plan = B.plan(slot);
   for (let i = 0; i < n; i++) {
     const k = b + i;
@@ -1112,6 +1186,7 @@ function consume(w: World, a: Actor, dt: number) {
     if (i === plan.head || i === plan.chest || i === plan.pelvis) {
       trunkPeak = Math.max(trunkPeak, B.vmax[k]!);
     }
+    if (ri === 4 || ri === 5) legPeak = Math.max(legPeak, B.vmax[k]!);
     if (B.vmax[k]! > peak) {
       peak = B.vmax[k]!;
       peakRegion = REGIONS[B.region[k]!]!;
@@ -1277,8 +1352,8 @@ function consume(w: World, a: Actor, dt: number) {
       // no shove or hit involved. An already-committed catch now rides out
       // its own 0.36s hold through a momentary loss of support instead of
       // being cancelled and immediately re-decided.
-    } else if (peak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
-      collapse(w, a, 0.35 + peak * 0.04);
+    } else if (legPeak > LAND_LIMIT * (0.25 + legMotor(a) * 0.75)) {
+      collapse(w, a, 0.35 + legPeak * 0.04);
     } else if (losing) {
       // A capture point outside the base is not yet a fall. A body catches
       // itself by planting a foot, so what decides the excursion is whether a
@@ -1325,6 +1400,24 @@ function consume(w: World, a: Actor, dt: number) {
           // number just used above to decide whether to even reach this
           // branch is what gets frozen for the rest of the catch.
           a.catchStrideM = liveStrideM;
+          // Where the foot is going, decided once, here. The capture point is
+          // the place a body would have to step to arrest the fall it is
+          // already in -- that is what makes it the right answer at the moment
+          // of the decision, and exactly why re-asking it every tick afterward
+          // is wrong: the fall it is arresting changes as the catch works.
+          {
+            const hCom = Math.max(0.2, B.comY[slot]! - a.y);
+            const tau = Math.sqrt(hCom / GRAVITY);
+            const cx = B.comX[slot]! + B.comVX[slot]! * tau;
+            const cz = B.comZ[slot]! + B.comVZ[slot]! * tau;
+            const dx = cx - B.comX[slot]!;
+            const dz = cz - B.comZ[slot]!;
+            const dm = Math.sqrt(dx * dx + dz * dz);
+            // A hand's width past the capture point: a catch that lands exactly
+            // on it is neutrally balanced, which is not caught.
+            a.catchFX = cx + (dm > 1e-4 ? (dx / dm) * 0.1 : 0);
+            a.catchFZ = cz + (dm > 1e-4 ? (dz / dm) * 0.1 : 0);
+          }
           a.stamina = Math.max(0, a.stamina - 0.025);
           if (a.loco !== "stumble") {
             a.loco = "stumble";
@@ -1348,9 +1441,26 @@ function consume(w: World, a: Actor, dt: number) {
     // swinging through from a real plant, the same as an unassisted step.
     if (catchFootTouched) {
       a.catchLanded = true;
+    }
+    // Re-synced at a rate, not snapped. Assigning the phase outright moved it
+    // by up to a full half-cycle in one tick, and since the foot target is
+    // `A*sin(phase)`, that relocated a foot target at up to 79 m/s -- measured
+    // in the populated level as the single largest pose discontinuity there
+    // was. The muscle then chased the foot to the floor at 20 m/s and the
+    // landing test put the body down, which called another catch step, which
+    // snapped the phase again: the fall was feeding itself.
+    //
+    // The bound is stated where it means something -- how fast the gait clock
+    // may relocate a FOOT, not how fast a phase may change -- so it scales
+    // with stride automatically and cannot be wrong at some other speed.
+    if (a.catchT > 0 && a.catchLanded) {
       const target = a.catchLeg === 0 ? Math.PI : 0;
       const twoPi = Math.PI * 2;
-      a.walkPhase = target + Math.round((a.walkPhase - target) / twoPi) * twoPi;
+      let d = target - a.walkPhase;
+      d -= Math.round(d / twoPi) * twoPi;
+      const stride = Math.max(strideAmp(Math.hypot(a.vx, a.vz), B.scale[slot]!), 0.02);
+      const step = (PHASE_RESYNC_SPEED / stride) * dt;
+      a.walkPhase += clamp(d, -step, step);
     }
   } else if (a.loco === "ragdoll" || a.loco === "pin") {
     a.stanceAuth = Math.max(0, a.stanceAuth - dt * (LIMP_RATE + 6 * (1 - a.consciousness)));
@@ -1428,6 +1538,15 @@ export function collapse(w: World, a: Actor, hold = 0) {
   a.intendSpeed = 0;
   if (a.kind === "human" || a.kind === "player") w.emitSound(a.x, a.z, 0.5, "impact", a.id);
 }
+
+/**
+ * How fast the gait clock may relocate a foot target while re-syncing, m/s.
+ *
+ * A body can hurry or delay a step; it cannot put its foot somewhere else
+ * instantly. 2.5 m/s is a brisk reposition and is well inside what the muscle
+ * can follow, so the re-sync never registers as an impact.
+ */
+const PHASE_RESYNC_SPEED = 2.5;
 
 /** Rate at which a body that has lost its stance gives up the rest of it, s^-1. */
 const LIMP_RATE = 4.2;
