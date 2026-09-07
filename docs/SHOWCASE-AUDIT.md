@@ -1,3 +1,3 @@
 # Showcase integration audit
 
-The full source integration is prepared in commit 58010ac8a21dc958d774d300efb565c06aa9771a. The canonical ChatGPT-B branch remains unchanged until verification.
+The source integration is prepared in merge commit 3f4ff81a1b3b41b806994d441286cb68c284b312. This branch is an isolated validation candidate, and ChatGPT-B remains unchanged until the build and regression checks pass.
