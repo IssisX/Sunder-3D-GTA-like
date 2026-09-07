@@ -1,3 +1,3 @@
 # Showcase integration audit
 
-Isolated source-comparison branch. ChatGPT-B remains untouched until the complete integration is verified.
+Candidate source is assembled on ChatGPT-B-showcase. See SHOWCASE-INTEGRATION.md for the implemented presentation, audio, and mechanics seams and their verification requirements.
