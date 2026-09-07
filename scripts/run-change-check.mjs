@@ -14,4 +14,4 @@ registerHooks({
     return { format: 'module', source, shortCircuit: true };
   },
 });
-await import('../tests/substrate/committed-catch-step-probe.ts');
+await import('../tests/substrate/body-tactics-probe.ts');

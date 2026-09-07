@@ -1,0 +1,97 @@
+name: Check Synth change
+
+on:
+  push:
+    branches:
+      - Synth
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synth-change
+  cancel-in-progress: false
+
+jobs:
+  change-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Synth branch state
+        uses: actions/checkout@v4
+
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install project dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Run one targeted binary check
+        run: node scripts/run-change-check.mjs
+
+  playable:
+    if: contains(github.event.head_commit.message, '[build]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout Synth branch state
+        uses: actions/checkout@v4
+
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install project dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck Synth source
+        run: npm run typecheck
+
+      - name: Build Synth browser preview from source
+        run: npm run build:local-preview
+
+      - name: Verify browser preview bundle
+        run: |
+          test -s local-preview-dist/index.html
+          test -s local-preview-dist/style.css
+          test -s local-preview-dist/sunder.js
+          test -s local-preview-dist/SUNDER.html
+
+      - name: Upload downloadable standalone fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUNDER-Synth-${{ github.sha }}
+          path: local-preview-dist/SUNDER.html
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload browser preview site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: local-preview-dist
+
+  deploy:
+    name: Deploy Synth browser preview
+    if: contains(github.event.head_commit.message, '[build]')
+    needs: playable
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages-preview
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy preview to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

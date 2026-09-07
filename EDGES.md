@@ -94,3 +94,27 @@ ground height instead of classifying the kick landing as a ragdoll event.
 The next capabilities made cheaper are touch-intent combat buffering over the
 same mechanical action tasks, and support-aware action continuation that carries
 locomotion/stance through attack and recovery instead of cancelling movement.
+
+# Synth solved-body tactics harvest — 2026-09-07
+
+Canonical branch: `Synth`, based on `ChatGPT-version` at `aed29bbe`. Rival source:
+Claude's body-aware tactics concept, re-expressed against Synth's stronger solved
+`MechanicalState` rather than importing Claude's older motor-authority body.
+
+| Causal edge | Mechanism | Consumers / falsifier |
+| --- | --- | --- |
+| Solved body capability → tactical commitment | Continuous capability derives from consciousness × upright posture × leg integrity, reduced by measured support loss/disturbance | Guard attack commitment, closing pressure; `tests/substrate/body-tactics-probe.ts` severs `BODY_TACTICS_EDGES.solvedBodyTactics` |
+| Solved incapacity → traversability | The same incapacity/upright readout expands a smooth repulsion radius around fallen bodies | NPC route intent bends around body piles without inventing navigation-only body state |
+| Witnessed incapacity → social response | Nearby physically incapacitated humans drive civilian fear and allied-guard alert from the same scalar | Crowd/guard behavior reads body truth instead of death/HP-only triggers |
+
+Worst pause/step seam: the AI reads the **previous completed solved body** before
+legacy AI writes this tick's intent, then tactical mediation changes intent only
+after legacy AI and before the next body solve. It therefore never reads a
+half-solved pose and never writes renderer/body positions. Carrier/contact still
+owns whether a close, strike, shove, or other action actually succeeds.
+
+The targeted binary check is `node scripts/run-change-check.mjs`; Synth's workflow
+runs that probe on every Synth push and builds the canonical browser artifact on
+`[build]` commits. Performance delta is not claimed until CI/runtime measurement
+exists. This edge makes body-aware rescue/containment and topology-aware crowd
+routing cheaper next because both can consume the same solved capability field.

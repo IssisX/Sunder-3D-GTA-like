@@ -5,6 +5,7 @@ import { AnimationController } from "./AnimationController";
 import { MeleeKinematics } from "./melee-kinematics";
 import { beastMelee } from "./beast-melee-kinematics";
 import { SocialAwarenessController } from "./social-awareness";
+import { solvedBodyTactics } from "./body-tactics";
 import { impactDynamics } from "./impact-dynamics";
 import { BodyCausality } from "./body-causality";
 import { activeBodyControl } from "./active-body-control";
@@ -25,7 +26,9 @@ import { KineticFightFlow } from "./kinetic-fight-flow";
  *
  * Fixed-step ownership:
  *   pre-world: snapshot solved humanoid root + input/action/AI intent shaping
+ *   solved-body tactics: prior solved support/upright/injury state becomes AI evidence
  *   world sim: compatibility prediction for legacy game systems
+ *   tactical mediation: combat commitment + fallen-body routing + social response
  *   root firewall: discard temporary capsule translation for body-owned humans
  *   post-world/pre-body: locomotion + capture-step commitment + melee task generation
  *   whole-body coupling: support / COM / stance tasks derived from actions
@@ -53,6 +56,7 @@ export class ProceduralAnimationController extends AnimationController {
 
   override bootstrap(w: World) {
     super.bootstrap(w);
+    solvedBodyTactics.bind(this);
     impactDynamics.bind(this);
     impactDynamics.bootstrap(w);
     beastMelee.bind(this);
@@ -70,6 +74,7 @@ export class ProceduralAnimationController extends AnimationController {
 
   override clear() {
     super.clear();
+    solvedBodyTactics.clear();
     impactDynamics.clear();
     beastMelee.clear();
     this.melee.clear();
@@ -117,12 +122,19 @@ export class ProceduralAnimationController extends AnimationController {
 
   override prepareStep(w: World, dt: number) {
     this.rootAuthority.capture(w);
+    // Read the previous solved body before legacy AI writes this tick's intent.
+    // This preserves solver truth as the evidence source without introducing a
+    // second body representation or delaying the body's physical response.
+    solvedBodyTactics.prepare(w, dt);
     this.social.beginStep(w);
     super.prepareStep(w, dt);
   }
 
   override step(w: World, dt: number) {
     this.social.endStep(w);
+    // Legacy AI has now proposed intent. Mediate only intent/commitment from
+    // solved body evidence; carrier/contact still decides achieved outcomes.
+    solvedBodyTactics.mediate(w, dt);
     this.rootAuthority.restoreBodyOwnedRoots(w);
 
     super.prepareBodyStep(w, dt);

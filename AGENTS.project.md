@@ -6,6 +6,8 @@ These instructions govern work on this repository in addition to `AGENTS.md`.
 
 For every substantive SUNDER development response, begin the technical reasoning from the canonical advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
 
+Classification follows the actual objective breadth, not the narrowest file or defect wording. When a requested slice materially spans three or more interacting gameplay/simulation capabilities, treat it as compound integration even if one deep mechanism supplies their shared truth.
+
 Do not use the skill as a pretext for sprawling verification, decorative equations, or math that does not materially improve the game. `debug-causal` still owns defect process when a defect is present; advanced-game-math governs the physical/mathematical mechanism chosen for the repair or upgrade.
 
 ## DEEP MECHANICAL LEVERAGE LAW
@@ -15,6 +17,12 @@ For every substantive mechanics/kinematics slice, search first for one deeper au
 Depth > breadth. Continue deeper only while the next dependency changes what the player can visibly cause, feel, control, or observe. Stop when another layer would buy only abstraction, code volume, mathematical ornament, or a tiny isolated effect. When naturally available, prefer one mechanism that improves three or more visible consequences over three independent fixes.
 
 For locomotion/fighting, lower-body support, foot placement, load transfer, COM control, momentum, inertia, traction, catch steps, and action-to-footwork continuity outrank upper-body polish. Upper-body behavior must remain cohesive, but it may not substitute for unresolved footwork or support mechanics.
+
+## COMPOUND INTEGRATION LAW
+
+A compound mechanics slice is complete only when at least three consequential system roles participate in one authoritative causal graph with a state-changing A → B → C path or feedback loop. Passive fan-out to camera, audio, particles, decals, or HUD does not by itself satisfy compound integration.
+
+Prefer the deepest shared mechanical truth that naturally feeds those systems; do not manufacture reader counts or parallel features to hit a quota. Focused/leaf work remains valid when the objective is genuinely narrow, but broad requests must not be silently collapsed into one isolated subsystem. Consequences must propagate through authoritative state and remain severable/testable at the named edges.
 
 ## ONE-BINARY-CHECK LAW
 
@@ -28,7 +36,7 @@ Substantive SUNDER repository changes are atomic Git transactions, not a sequenc
 
 ### Tool-availability precheck
 
-Before the first repository mutation in a turn, load and confirm the exact Git-data mutation functions needed for the transaction. For normal `ChatGPT-version` development the required mutation set is exactly:
+Before the first repository mutation in a turn, load and confirm the exact Git-data mutation functions needed for the transaction. For normal `Synth` development the required mutation set is exactly:
 
 - `GitHub.create_blob`
 - `GitHub.create_tree`
@@ -39,9 +47,9 @@ Do not begin writing until all four are actually available in the current tool s
 
 ### Mutation-call firewall
 
-For normal development on `ChatGPT-version`, the only permitted GitHub mutation calls are the four exact functions above. Before every mutation call, compare the fully-qualified tool name against that whitelist. If it is not an exact match, do not call it.
+For normal development on `Synth`, the only permitted GitHub mutation calls are the four exact functions above. Before every mutation call, compare the fully-qualified tool name against that whitelist. If it is not an exact match, do not call it.
 
-`GitHub.create_file`, `GitHub.update_file`, and `GitHub.delete_file` are prohibited on `ChatGPT-version` during normal development, including one-file changes. Do not use branch-creation, PR-mutation, issue-mutation, workflow-rerun, or other write actions as substitutes for Git-data promotion unless the user explicitly requested that separate operation.
+`GitHub.create_file`, `GitHub.update_file`, and `GitHub.delete_file` are prohibited on `Synth` during normal development, including one-file changes. Do not use branch-creation, PR-mutation, issue-mutation, workflow-rerun, or other write actions as substitutes for Git-data promotion unless the user explicitly requested that separate operation.
 
 Never choose a write tool merely because it is currently visible while the intended Git-data primitive is not. If the intended primitive is unavailable, stop before mutation, load it explicitly by name, then continue.
 
@@ -99,7 +107,7 @@ For every artifact-changing turn, end with a compact reality report that surface
 
 A fallback or reduced artifact must be identified **before** the user opens or evaluates it. Never call a reduced, synthetic, reconstructed, debug, benchmark, or stripped artifact simply a "preview" when that wording could imply the canonical game.
 
-Reserve **real preview / real build / playable current version** for an artifact produced from the current canonical `ChatGPT-version` product code and current world/content. A hosting/build wrapper may differ, but the game, world, assets, controls, simulation, and current modifications being evaluated must be the canonical ones. If that artifact cannot be produced, say so plainly rather than substituting a surrogate without disclosure.
+Reserve **real preview / real build / playable current version** for an artifact produced from the current canonical `Synth` product code and current world/content. A hosting/build wrapper may differ, but the game, world, assets, controls, simulation, and current modifications being evaluated must be the canonical ones. If that artifact cannot be produced, say so plainly rather than substituting a surrogate without disclosure.
 
 Never let a fallback artifact silently become a new baseline. Never use omitted/degraded systems in a fallback as evidence that the canonical game regressed. Never conceal failed work, partial work, unverified behavior, or a quality compromise merely to make a handoff appear complete.
 
