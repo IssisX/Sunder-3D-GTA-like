@@ -1,0 +1,73 @@
+name: Complete Sunder Showcase
+on:
+  push:
+    branches:
+      - ChatGPT-B-showcase
+permissions:
+  contents: write
+concurrency:
+  group: sunder-showcase-completion
+  cancel-in-progress: false
+jobs:
+  complete:
+    if: contains(github.event.head_commit.message, '[showcase-repair]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply exact source repair
+        run: node scripts/repair-showcase.mjs
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Typecheck complete source
+        run: npm run typecheck
+      - name: Run gameplay regression checks
+        run: node scripts/run-change-check.mjs
+      - name: Build complete standalone game
+        run: npm run build:local-preview
+      - name: Verify browser bundle
+        run: |
+          test -s local-preview-dist/index.html
+          test -s local-preview-dist/style.css
+          test -s local-preview-dist/sunder.js
+          test -s local-preview-dist/SUNDER.html
+      - name: Install browser
+        run: npx playwright install chromium
+      - name: Test actual game in Chromium
+        run: node scripts/showcase-browser-check.mjs
+      - name: Create unattached verified source commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/prepare-showcase-commit.mjs
+      - name: Package complete source from validated worktree
+        run: |
+          mkdir -p _deliverables/SUNDER-source
+          git archive HEAD | tar -x -C _deliverables/SUNDER-source
+          for f in src/game/body-render-core.ts src/game/body-appearance.ts src/game/soundscape.ts; do
+            cp "$f" "_deliverables/SUNDER-source/$f"
+          done
+          mkdir -p _deliverables/SUNDER-source/docs
+          cp docs/showcase-integration.md _deliverables/SUNDER-source/docs/showcase-integration.md
+          rm -f _deliverables/SUNDER-source/scripts/repair-showcase-core.mjs
+          rm -f _deliverables/SUNDER-source/scripts/repair-showcase.mjs
+          rm -f _deliverables/SUNDER-source/scripts/prepare-showcase-commit.mjs
+          rm -f _deliverables/SUNDER-source/.github/workflows/sunder-showcase-completion.yml
+          rm -f _deliverables/SUNDER-source/.github/workflows/sunder-source-comparison.yml
+          (cd _deliverables/SUNDER-source && zip -qr ../SUNDER-showcase-source.zip .)
+          rm -rf _deliverables/SUNDER-source
+          test -s _deliverables/SUNDER-showcase-source.zip
+      - name: Upload source, playable game, evidence, and commit
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUNDER-showcase-complete-${{ github.sha }}
+          path: |
+            _deliverables/
+            local-preview-dist/
+            showcase-screenshots/
+          if-no-files-found: error
+          retention-days: 14
