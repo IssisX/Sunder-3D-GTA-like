@@ -8,22 +8,20 @@ import {
   nodeEffectiveMass,
   reducedEffectiveMass,
 } from "./impact-mediation";
+import { socialIncidents } from "./social-incident";
 
 function clamp(v: number, lo: number, hi: number) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
 function strikingMass(a: Actor) {
-  return a.species === "bear"
-    ? clamp(a.mass * 0.16, 28, 48)
-    : clamp(a.mass * 0.18, 5, 9);
+  if (a.species === "bear") return clamp(a.mass * 0.16, 28, 48);
+  if (a.species === "cow") return clamp(a.mass * 0.12, 18, 34);
+  if (a.species === "wolf") return clamp(a.mass * 0.18, 5, 9);
+  return clamp(a.mass * 0.12, 4, 12);
 }
 
-/**
- * Consequence layer for a beast carrier that already intersected a real body.
- * Contact always transfers momentum. Injury exists only above the common
- * impact-energy/impulse threshold.
- */
+/** Consequence layer for a beast carrier that already intersected a real body. */
 export function applyBeastMeleeContact(
   w: World,
   atk: Actor,
@@ -58,8 +56,6 @@ export function applyBeastMeleeContact(
     0.04,
   );
 
-  // Momentum transfer exists even below the damage threshold. This is the
-  // physical bump; damage is a separate downstream decision.
   const victimDv = Math.min(5.5, impact.impulse / Math.max(8, vic.mass) * 1.35);
   vic.vx += nx * victimDv;
   vic.vy += ny * victimDv;
@@ -70,14 +66,7 @@ export function applyBeastMeleeContact(
   atk.vz -= nz * recoilDv;
 
   if (rig && node >= 0) {
-    impactDynamics.contactNode(
-      vic,
-      node,
-      nx * victimDv,
-      ny * victimDv,
-      nz * victimDv,
-      atk.species === "bear" ? 1.15 : 0.9,
-    );
+    impactDynamics.contactNode(vic, node, nx * victimDv, ny * victimDv, nz * victimDv, atk.species === "bear" ? 1.15 : 0.9);
   }
 
   if (impact.damaging) {
@@ -86,7 +75,8 @@ export function applyBeastMeleeContact(
     } else {
       const inj = vic.injuries[region];
       const severity = impact.damageScale;
-      inj.bruise += severity * (atk.species === "bear" ? 0.48 : 0.22);
+      const blunt = atk.species === "bear" ? 0.48 : atk.species === "cow" ? 0.38 : 0.22;
+      inj.bruise += severity * blunt;
       vic.pain = clamp(vic.pain + severity * 0.16, 0, 1);
       vic.balance = clamp(vic.balance - severity * 0.32, 0, 1);
       if (impact.kineticEnergy > 80 || impact.impulse > 38) {
@@ -103,10 +93,10 @@ export function applyBeastMeleeContact(
     }
   }
 
-  // Awareness follows real spatial contact, not attack intent.
   vic.lastHitBy = atk.id;
   vic.lastHitT = w.time;
   vic.alert = 1;
   if (vic.kind !== "player" && !vic.known.includes(atk.id)) vic.known.push(atk.id);
+  socialIncidents.reportAggression(w, atk, vic, "beast", impact.damageScale);
   return impact.damaging;
 }

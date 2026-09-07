@@ -3,18 +3,14 @@ import type { World } from "./world";
 
 const ENTITY_ID_CAP = 8192;
 
+export const EDGES = {
+  preserveRecoveryState: true,
+};
+
 function human(a: Actor) {
   return a.kind === "player" || a.species === "human";
 }
 
-/**
- * Returns true when the articulated body, not the legacy Actor capsule, owns
- * translational authority for the humanoid this step.
- *
- * Swim/climb/vault remain on the old transport path until they receive their
- * own complete physical vertical slices. Everything else - standing, walking,
- * combat, stumble, ragdoll, down and get-up - is projected from the solved body.
- */
 function bodyOwnsRoot(a: Actor) {
   return (
     human(a) &&
@@ -24,27 +20,32 @@ function bodyOwnsRoot(a: Actor) {
   );
 }
 
+function supersedesRecovery(a: Actor) {
+  return (
+    a.loco === "ragdoll" ||
+    a.loco === "down" ||
+    a.loco === "getup" ||
+    a.loco === "swim" ||
+    a.loco === "climb" ||
+    a.loco === "vault"
+  );
+}
+
 /**
- * Compatibility firewall between the old Actor capsule transport and the new
+ * Compatibility firewall between legacy Actor transport/classification and the
  * articulated body authority.
  *
- * stepWorld still runs for AI, world interaction, legacy special movement and
- * broad compatibility. For body-owned humanoids its temporary capsule
- * translation is discarded before task generation. The body then advances from
- * support reaction + active control + contacts and derives Actor root afterward.
- *
- * Player facing is also preserved when the movement stick is neutral. The
- * legacy player path tries to rotate an idle player back toward camera-forward;
- * that is a presentation convenience, not mechanical truth. Movement may turn
- * the body while input is active, but releasing the stick keeps the last heading.
- *
- * This is intentionally zero-GC in the fixed-step hot path.
+ * A body-earned stumble is preserved across stepWorld's speed-based locomotion
+ * relabel so recovery footwork can actually run. Genuine higher-order states
+ * still supersede stumble immediately. Translation/facing ownership remains the
+ * same as before.
  */
 export class HumanRootAuthority {
   private readonly x = new Float32Array(ENTITY_ID_CAP);
   private readonly y = new Float32Array(ENTITY_ID_CAP);
   private readonly z = new Float32Array(ENTITY_ID_CAP);
   private readonly yaw = new Float64Array(ENTITY_ID_CAP);
+  private readonly stumble = new Uint8Array(ENTITY_ID_CAP);
   private readonly valid = new Uint8Array(ENTITY_ID_CAP);
 
   capture(w: World) {
@@ -55,6 +56,7 @@ export class HumanRootAuthority {
       this.y[a.id] = a.y;
       this.z[a.id] = a.z;
       this.yaw[a.id] = a.yaw;
+      this.stumble[a.id] = a.loco === "stumble" ? 1 : 0;
       this.valid[a.id] = 1;
     }
   }
@@ -63,20 +65,27 @@ export class HumanRootAuthority {
     for (let i = 0; i < w.actors.length; i++) {
       const a = w.actors[i]!;
       if (
-        !bodyOwnsRoot(a) ||
+        !human(a) ||
         a.id < 0 ||
         a.id >= ENTITY_ID_CAP ||
         this.valid[a.id] === 0
       ) {
         continue;
       }
+
+      if (
+        EDGES.preserveRecoveryState &&
+        this.stumble[a.id] !== 0 &&
+        !supersedesRecovery(a)
+      ) {
+        a.loco = "stumble";
+      }
+
+      if (!bodyOwnsRoot(a)) continue;
       a.x = this.x[a.id]!;
       a.y = this.y[a.id]!;
       a.z = this.z[a.id]!;
 
-      // Do not let neutral input rotate the player back toward camera-forward.
-      // While moving, applyPlayer may still turn toward the chosen movement
-      // direction; once movement ends, that final heading persists.
       if (a.kind === "player" && a.intendSpeed < 0.1) {
         a.yaw = this.yaw[a.id]!;
       }
@@ -89,11 +98,12 @@ export class HumanRootAuthority {
     this.y[a.id] = a.y;
     this.z[a.id] = a.z;
     this.yaw[a.id] = a.yaw;
+    this.stumble[a.id] = a.loco === "stumble" ? 1 : 0;
     this.valid[a.id] = 1;
   }
 
   clear() {
+    this.stumble.fill(0);
     this.valid.fill(0);
   }
 }
-

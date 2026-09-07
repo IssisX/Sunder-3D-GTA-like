@@ -9,6 +9,7 @@ import {
   reducedEffectiveMass,
 } from "./impact-mediation";
 import { representativeNode } from "./body-model";
+import { socialIncidents } from "./social-incident";
 
 const KICK_BLUNT = 1.15;
 const KICK_MASS = 3.2;
@@ -28,7 +29,6 @@ function registerWitnesses(w: World, atk: Actor, vic: Actor) {
   for (let i = 0; i < w.actors.length; i++) {
     const o = w.actors[i]!;
     if (!o.alive || o.id === atk.id || o.kind === "player" || o.species !== "human") continue;
-
     if (o.id === vic.id) {
       addKnown(o, atk.id);
       o.alert = 1;
@@ -39,27 +39,20 @@ function registerWitnesses(w: World, atk: Actor, vic: Actor) {
       w.addMemory(o, "threat", atk.x, atk.z, atk.id, 1);
       continue;
     }
-
     const dx = atk.x - o.x;
     const dz = atk.z - o.z;
     const d2 = dx * dx + dz * dz;
     if (d2 > 15 * 15) continue;
     const d = Math.sqrt(d2) || 1;
     if (!canSeeThrough(w, o.x, o.z, atk.x, atk.z) && d > 4) continue;
-
     const fx = -Math.sin(o.yaw);
     const fz = -Math.cos(o.yaw);
-    const dot = (dx * fx + dz * fz) / d;
-    if (d > 5.5 && dot < -0.05) continue;
-
+    if (d > 5.5 && (dx * fx + dz * fz) / d < -0.05) continue;
     const certainty = clamp(1 - d / 18, 0.35, 0.92);
     w.addMemory(o, "threat", atk.x, atk.z, atk.id, certainty);
     o.alert = Math.max(o.alert, 0.75);
-
     if (o.faction === "guard") {
-      // A witness reports a local incident; only the victim has direct
-      // evidence to start a fight. Nearby guards investigate instead of
-      // inheriting a permanent hostile target as a radio broadcast.
+      // Witness evidence permits investigation, not automatic combat.
       o.alert = Math.max(o.alert, 0.6);
     } else {
       o.fear = Math.min(1, o.fear + 0.18 * (1 - o.courage));
@@ -90,22 +83,18 @@ export function applyActorMeleeContact(
   dirZ: number,
 ) {
   if (!atk.alive || !vic.alive || atk.id === vic.id) return;
-
   const stats = WEAPON_STATS[atk.weapon];
   const blunt = kind === "kick" ? KICK_BLUNT : stats.blunt;
   const mass = strikingMass(atk, kind);
   const cut = kind === "kick" ? 0 : stats.cut;
   const pierce = kind === "kick" ? 0 : stats.pierce;
   const fire = kind === "kick" ? 0 : stats.fire;
-
   const [nx, ny, nz] = normalizeDirection(atk, dirX, dirY, dirZ);
   const rel = atk.mass / Math.max(1, atk.mass + vic.mass);
   const contactSpeed = clamp(speed, 0, 14);
   const targetMass = nodeEffectiveMass(vic, representativeNode(region));
   const contactImpact = assessImpact(
-    reducedEffectiveMass(mass, targetMass),
-    contactSpeed,
-    0.05,
+    reducedEffectiveMass(mass, targetMass), contactSpeed, 0.05,
   );
   const force =
     (0.52 + contactSpeed * 0.13) *
@@ -115,22 +104,14 @@ export function applyActorMeleeContact(
   const bodyDv = impulse * rel;
 
   impactDynamics.contactRegion(
-    vic,
-    region,
-    nx * bodyDv,
-    ny * bodyDv * 0.82,
-    nz * bodyDv,
+    vic, region, nx * bodyDv, ny * bodyDv * 0.82, nz * bodyDv,
     kind === "kick" ? 1.08 : 1,
   );
-
   const recoil = clamp((vic.mass / Math.max(1, atk.mass + vic.mass)) * 0.52, 0.16, 0.42);
   impactDynamics.contactRegion(
-    atk,
-    kind === "kick" ? "rleg" : "torso",
-    -nx * bodyDv * recoil,
-    -ny * bodyDv * recoil * 0.55,
-    -nz * bodyDv * recoil,
-    0.72,
+    atk, kind === "kick" ? "rleg" : "torso",
+    -nx * bodyDv * recoil, -ny * bodyDv * recoil * 0.55,
+    -nz * bodyDv * recoil, 0.72,
   );
 
   if (contactImpact.damaging) {
@@ -139,7 +120,6 @@ export function applyActorMeleeContact(
     inj.bruise += blunt * 0.2 * damageForce;
     inj.cut += cut * 0.28 * damageForce;
     inj.puncture += pierce * 0.27 * damageForce;
-
     if (kind === "kick" && (region === "lleg" || region === "rleg" || region === "torso")) {
       inj.sprain += 0.035 + damageForce * 0.025;
     }
@@ -152,14 +132,10 @@ export function applyActorMeleeContact(
     if (region === "head") {
       vic.consciousness = Math.max(0, vic.consciousness - damageForce * 0.11);
       inj.bruise += 0.12 * damageForce;
-      if (
-        blunt > 1 &&
-        (contactImpact.kineticEnergy > 90 || contactImpact.impulse > 42)
-      ) {
+      if (blunt > 1 && (contactImpact.kineticEnergy > 90 || contactImpact.impulse > 42)) {
         inj.fracture += 0.05 * damageForce;
       }
     }
-
     vic.pain = clamp(vic.pain + 0.13 * damageForce, 0, 1);
   }
 
@@ -167,12 +143,14 @@ export function applyActorMeleeContact(
   vic.lastHitT = w.time;
   vic.alert = 1;
   if (vic.kind !== "player") addKnown(vic, atk.id);
-
   if (atk.kind === "player") {
     if (vic.faction === "guard") w.wanted = Math.min(1, w.wanted + 0.22);
     else if (vic.faction === "civilian") w.wanted = Math.min(1, w.wanted + 0.12);
-    registerWitnesses(w, atk, vic);
   }
+
+  // One contact supplies both local evidence and the incident's social roles.
+  registerWitnesses(w, atk, vic);
+  socialIncidents.reportAggression(w, atk, vic, kind, contactImpact.damageScale);
 
   if (contactImpact.damaging) {
     const damageForce = force * contactImpact.damageScale;
@@ -187,13 +165,8 @@ export function applyActorMeleeContact(
 }
 
 export function applyPropMeleeContact(
-  w: World,
-  atk: Actor,
-  p: Prop,
-  kind: "strike" | "kick",
-  speed: number,
-  dirX: number,
-  dirZ: number,
+  w: World, atk: Actor, p: Prop, kind: "strike" | "kick",
+  speed: number, dirX: number, dirZ: number,
 ) {
   if (p.collapsed || p.heldBy) return;
   const stats = WEAPON_STATS[atk.weapon];
@@ -201,31 +174,23 @@ export function applyPropMeleeContact(
   const mass = strikingMass(atk, kind);
   const contactSpeed = clamp(speed, 0, 14);
   const contactImpact = assessImpact(
-    reducedEffectiveMass(mass, Math.max(0.5, p.mass)),
-    contactSpeed,
-    0.05,
+    reducedEffectiveMass(mass, Math.max(0.5, p.mass)), contactSpeed, 0.05,
   );
   const dmg = contactImpact.damaging
     ? (4.5 + contactSpeed * 1.2) *
       (0.7 + blunt * 0.55 + mass * 0.12) *
       contactImpact.damageScale
     : 0;
-
   p.hp -= dmg;
   p.vx += dirX * (1.4 + contactSpeed * 0.12);
   p.vz += dirZ * (1.4 + contactSpeed * 0.12);
-
   const rigidity = clamp(p.mass / Math.max(1, p.mass + atk.mass), 0.08, 0.78);
   const recoil = Math.min(3.2, (0.7 + contactSpeed * 0.18) * rigidity);
   impactDynamics.contactRegion(
-    atk,
-    kind === "kick" ? "rleg" : "torso",
-    -dirX * recoil,
-    kind === "kick" ? 0.22 * recoil : 0.08 * recoil,
-    -dirZ * recoil,
-    0.9,
+    atk, kind === "kick" ? "rleg" : "torso",
+    -dirX * recoil, kind === "kick" ? 0.22 * recoil : 0.08 * recoil,
+    -dirZ * recoil, 0.9,
   );
-
   if (contactImpact.damaging && p.kind === "lamp" && dmg > 6 && p.oil) {
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
@@ -239,7 +204,6 @@ export function applyPropMeleeContact(
     w.heat[i] = Math.min(2.5, w.heat[i]! + 0.7);
     w.emitSound(p.x, p.z, 0.5, "break", atk.id);
   }
-
   if (contactImpact.damaging && p.hp <= 0) {
     p.hp = 0;
     p.collapsed = true;
