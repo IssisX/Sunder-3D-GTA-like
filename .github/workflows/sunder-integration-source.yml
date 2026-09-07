@@ -1,4 +1,4 @@
-name: Integration source snapshot
+name: Integration source comparison
 on:
   push:
     branches:
@@ -10,11 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Archive exact source revision
-        run: git archive --format=tar.gz --output=SUNDER-source.tar.gz HEAD
+        with:
+          fetch-depth: 0
+      - name: Archive both parent implementations
+        run: |
+          git archive --format=tar.gz --output=SUNDER-B.tar.gz a9fa5690d5c8786d99e17eed315e1eef55f4e7f1
+          git archive --format=tar.gz --output=SUNDER-version.tar.gz aed29bbe85104be43c9d04f76de23554e3af6daa
       - uses: actions/upload-artifact@v4
         with:
-          name: SUNDER-source-${{ github.sha }}
-          path: SUNDER-source.tar.gz
+          name: SUNDER-parent-sources-${{ github.sha }}
+          path: |
+            SUNDER-B.tar.gz
+            SUNDER-version.tar.gz
           if-no-files-found: error
           retention-days: 1
