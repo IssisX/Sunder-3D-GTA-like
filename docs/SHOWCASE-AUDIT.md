@@ -1,3 +1,3 @@
 # Showcase integration audit
 
-Candidate source is assembled on ChatGPT-B-showcase. See SHOWCASE-INTEGRATION.md for the implemented presentation, audio, and mechanics seams and their verification requirements.
+The full source integration is prepared in commit 58010ac8a21dc958d774d300efb565c06aa9771a. The canonical ChatGPT-B branch remains unchanged until verification.
