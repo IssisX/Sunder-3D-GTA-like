@@ -13,21 +13,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact Synth commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source at this commit
+        run: git archive --format=zip --output="$RUNNER_TEMP/SUNDER-Synth-source-${GITHUB_SHA}.zip" HEAD
+      - name: Upload reproducible source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUNDER-Synth-source-${{ github.sha }}
+          path: ${{ runner.temp }}/SUNDER-Synth-source-${{ github.sha }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
   change-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Synth branch state
         uses: actions/checkout@v4
-
       - name: Use Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
-
       - name: Run one targeted binary check
         run: node scripts/run-change-check.mjs
 
@@ -41,29 +55,23 @@ jobs:
     steps:
       - name: Checkout Synth branch state
         uses: actions/checkout@v4
-
       - name: Use Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install project dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
-
       - name: Typecheck Synth source
         run: npm run typecheck
-
       - name: Build Synth browser preview from source
         run: npm run build:local-preview
-
       - name: Verify browser preview bundle
         run: |
           test -s local-preview-dist/index.html
           test -s local-preview-dist/style.css
           test -s local-preview-dist/sunder.js
           test -s local-preview-dist/SUNDER.html
-
       - name: Upload downloadable standalone fallback
         uses: actions/upload-artifact@v4
         with:
@@ -71,10 +79,8 @@ jobs:
           path: local-preview-dist/SUNDER.html
           if-no-files-found: error
           retention-days: 14
-
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-
       - name: Upload browser preview site
         uses: actions/upload-pages-artifact@v4
         with:

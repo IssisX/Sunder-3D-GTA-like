@@ -2,9 +2,13 @@
 
 These instructions govern work on this repository in addition to `AGENTS.md`.
 
+## INSTALLED SKILL AUTHORITY
+
+Use the already-installed native Advanced Game Math skill directly. It is the authoritative skill for this project. Do not search the ChatGPT Library, Google Drive, historical archives, skill packages, or other repositories to locate, recover, compare, or validate it. Do not invoke a missing-skill recovery workflow merely because a native skill is not exposed as a filesystem file or tool. Apply the installed skill's available guidance and the current project instructions. External skill-source research is permitted only when the user explicitly requests that research or a specific source is genuinely required for a separate task. Repository source inspection for actual game implementation is not skill lookup.
+
 ## ADVANCED GAME MATH FIRST LAW
 
-For every substantive SUNDER development response, begin the technical reasoning from the canonical advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
+For every substantive SUNDER development response, begin the technical reasoning from the installed advanced-game-math skill before selecting or implementing mechanisms. Use it to classify the change, identify the governing physical/mathematical substrate, expose the highest-value causal couplings, and prefer mechanisms whose mathematical consequences become visible in play.
 
 Classification follows the actual objective breadth, not the narrowest file or defect wording. When a requested slice materially spans three or more interacting gameplay/simulation capabilities, treat it as compound integration even if one deep mechanism supplies their shared truth.
 
@@ -120,6 +124,8 @@ If an action needs travel time, wind-up, charge, leverage, or preparation for ph
 ## PREVIEW FIDELITY CONTRACT
 
 After substantive gameplay changes, prefer a reproducible playable build from the canonical branch over bespoke demo shells. Preview infrastructure must import/use canonical game modules rather than copying, simplifying, or reimplementing the game. Any intentional wrapper difference must be surfaced in the handoff reality report.
+
+Every pushed Synth slice must expose a full playable build from that exact commit. Preserve a downloadable standalone and a reproducible source snapshot in the build artifacts. Do not substitute a reduced test scene for the complete game. Report build failures instead of linking an older build as the current slice.
 
 ## LAW OF COMPLETE MODULAR DELIVERY
 
